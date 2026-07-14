@@ -28,12 +28,14 @@ npm run dev
 - `ADMIN_TOKEN`：登入人工審核台及保護寫入 API。
 - `CRON_SECRET`：保護 `/api/cron/daily`。
 - `OPENAI_API_KEY`：啟用 AI 摘要、翻譯、事件合併與影響判斷。
-- `X_AUTH_TOKEN`：選用；X 的 `auth_token` cookie。未設定時 X Playwright 可能取得不到搜尋內容。
-- `ENABLE_BROWSER_COLLECTORS=true`：啟用 Playwright 蒐集器。
+- `X_AUTH_TOKEN`：選用；放在 GitHub Actions repository secret。未設定時 X Playwright 會安全跳過登入限定搜尋。
+- `ENABLE_BROWSER_COLLECTORS=true`：只供本機測試直接啟用 Playwright；Render 正式環境保持 `false`。
 
 ## 每日排程
 
-`.github/workflows/daily-brief.yml` 每天台北時間 07:00 觸發草稿產生。請把與 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret。
+`.github/workflows/daily-brief.yml` 每天台北時間 07:00 在 GitHub Actions 執行 Playwright，再把 Reddit/X 素材傳給 Render 產生草稿。請把與 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret；需要 X 登入搜尋時，再加入 `X_AUTH_TOKEN`。
+
+Playwright 不直接跑在 Render，避免免費方案的記憶體被 Chromium 耗盡而重啟服務。
 
 ## 部署注意
 
