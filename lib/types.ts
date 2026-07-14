@@ -5,7 +5,8 @@ export type Category =
   | "Crypto"
   | "ETF"
   | "Earnings"
-  | "Geopolitics";
+  | "Geopolitics"
+  | "Other";
 
 export type SourceType = "Official" | "News" | "Reddit" | "X";
 export type Sentiment = "positive" | "neutral" | "negative";
@@ -28,6 +29,9 @@ export interface Headline {
   impact: number;
   confidence: number;
   mentions: number;
+  rankingScore?: number;
+  freshnessScore?: number;
+  crossSourceCount?: number;
   sentiment: Sentiment;
   sources: SourceLink[];
 }
@@ -54,10 +58,15 @@ export interface WatchItem {
 }
 
 export interface DailyBrief {
+  id?: string;
   date: string;
   generatedAt: string;
   mode: "demo" | "live";
   aiEnabled: boolean;
+  status?: BriefStatus;
+  publishedAt?: string;
+  storageMode?: "postgres" | "memory";
+  collectorStatuses?: CollectorStatus[];
   warning?: string;
   stats: {
     candidates: number;
@@ -82,4 +91,26 @@ export interface RawStory {
   publishedAt: string;
   source: string;
   sourceType: SourceType;
+  engagement?: number;
+  collectedAt?: string;
+}
+
+export type BriefStatus = "draft" | "published";
+
+export interface BriefRecord {
+  id: string;
+  date: string;
+  status: BriefStatus;
+  brief: DailyBrief;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt?: string;
+  hasPdf: boolean;
+}
+
+export interface CollectorStatus {
+  name: string;
+  ok: boolean;
+  count: number;
+  note?: string;
 }

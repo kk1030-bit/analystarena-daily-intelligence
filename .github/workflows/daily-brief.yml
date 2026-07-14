@@ -1,0 +1,27 @@
+name: Generate daily intelligence draft
+
+on:
+  schedule:
+    # 07:00 Asia/Taipei (GitHub Actions cron uses UTC)
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: analystarena-daily-brief
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Trigger protected daily collector
+        run: |
+          test -n "$CRON_SECRET"
+          curl --fail-with-body --retry 2 --retry-delay 10 \
+            --request POST \
+            --header "Authorization: Bearer $CRON_SECRET" \
+            --header "Content-Type: application/json" \
+            https://analystarena-daily-intelligence.onrender.com/api/cron/daily

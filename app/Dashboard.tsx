@@ -34,6 +34,7 @@ const categoryLabels: Record<Category, string> = {
   ETF: "ETF",
   Earnings: "財報",
   Geopolitics: "地緣政治",
+  Other: "其他",
 };
 
 const sentimentLabels: Record<Sentiment, string> = {
@@ -101,6 +102,8 @@ function HeadlineCard({ headline }: { headline: Headline }) {
             <span><ImpactDots score={headline.impact} /> impact</span>
             <span><ShieldCheck size={13} /> {headline.confidence}% confidence</span>
             <span><MessageCircle size={13} /> {headline.mentions} mentions</span>
+            {headline.freshnessScore !== undefined && <span><Activity size={13} /> {headline.freshnessScore} freshness</span>}
+            {headline.crossSourceCount !== undefined && <span><Globe2 size={13} /> {headline.crossSourceCount} source layers</span>}
           </div>
         </footer>
       </div>
@@ -185,6 +188,10 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   }
 
   function exportPdf() {
+    if (brief.status === "published" && brief.id) {
+      window.open(`/api/briefs/${brief.id}/pdf`, "_blank", "noopener,noreferrer");
+      return;
+    }
     const previousTitle = document.title;
     document.title = `AnalystArena-Daily-${brief.date}`;
     window.print();
@@ -203,6 +210,8 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           <a href="#headlines"><Newspaper size={17} />市場頭條</a>
           <a href="#social"><MessageCircle size={17} />社群訊號</a>
           <a href="#watchlist"><CalendarDays size={17} />觀察清單</a>
+          <a href="/archive"><Search size={17} />歷史日報</a>
+          <a href="/review"><ShieldCheck size={17} />人工審核</a>
           <button type="button" onClick={exportPdf}><FileText size={17} />PDF 報告</button>
         </nav>
         <div className="sidebar-sources">
@@ -214,7 +223,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         <div className="system-card">
           <div><Activity size={15} /><span>Collector status</span><b>{brief.stats.sourcesOnline} online</b></div>
           <div><Bot size={15} /><span>Analysis engine</span><b>{brief.aiEnabled ? "AI" : "Rules"}</b></div>
-          <p><i /> 系統正常運作</p>
+          <p><i /> {brief.status === "published" ? "已發布版本" : "草稿／預覽版本"}</p>
         </div>
       </aside>
 
@@ -222,7 +231,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         <header className="topbar">
           <div className="breadcrumb"><span>INTELLIGENCE</span><b>/</b><strong>DAILY BRIEF</strong></div>
           <div className="topbar-actions">
-            <span className={`mode-badge mode-${brief.mode}`}>{brief.mode === "live" ? "LIVE DATA" : "DEMO MODE"}</span>
+            <span className={`mode-badge mode-${brief.mode}`}>{brief.status === "published" ? "PUBLISHED" : brief.mode === "live" ? "LIVE PREVIEW" : "DEMO MODE"}</span>
             <button className="secondary-button" type="button" onClick={exportPdf}><Download size={16} />匯出 PDF</button>
             <button className="primary-button" type="button" onClick={refreshBrief} disabled={isRefreshing}>
               <RefreshCw size={16} className={isRefreshing ? "is-spinning" : ""} />

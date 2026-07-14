@@ -15,3 +15,13 @@ services:
         value: gpt-5.6-luna
       - key: OPENAI_API_KEY
         sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: X_AUTH_TOKEN
+        sync: false
+      - key: ENABLE_BROWSER_COLLECTORS
+        value: "true"
