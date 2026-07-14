@@ -44,16 +44,17 @@ async function launchBrowser(): Promise<Browser> {
 
 async function collectReddit(page: Page): Promise<RawStory[]> {
   const stories: RawStory[] = [];
-  for (const community of redditCommunities) {
+  const isRender = Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID);
+  const communitiesForRun = isRender ? redditCommunities.slice(0, 1) : redditCommunities;
+  for (const community of communitiesForRun) {
     let rows: Array<{ title: string; url: string; comments: string; score: string; publishedAt: string }> = [];
-    const candidates = [
-      `https://www.reddit.com/r/${community}/hot/`,
-      `https://old.reddit.com/r/${community}/hot/`,
-    ];
+    const candidates = isRender
+      ? [`https://www.reddit.com/r/${community}/hot/`]
+      : [`https://www.reddit.com/r/${community}/hot/`, `https://old.reddit.com/r/${community}/hot/`];
     for (const candidate of candidates) {
       try {
-        await page.goto(candidate, { waitUntil: "commit", timeout: 10_000 });
-        await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
+        await page.goto(candidate, { waitUntil: "commit", timeout: isRender ? 7_000 : 10_000 });
+        await page.waitForLoadState("domcontentloaded", { timeout: isRender ? 2_000 : 5_000 }).catch(() => undefined);
         rows = await page.locator("body").evaluate((body) => {
           const modern = Array.from(body.querySelectorAll("shreddit-post")).slice(0, 8).map((node) => {
             const element = node as HTMLElement;
@@ -173,7 +174,12 @@ export async function collectBrowserStories(): Promise<{ stories: RawStory[]; st
     try {
       const reddit = await collectReddit(page);
       stories.push(...reddit);
-      statuses.push({ name: "Reddit Playwright", ok: reddit.length > 0, count: reddit.length });
+      statuses.push({
+        name: "Reddit Playwright",
+        ok: reddit.length > 0,
+        count: reddit.length,
+        note: reddit.length ? undefined : "瀏覽器來源未回傳內容，已由 Reddit RSS 備援接手",
+      });
     } catch (error) {
       statuses.push({ name: "Reddit Playwright", ok: false, count: 0, note: error instanceof Error ? error.message : "collector failed" });
     }
