@@ -45,20 +45,48 @@ async function launchBrowser(): Promise<Browser> {
 async function collectReddit(page: Page): Promise<RawStory[]> {
   const stories: RawStory[] = [];
   for (const community of redditCommunities) {
-    await page.goto(`https://old.reddit.com/r/${community}/hot/`, { waitUntil: "domcontentloaded", timeout: 20_000 });
-    const rows = await page.locator(".thing.link").evaluateAll((nodes) => nodes.slice(0, 8).map((node) => {
-      const title = node.querySelector<HTMLAnchorElement>("a.title");
-      const comments = node.querySelector<HTMLAnchorElement>("a.comments");
-      const score = node.querySelector<HTMLElement>(".score.unvoted");
-      const time = node.querySelector<HTMLTimeElement>("time");
-      return {
-        title: title?.textContent?.trim() ?? "",
-        url: title?.href ?? "",
-        comments: comments?.textContent ?? "",
-        score: score?.getAttribute("title") ?? score?.textContent ?? "",
-        publishedAt: time?.dateTime ?? "",
-      };
-    }));
+    let rows: Array<{ title: string; url: string; comments: string; score: string; publishedAt: string }> = [];
+    const candidates = [
+      `https://www.reddit.com/r/${community}/hot/`,
+      `https://old.reddit.com/r/${community}/hot/`,
+    ];
+    for (const candidate of candidates) {
+      try {
+        await page.goto(candidate, { waitUntil: "commit", timeout: 10_000 });
+        await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
+        rows = await page.locator("body").evaluate((body) => {
+          const modern = Array.from(body.querySelectorAll("shreddit-post")).slice(0, 8).map((node) => {
+            const element = node as HTMLElement;
+            const title = element.getAttribute("post-title") ?? element.querySelector("h3")?.textContent?.trim() ?? "";
+            const href = element.getAttribute("content-href") ?? element.querySelector<HTMLAnchorElement>("a[slot='full-post-link']")?.href ?? "";
+            return {
+              title,
+              url: href.startsWith("http") ? href : `${location.origin}${href}`,
+              comments: element.getAttribute("comment-count") ?? "",
+              score: element.getAttribute("score") ?? "",
+              publishedAt: element.getAttribute("created-timestamp") ?? "",
+            };
+          });
+          if (modern.length) return modern;
+          return Array.from(body.querySelectorAll(".thing.link")).slice(0, 8).map((node) => {
+            const title = node.querySelector<HTMLAnchorElement>("a.title");
+            const comments = node.querySelector<HTMLAnchorElement>("a.comments");
+            const score = node.querySelector<HTMLElement>(".score.unvoted");
+            const time = node.querySelector<HTMLTimeElement>("time");
+            return {
+              title: title?.textContent?.trim() ?? "",
+              url: title?.href ?? "",
+              comments: comments?.textContent ?? "",
+              score: score?.getAttribute("title") ?? score?.textContent ?? "",
+              publishedAt: time?.dateTime ?? "",
+            };
+          });
+        });
+        if (rows.length) break;
+      } catch {
+        // Try the alternate Reddit surface before giving up on this community.
+      }
+    }
 
     for (const row of rows) {
       if (!row.title || !row.url) continue;
@@ -80,24 +108,24 @@ async function collectReddit(page: Page): Promise<RawStory[]> {
 }
 
 async function collectX(page: Page): Promise<RawStory[]> {
-  if (process.env.X_AUTH_TOKEN) {
-    await page.context().addCookies([{
-      name: "auth_token",
-      value: process.env.X_AUTH_TOKEN,
-      domain: ".x.com",
-      path: "/",
-      secure: true,
-      httpOnly: true,
-      sameSite: "Lax",
-    }]);
-  }
+  if (!process.env.X_AUTH_TOKEN) return [];
+  await page.context().addCookies([{
+    name: "auth_token",
+    value: process.env.X_AUTH_TOKEN,
+    domain: ".x.com",
+    path: "/",
+    secure: true,
+    httpOnly: true,
+    sameSite: "Lax",
+  }]);
 
   const stories: RawStory[] = [];
   for (const query of xQueries) {
-    const url = `https://x.com/search?q=${encodeURIComponent(`${query} lang:en -is:reply`)}&src=typed_query&f=live`;
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25_000 });
-    await page.locator("article[data-testid='tweet']").first().waitFor({ state: "visible", timeout: 8_000 }).catch(() => undefined);
-    const tweets = await page.locator("article[data-testid='tweet']").evaluateAll((nodes) => nodes.slice(0, 5).map((node) => {
+    try {
+      const url = `https://x.com/search?q=${encodeURIComponent(`${query} lang:en -is:reply`)}&src=typed_query&f=live`;
+      await page.goto(url, { waitUntil: "commit", timeout: 12_000 });
+      await page.locator("article[data-testid='tweet']").first().waitFor({ state: "visible", timeout: 8_000 }).catch(() => undefined);
+      const tweets = await page.locator("article[data-testid='tweet']").evaluateAll((nodes) => nodes.slice(0, 5).map((node) => {
       const text = node.querySelector<HTMLElement>("[data-testid='tweetText']")?.innerText?.trim() ?? "";
       const time = node.querySelector<HTMLTimeElement>("time");
       const link = time?.closest<HTMLAnchorElement>("a")?.href ?? "";
@@ -105,21 +133,24 @@ async function collectX(page: Page): Promise<RawStory[]> {
         .map((element) => element.getAttribute("aria-label") ?? element.textContent ?? "")
         .join(" ");
       return { text, link, publishedAt: time?.dateTime ?? "", metricText };
-    }));
+      }));
 
-    for (const tweet of tweets) {
-      if (!tweet.text || !tweet.link) continue;
-      stories.push({
-        id: idFor(`x:${tweet.link}`),
-        title: tweet.text.slice(0, 180),
-        description: `X 即時搜尋「${query}」所擷取的公開貼文。`,
-        url: tweet.link,
-        publishedAt: tweet.publishedAt || new Date().toISOString(),
-        source: `X · ${query}`,
-        sourceType: "X",
-        engagement: numberFromLabel(tweet.metricText),
-        collectedAt: new Date().toISOString(),
-      });
+      for (const tweet of tweets) {
+        if (!tweet.text || !tweet.link) continue;
+        stories.push({
+          id: idFor(`x:${tweet.link}`),
+          title: tweet.text.slice(0, 180),
+          description: `X 即時搜尋「${query}」所擷取的公開貼文。`,
+          url: tweet.link,
+          publishedAt: tweet.publishedAt || new Date().toISOString(),
+          source: `X · ${query}`,
+          sourceType: "X",
+          engagement: numberFromLabel(tweet.metricText),
+          collectedAt: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // Continue with remaining tracked queries when an individual search is blocked.
     }
   }
   return stories;
@@ -154,7 +185,7 @@ export async function collectBrowserStories(): Promise<{ stories: RawStory[]; st
         name: "X Playwright",
         ok: x.length > 0,
         count: x.length,
-        note: !process.env.X_AUTH_TOKEN ? "未設定 X_AUTH_TOKEN，公開搜尋可能受限" : undefined,
+        note: !process.env.X_AUTH_TOKEN ? "未設定 X_AUTH_TOKEN，已跳過登入限定搜尋" : x.length ? undefined : "X 搜尋未回傳可用貼文",
       });
     } catch (error) {
       statuses.push({ name: "X Playwright", ok: false, count: 0, note: error instanceof Error ? error.message : "collector failed" });
