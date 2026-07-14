@@ -14,6 +14,7 @@ import {
   FileText,
   Globe2,
   LayoutDashboard,
+  ListChecks,
   MessageCircle,
   Newspaper,
   Radar,
@@ -84,6 +85,10 @@ function HeadlineCard({ headline }: { headline: Headline }) {
         </div>
         <h3>{headline.title}</h3>
         <p className="headline-summary">{headline.summary}</p>
+        {headline.keyPoints?.length ? <div className="key-facts">
+          <div><ListChecks size={16} /><span>重要資訊</span></div>
+          <ul>{headline.keyPoints.map((point, index) => <li key={`${headline.id}-fact-${index}`}>{point}</li>)}</ul>
+        </div> : null}
         <div className="impact-note">
           <span>MARKET IMPACT</span>
           <p>{headline.marketImpact}</p>
@@ -99,11 +104,11 @@ function HeadlineCard({ headline }: { headline: Headline }) {
             ))}
           </div>
           <div className="score-list">
-            <span><ImpactDots score={headline.impact} /> impact</span>
-            <span><ShieldCheck size={13} /> {headline.confidence}% confidence</span>
-            <span><MessageCircle size={13} /> {headline.mentions} mentions</span>
-            {headline.freshnessScore !== undefined && <span><Activity size={13} /> {headline.freshnessScore} freshness</span>}
-            {headline.crossSourceCount !== undefined && <span><Globe2 size={13} /> {headline.crossSourceCount} source layers</span>}
+            <span><ImpactDots score={headline.impact} /> 影響 {headline.impact}/5</span>
+            <span><ShieldCheck size={13} /> 信心 {headline.confidence}%</span>
+            <span><MessageCircle size={13} /> 討論 {headline.mentions}</span>
+            {headline.freshnessScore !== undefined && <span><Activity size={13} /> 時效 {headline.freshnessScore}</span>}
+            {headline.crossSourceCount !== undefined && <span><Globe2 size={13} /> {headline.crossSourceCount} 種來源</span>}
           </div>
         </footer>
       </div>
@@ -141,6 +146,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   const [brief, setBrief] = useState(initialBrief);
   const [activeCategory, setActiveCategory] = useState<Category | "All">("All");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const categories = useMemo(() => {
@@ -187,15 +193,31 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
     }
   }
 
-  function exportPdf() {
+  async function exportPdf() {
     if (brief.status === "published" && brief.id) {
       window.open(`/api/briefs/${brief.id}/pdf`, "_blank", "noopener,noreferrer");
       return;
     }
-    const previousTitle = document.title;
-    document.title = `AnalystArena-Daily-${brief.date}`;
-    window.print();
-    window.setTimeout(() => { document.title = previousTitle; }, 500);
+    setIsExporting(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/brief/pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brief }),
+      });
+      if (!response.ok) throw new Error("PDF 產生失敗");
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `AnalystArena-Top5-${brief.date}.pdf`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch {
+      setNotice("目前無法產生 PDF，請稍後再試。");
+    } finally {
+      setIsExporting(false);
+    }
   }
 
   return (
@@ -212,7 +234,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           <a href="#watchlist"><CalendarDays size={17} />觀察清單</a>
           <a href="/archive"><Search size={17} />歷史日報</a>
           <a href="/review"><ShieldCheck size={17} />人工審核</a>
-          <button type="button" onClick={exportPdf}><FileText size={17} />PDF 報告</button>
+          <button type="button" onClick={() => void exportPdf()}><FileText size={17} />PDF 報告</button>
         </nav>
         <div className="sidebar-sources">
           <span>SOURCE LAYERS</span>
@@ -232,7 +254,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           <div className="breadcrumb"><span>INTELLIGENCE</span><b>/</b><strong>DAILY BRIEF</strong></div>
           <div className="topbar-actions">
             <span className={`mode-badge mode-${brief.mode}`}>{brief.status === "published" ? "PUBLISHED" : brief.mode === "live" ? "LIVE PREVIEW" : "DEMO MODE"}</span>
-            <button className="secondary-button" type="button" onClick={exportPdf}><Download size={16} />匯出 PDF</button>
+            <button className="secondary-button" type="button" onClick={() => void exportPdf()} disabled={isExporting}><Download size={16} />{isExporting ? "製作中…" : "前五大 PDF"}</button>
             <button className="primary-button" type="button" onClick={refreshBrief} disabled={isRefreshing}>
               <RefreshCw size={16} className={isRefreshing ? "is-spinning" : ""} />
               {isRefreshing ? "分析中..." : "立即更新"}

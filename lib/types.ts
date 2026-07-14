@@ -24,6 +24,7 @@ export interface Headline {
   ticker: string;
   title: string;
   summary: string;
+  keyPoints?: string[];
   marketImpact: string;
   category: Category;
   impact: number;

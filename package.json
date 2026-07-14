@@ -13,7 +13,6 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
-    "@fontsource/noto-sans-tc": "^5.2.9",
     "@sparticuz/chromium": "^149.0.0",
     "fast-xml-parser": "^5.10.0",
     "lucide-react": "^1.24.0",
