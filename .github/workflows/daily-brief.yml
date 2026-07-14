@@ -13,15 +13,16 @@ concurrency:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     env:
       CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
     steps:
-      - name: Trigger protected daily collector
-        run: |
-          test -n "$CRON_SECRET"
-          curl --fail-with-body --retry 2 --retry-delay 10 \
-            --request POST \
-            --header "Authorization: Bearer $CRON_SECRET" \
-            --header "Content-Type: application/json" \
-            https://analystarena-daily-intelligence.onrender.com/api/cron/daily
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - name: Collect Reddit/X with Playwright and create draft
+        run: npx tsx scripts/run-daily.ts

@@ -22,6 +22,8 @@ interface FeedDefinition {
 export interface BuildBriefOptions {
   useAi?: boolean;
   useBrowserCollectors?: boolean;
+  seedStories?: RawStory[];
+  seedCollectorStatuses?: CollectorStatus[];
 }
 
 const feeds: FeedDefinition[] = [
@@ -439,12 +441,13 @@ export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}):
     return { name: feed.name, ok: result.status === "fulfilled", count: result.status === "fulfilled" ? result.value.length : 0 };
   });
 
-  let browserStories: RawStory[] = [];
+  let browserStories: RawStory[] = normalized.seedStories ?? [];
+  if (normalized.seedCollectorStatuses?.length) collectorStatuses.push(...normalized.seedCollectorStatuses);
   if (useBrowserCollectors) {
     const browserResult = await collectBrowserStories();
-    browserStories = browserResult.stories;
+    browserStories = [...browserStories, ...browserResult.stories];
     collectorStatuses.push(...browserResult.statuses);
-  } else {
+  } else if (!normalized.seedStories?.length) {
     collectorStatuses.push({ name: "Playwright", ok: false, count: 0, note: "ENABLE_BROWSER_COLLECTORS 未啟用" });
   }
 

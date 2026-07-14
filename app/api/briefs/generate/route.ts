@@ -14,7 +14,7 @@ export async function POST(request: Request) {
     const body = (await request.json().catch(() => ({}))) as { useAi?: boolean; useBrowserCollectors?: boolean };
     const brief = await buildLiveBrief({
       useAi: body.useAi !== false,
-      useBrowserCollectors: body.useBrowserCollectors !== false,
+      useBrowserCollectors: process.env.NODE_ENV !== "production" && body.useBrowserCollectors !== false,
     });
     const record = await saveDraft({ ...brief, status: "draft", storageMode: storageMode() });
     return NextResponse.json(record, { status: 201 });
