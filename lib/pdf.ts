@@ -16,6 +16,7 @@ const colors = {
 function pdfText(value: string, limit = 2_000): string {
   return String(value ?? "")
     .slice(0, limit)
+    .replace(/[\u00AD\u200B-\u200D\u2060\uFEFF]/g, "")
     .replace(/[‐‑‒–—―]/g, "-")
     .replace(/…/g, "...")
     .replace(/[，、]/g, ", ")

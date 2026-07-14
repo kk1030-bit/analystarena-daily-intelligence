@@ -90,7 +90,7 @@ function textValue(value: unknown): string {
 }
 
 function stripHtml(value: string): string {
-  return value.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim().slice(0, 900);
+  return value.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/[\u00AD\u200B-\u200D\u2060\uFEFF]/g, "").replace(/\s+/g, " ").trim().slice(0, 900);
 }
 
 function atomLink(entry: Record<string, unknown>): string {
