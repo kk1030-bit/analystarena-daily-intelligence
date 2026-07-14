@@ -44,7 +44,7 @@ async function launchBrowser(): Promise<Browser> {
 
 async function collectReddit(page: Page): Promise<RawStory[]> {
   const stories: RawStory[] = [];
-  const isRender = Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID);
+  const isRender = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID);
   const communitiesForRun = isRender ? redditCommunities.slice(0, 1) : redditCommunities;
   for (const community of communitiesForRun) {
     let rows: Array<{ title: string; url: string; comments: string; score: string; publishedAt: string }> = [];
