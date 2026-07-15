@@ -22,3 +22,15 @@ export function isCronRequest(request: Request): boolean {
   const authorization = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
   return safeEqual(authorization, process.env.CRON_SECRET);
 }
+
+export function redditSearchConfigured(): boolean {
+  return Boolean(process.env.REDDIT_SEARCH_API_TOKEN);
+}
+
+export function isRedditSearchRequest(request: Request): boolean {
+  if (!process.env.REDDIT_SEARCH_API_TOKEN) return false;
+  const authorization = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  const apiKey = request.headers.get("x-api-key") ?? "";
+  return safeEqual(authorization, process.env.REDDIT_SEARCH_API_TOKEN)
+    || safeEqual(apiKey, process.env.REDDIT_SEARCH_API_TOKEN);
+}

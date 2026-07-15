@@ -109,6 +109,38 @@ export interface RawStory {
   timestampKind?: TimestampKind;
 }
 
+export interface RedditPost {
+  id: string;
+  subreddit: string;
+  title: string;
+  description: string;
+  url: string;
+  source: string;
+  engagement: number;
+  publishedAt: string;
+  collectedAt: string;
+  timestampKind: TimestampKind;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RedditSearchOptions {
+  q?: string;
+  subreddit?: string;
+  from?: string;
+  to?: string;
+  limit: number;
+  cursor?: {
+    publishedAt: string;
+    id: string;
+  };
+}
+
+export interface RedditSearchResult {
+  items: RedditPost[];
+  nextCursor?: string;
+}
+
 export type BriefStatus = "draft" | "published";
 
 export interface BriefRecord {

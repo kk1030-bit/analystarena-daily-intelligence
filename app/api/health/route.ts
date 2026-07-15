@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { adminConfigured } from "@/lib/auth";
+import { adminConfigured, redditSearchConfigured } from "@/lib/auth";
 import { databaseHealth } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +15,7 @@ export async function GET() {
     translationEnabled: true,
     translationLanguage: "zh-CN",
     adminConfigured: adminConfigured(),
+    redditSearchApiConfigured: redditSearchConfigured(),
     browserCollectorsEnabled:
       browserCollectorMode === "github-actions" || process.env.ENABLE_BROWSER_COLLECTORS === "true",
     browserCollectorMode,

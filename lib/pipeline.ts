@@ -1,6 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import OpenAI from "openai";
 import { collectBrowserStories } from "./collectors/browser";
+import { saveRedditStories } from "./db";
 import { localizeBriefContent } from "./translation";
 import { categoryDisplayNames } from "./terms";
 import { formatTimestampLine } from "./time";
@@ -515,7 +516,9 @@ export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}):
     collectorStatuses.push({ name: "Playwright", ok: false, count: 0, note: "ENABLE_BROWSER_COLLECTORS 未启用" });
   }
 
-  const stories = deduplicateStories([...browserStories, ...feedStories]);
+  const collectedStories = [...browserStories, ...feedStories];
+  await saveRedditStories(collectedStories.filter((story) => story.sourceType === "Reddit"));
+  const stories = deduplicateStories(collectedStories);
   if (stories.length < 5) throw new Error("可用来源不足，无法生成可靠日报");
   const groups = clusterStories(stories);
   const deterministicCandidates = groups.map(headlineFromGroup).sort((a, b) => (b.rankingScore ?? 0) - (a.rankingScore ?? 0));
