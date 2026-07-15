@@ -18,6 +18,11 @@ export interface SourceLink {
   publishedAt?: string;
 }
 
+export interface TermNote {
+  term: string;
+  note: string;
+}
+
 export interface Headline {
   id: string;
   rank: number;
@@ -25,6 +30,7 @@ export interface Headline {
   title: string;
   summary: string;
   keyPoints?: string[];
+  termNotes?: TermNote[];
   marketImpact: string;
   category: Category;
   impact: number;
@@ -64,6 +70,7 @@ export interface DailyBrief {
   generatedAt: string;
   mode: "demo" | "live";
   aiEnabled: boolean;
+  translationEnabled?: boolean;
   status?: BriefStatus;
   publishedAt?: string;
   storageMode?: "postgres" | "memory";

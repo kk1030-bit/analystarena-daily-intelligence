@@ -26,17 +26,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Category, DailyBrief, Headline, Sentiment, SourceType } from "@/lib/types";
-
-const categoryLabels: Record<Category, string> = {
-  Macro: "總體經濟",
-  AI: "AI",
-  Semiconductor: "半導體",
-  Crypto: "加密資產",
-  ETF: "ETF",
-  Earnings: "財報",
-  Geopolitics: "地緣政治",
-  Other: "其他",
-};
+import { categoryDisplayNames as categoryLabels, extractTermNotes, sourceDisplayName } from "@/lib/terms";
 
 const sentimentLabels: Record<Sentiment, string> = {
   positive: "偏多",
@@ -46,14 +36,14 @@ const sentimentLabels: Record<Sentiment, string> = {
 
 const sourceLabels: Record<SourceType, string> = {
   Official: "官方",
-  News: "新聞",
+  News: "新闻",
   Reddit: "Reddit",
   X: "X",
 };
 
 function ImpactDots({ score }: { score: number }) {
   return (
-    <span className="impact-dots" aria-label={`影響分數 ${score} / 5`}>
+    <span className="impact-dots" aria-label={`影响分数 ${score} / 5`}>
       {Array.from({ length: 5 }, (_, index) => (
         <i className={index < score ? "is-active" : ""} key={index} />
       ))}
@@ -84,31 +74,35 @@ function HeadlineCard({ headline }: { headline: Headline }) {
           <SentimentMark value={headline.sentiment} />
         </div>
         <h3>{headline.title}</h3>
+        {(headline.termNotes?.length || extractTermNotes(headline).length) ? <div className="term-notes" aria-label="英文术语说明">
+          <span>英文术语：</span>
+          {(headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline)).map((item) => <em key={item.term}><b>{item.term}</b>＝{item.note}</em>)}
+        </div> : null}
         <p className="headline-summary">{headline.summary}</p>
         {headline.keyPoints?.length ? <div className="key-facts">
-          <div><ListChecks size={16} /><span>重要資訊</span></div>
+          <div><ListChecks size={16} /><span>重要信息</span></div>
           <ul>{headline.keyPoints.map((point, index) => <li key={`${headline.id}-fact-${index}`}>{point}</li>)}</ul>
         </div> : null}
         <div className="impact-note">
-          <span>MARKET IMPACT</span>
+          <span>市场影响</span>
           <p>{headline.marketImpact}</p>
         </div>
         <footer className="headline-footer">
-          <div className="source-list" aria-label="資料來源">
+          <div className="source-list" aria-label="信息来源">
             {headline.sources.map((source, index) => (
               <a href={source.url} target="_blank" rel="noreferrer" key={`${source.name}-${index}`}>
                 <span>{sourceLabels[source.type]}</span>
-                {source.name}
+                {sourceDisplayName(source.name)}
                 <ExternalLink size={11} />
               </a>
             ))}
           </div>
           <div className="score-list">
-            <span><ImpactDots score={headline.impact} /> 影響 {headline.impact}/5</span>
+            <span><ImpactDots score={headline.impact} /> 影响 {headline.impact}/5</span>
             <span><ShieldCheck size={13} /> 信心 {headline.confidence}%</span>
-            <span><MessageCircle size={13} /> 討論 {headline.mentions}</span>
-            {headline.freshnessScore !== undefined && <span><Activity size={13} /> 時效 {headline.freshnessScore}</span>}
-            {headline.crossSourceCount !== undefined && <span><Globe2 size={13} /> {headline.crossSourceCount} 種來源</span>}
+            <span><MessageCircle size={13} /> 讨论 {headline.mentions}</span>
+            {headline.freshnessScore !== undefined && <span><Activity size={13} /> 时效 {headline.freshnessScore}</span>}
+            {headline.crossSourceCount !== undefined && <span><Globe2 size={13} /> {headline.crossSourceCount} 种来源</span>}
           </div>
         </footer>
       </div>
@@ -122,7 +116,7 @@ function BuzzPanel({ title, kind, topics }: { title: string; kind: "reddit" | "x
       <div className="side-card-heading">
         <div className={`platform-mark platform-${kind}`}>{kind === "reddit" ? "r/" : "X"}</div>
         <div>
-          <span>DISCUSSION PULSE</span>
+          <span>讨论热度</span>
           <h3>{title}</h3>
         </div>
       </div>
@@ -132,11 +126,11 @@ function BuzzPanel({ title, kind, topics }: { title: string; kind: "reddit" | "x
             <span className="buzz-index">0{index + 1}</span>
             <div className="buzz-content">
               <strong>{topic.label}</strong>
-              <span>{topic.mentions} mentions · <b className={topic.change >= 0 ? "change-up" : "change-down"}>{topic.change >= 0 ? "+" : ""}{topic.change}%</b></span>
+              <span>{topic.mentions} 次讨论 · <b className={topic.change >= 0 ? "change-up" : "change-down"}>{topic.change >= 0 ? "+" : ""}{topic.change}%</b></span>
             </div>
             <SentimentMark value={topic.sentiment} />
           </div>
-        )) : <p className="empty-note">本次未取得足夠的公開討論資料。</p>}
+        )) : <p className="empty-note">本次未取得足够的公开讨论信息。</p>}
       </div>
     </section>
   );
@@ -159,7 +153,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
 
   const [year, month, day] = brief.date.split("-").map(Number);
   const weekday = ["日", "一", "二", "三", "四", "五", "六"][new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
-  const dateLabel = `${year} 年 ${month} 月 ${day} 日 / 週${weekday}`;
+  const dateLabel = `${year} 年 ${month} 月 ${day} 日 / 周${weekday}`;
   const generatedParts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Taipei",
     year: "numeric",
@@ -181,13 +175,13 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ live: true, useAi: true }),
       });
-      if (!response.ok) throw new Error("更新請求失敗");
+      if (!response.ok) throw new Error("更新请求失败");
       const nextBrief = (await response.json()) as DailyBrief;
       setBrief(nextBrief);
       setActiveCategory("All");
-      setNotice(nextBrief.warning || `完成更新：${nextBrief.stats.candidates} 則素材已進入分析流程。`);
+      setNotice(nextBrief.warning || `完成更新：${nextBrief.stats.candidates} 则素材已进入分析流程。`);
     } catch {
-      setNotice("目前無法更新即時來源，畫面仍保留上一份可用日報。");
+      setNotice("目前无法更新实时来源，页面仍保留上一份可用日报。");
     } finally {
       setIsRefreshing(false);
     }
@@ -206,7 +200,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ brief }),
       });
-      if (!response.ok) throw new Error("PDF 產生失敗");
+      if (!response.ok) throw new Error("PDF 生成失败");
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = url;
@@ -214,7 +208,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
     } catch {
-      setNotice("目前無法產生 PDF，請稍後再試。");
+      setNotice("目前无法生成 PDF，请稍后再试。");
     } finally {
       setIsExporting(false);
     }
@@ -225,36 +219,37 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
       <aside className="sidebar">
         <div className="brand-lockup">
           <div className="brand-symbol"><Radar size={24} /></div>
-          <div><strong>AnalystArena</strong><span>DAILY INTELLIGENCE</span></div>
+          <div><strong>AnalystArena</strong><span>每日市场情报</span></div>
         </div>
-        <nav aria-label="主要導覽">
-          <a className="is-current" href="#brief"><LayoutDashboard size={17} />今日簡報</a>
-          <a href="#headlines"><Newspaper size={17} />市場頭條</a>
-          <a href="#social"><MessageCircle size={17} />社群訊號</a>
-          <a href="#watchlist"><CalendarDays size={17} />觀察清單</a>
-          <a href="/archive"><Search size={17} />歷史日報</a>
-          <a href="/review"><ShieldCheck size={17} />人工審核</a>
-          <button type="button" onClick={() => void exportPdf()}><FileText size={17} />PDF 報告</button>
+        <nav aria-label="主要导览">
+          <a className="is-current" href="#brief"><LayoutDashboard size={17} />今日简报</a>
+          <a href="#headlines"><Newspaper size={17} />市场头条</a>
+          <a href="#social"><MessageCircle size={17} />社交媒体信号</a>
+          <a href="#watchlist"><CalendarDays size={17} />观察清单</a>
+          <a href="/archive"><Search size={17} />历史日报</a>
+          <a href="/review"><ShieldCheck size={17} />人工审核</a>
+          <button type="button" onClick={() => void exportPdf()}><FileText size={17} />PDF 报告</button>
         </nav>
         <div className="sidebar-sources">
-          <span>SOURCE LAYERS</span>
-          <div><CircleDot /> 官方公告與監管</div>
-          <div><CircleDot /> 新聞與搜尋索引</div>
-          <div><CircleDot /> Reddit / X 訊號</div>
+          <span>信息来源</span>
+          <div><CircleDot /> 官方公告与监管</div>
+          <div><CircleDot /> 新闻与搜索索引</div>
+          <div><CircleDot /> Reddit 社区 / X 平台信号</div>
         </div>
         <div className="system-card">
-          <div><Activity size={15} /><span>Collector status</span><b>{brief.stats.sourcesOnline} online</b></div>
-          <div><Bot size={15} /><span>Analysis engine</span><b>{brief.aiEnabled ? "AI" : "Rules"}</b></div>
-          <p><i /> {brief.status === "published" ? "已發布版本" : "草稿／預覽版本"}</p>
+          <div><Activity size={15} /><span>采集状态</span><b>{brief.stats.sourcesOnline} 个来源在线</b></div>
+          <div><Bot size={15} /><span>分析引擎</span><b>{brief.aiEnabled ? "AI 智能分析" : "规则分析"}</b></div>
+          <div><Globe2 size={15} /><span>自动翻译</span><b>{brief.translationEnabled ? "简体中文" : "待更新"}</b></div>
+          <p><i /> {brief.status === "published" ? "已发布版本" : "草稿／预览版本"}</p>
         </div>
       </aside>
 
       <main className="main-canvas" id="brief">
         <header className="topbar">
-          <div className="breadcrumb"><span>INTELLIGENCE</span><b>/</b><strong>DAILY BRIEF</strong></div>
+          <div className="breadcrumb"><span>市场情报</span><b>/</b><strong>每日简报</strong></div>
           <div className="topbar-actions">
-            <span className={`mode-badge mode-${brief.mode}`}>{brief.status === "published" ? "PUBLISHED" : brief.mode === "live" ? "LIVE PREVIEW" : "DEMO MODE"}</span>
-            <button className="secondary-button" type="button" onClick={() => void exportPdf()} disabled={isExporting}><Download size={16} />{isExporting ? "製作中…" : "前五大 PDF"}</button>
+            <span className={`mode-badge mode-${brief.mode}`}>{brief.status === "published" ? "已发布" : brief.mode === "live" ? "实时预览" : "示范模式"}</span>
+            <button className="secondary-button" type="button" onClick={() => void exportPdf()} disabled={isExporting}><Download size={16} />{isExporting ? "制作中…" : "前五大 PDF"}</button>
             <button className="primary-button" type="button" onClick={refreshBrief} disabled={isRefreshing}>
               <RefreshCw size={16} className={isRefreshing ? "is-spinning" : ""} />
               {isRefreshing ? "分析中..." : "立即更新"}
@@ -265,29 +260,29 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         <div className="report-wrap">
           <section className="report-masthead">
             <div>
-              <div className="edition-line"><span>TAIPEI EDITION</span><i />{dateLabel}</div>
-              <h1>Daily<br /><em>Intelligence</em></h1>
+              <div className="edition-line"><span>台北版</span><i />{dateLabel}</div>
+              <h1>每日<br /><em>市场情报</em></h1>
             </div>
             <div className="masthead-note">
-              <span>投資人晨間情報</span>
-              <p>把官方訊息、新聞與社群討論整理成可驗證、可排序的市場事件。</p>
-              <div><CheckCircle2 size={15} /> 來源優先，社群僅作為訊號</div>
-              <small className="print-disclaimer">本報告為資訊整理與研究工具，不構成投資建議。請由原始來源完成獨立查證。</small>
+              <span>投资人晨间情报</span>
+              <p>把官方信息、新闻与社交媒体讨论整理成可验证、可排序的市场事件。</p>
+              <div><CheckCircle2 size={15} /> 来源优先，社交媒体仅作为信号</div>
+              <small className="print-disclaimer">本报告为信息整理与研究工具，不构成投资建议。请由原始来源完成独立查证。</small>
             </div>
           </section>
 
-          {notice && <div className="notice-bar"><Sparkles size={15} /><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="關閉通知">×</button></div>}
+          {notice && <div className="notice-bar"><Sparkles size={15} /><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="关闭通知">×</button></div>}
 
           <section className="stat-grid" aria-label="本日分析摘要">
-            <div><span>候選素材</span><strong>{brief.stats.candidates}</strong><small>collected items</small></div>
-            <div><span>合併事件</span><strong>{brief.stats.consolidatedEvents}</strong><small>after clustering</small></div>
-            <div><span>核心頭條</span><strong>{brief.stats.topStories}</strong><small>ranked stories</small></div>
-            <div className="stat-accent"><span>可用來源</span><strong>{brief.stats.sourcesOnline}</strong><small>source layers online</small></div>
+            <div><span>候选素材</span><strong>{brief.stats.candidates}</strong><small>已采集信息</small></div>
+            <div><span>合并事件</span><strong>{brief.stats.consolidatedEvents}</strong><small>合并后事件</small></div>
+            <div><span>核心头条</span><strong>{brief.stats.topStories}</strong><small>排序后新闻</small></div>
+            <div className="stat-accent"><span>可用来源</span><strong>{brief.stats.sourcesOnline}</strong><small>在线信息来源</small></div>
           </section>
 
           <div className="section-heading" id="headlines">
-            <div><span>01 / TOP STORIES</span><h2>今日市場頭條</h2></div>
-            <div className="category-filters" aria-label="分類篩選">
+            <div><span>01 / 重点新闻</span><h2>今日市场头条</h2></div>
+            <div className="category-filters" aria-label="分类筛选">
               <button className={activeCategory === "All" ? "is-active" : ""} onClick={() => setActiveCategory("All")}>全部</button>
               {categories.map((category) => (
                 <button className={activeCategory === category ? "is-active" : ""} onClick={() => setActiveCategory(category)} key={category}>{categoryLabels[category]}</button>
@@ -304,7 +299,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
               <section className="side-card heat-card">
                 <div className="side-card-heading">
                   <div className="icon-box"><TrendingUp size={18} /></div>
-                  <div><span>MARKET IMPACT</span><h3>市場熱度</h3></div>
+                  <div><span>市场影响</span><h3>市场热度</h3></div>
                 </div>
                 <div className="heat-list">
                   {brief.marketHeat.map((item) => (
@@ -314,20 +309,20 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
                     </div>
                   ))}
                 </div>
-                <p className="method-note"><ShieldCheck size={14} /> 分數綜合市場影響、來源可信度、新穎性與跨來源驗證。</p>
+                <p className="method-note"><ShieldCheck size={14} /> 分数综合市场影响、来源可信度、时效性与跨来源验证。</p>
               </section>
 
               <div id="social">
-                <BuzzPanel title="Reddit 熱門討論" kind="reddit" topics={brief.socialBuzz.reddit} />
-                <BuzzPanel title="X 討論動能" kind="x" topics={brief.socialBuzz.x} />
+                <BuzzPanel title="Reddit 热门讨论" kind="reddit" topics={brief.socialBuzz.reddit} />
+                <BuzzPanel title="X 讨论动能" kind="x" topics={brief.socialBuzz.x} />
               </div>
             </aside>
           </div>
 
           <section className="watch-section" id="watchlist">
             <div className="section-heading watch-heading">
-              <div><span>02 / NEXT SESSION</span><h2>明日觀察清單</h2></div>
-              <p>只保留可能改變市場共識的事件</p>
+              <div><span>02 / 下一交易日</span><h2>明日观察清单</h2></div>
+              <p>只保留可能改变市场共识的事件</p>
             </div>
             <div className="watch-grid">
               {brief.watchlist.map((item, index) => (
@@ -341,9 +336,9 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           </section>
 
           <footer className="report-footer">
-            <div className="footer-brand"><Globe2 size={18} /><strong>AnalystArena Daily Intelligence</strong></div>
-            <p>本報告為資訊整理與研究工具，不構成投資建議。請點擊原始來源完成獨立查證。</p>
-            <span>Generated {generatedLabel}</span>
+            <div className="footer-brand"><Globe2 size={18} /><strong>AnalystArena 每日市场情报</strong></div>
+            <p>本报告为信息整理与研究工具，不构成投资建议。请点击原始来源完成独立查证。</p>
+            <span>生成时间：{generatedLabel.replace("TPE", "台北")}</span>
           </footer>
         </div>
       </main>

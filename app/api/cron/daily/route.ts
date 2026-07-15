@@ -40,8 +40,8 @@ function safeStatuses(value: unknown): CollectorStatus[] {
 }
 
 export async function POST(request: Request) {
-  if (!process.env.CRON_SECRET) return NextResponse.json({ error: "CRON_SECRET 尚未設定" }, { status: 503 });
-  if (!isCronRequest(request)) return NextResponse.json({ error: "未授權" }, { status: 401 });
+  if (!process.env.CRON_SECRET) return NextResponse.json({ error: "排程密钥（CRON_SECRET）尚未设置" }, { status: 503 });
+  if (!isCronRequest(request)) return NextResponse.json({ error: "未授权" }, { status: 401 });
   try {
     const body = await request.json().catch(() => ({})) as { stories?: unknown; statuses?: unknown };
     const seedStories = safeRemoteStories(body.stories);
@@ -54,6 +54,6 @@ export async function POST(request: Request) {
     const record = await saveDraft({ ...brief, status: "draft", storageMode: storageMode() });
     return NextResponse.json({ ok: true, id: record.id, date: record.date, status: record.status, storageMode: storageMode() });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "排程產生失敗" }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "排程生成失败" }, { status: 500 });
   }
 }

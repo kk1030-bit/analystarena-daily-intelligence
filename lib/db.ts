@@ -189,8 +189,8 @@ export async function getLatestPublished(): Promise<BriefRecord | null> {
 
 export async function updateDraft(id: string, brief: DailyBrief): Promise<BriefRecord> {
   const current = await getBrief(id);
-  if (!current) throw new Error("找不到這份日報");
-  if (current.status !== "draft") throw new Error("已發布日報不可直接修改");
+  if (!current) throw new Error("找不到这份日报");
+  if (current.status !== "draft") throw new Error("已发布日报不可直接修改");
   if (storageMode() === "memory") {
     const entry = memory.get(id)!;
     entry.brief = { ...structuredClone(brief), id, status: "draft", storageMode: "memory" };
@@ -203,7 +203,7 @@ export async function updateDraft(id: string, brief: DailyBrief): Promise<BriefR
     WHERE id = $1 AND status = 'draft'
     RETURNING *, (pdf_data IS NOT NULL) AS has_pdf
   `, [id, JSON.stringify(brief)]);
-  if (!result.rows[0]) throw new Error("日報更新失敗");
+  if (!result.rows[0]) throw new Error("日报更新失败");
   return rowToRecord(result.rows[0]);
 }
 
@@ -211,7 +211,7 @@ export async function publishBrief(id: string, brief: DailyBrief, pdf: Buffer): 
   const now = new Date().toISOString();
   if (storageMode() === "memory") {
     const entry = memory.get(id);
-    if (!entry) throw new Error("找不到這份日報");
+    if (!entry) throw new Error("找不到这份日报");
     entry.status = "published";
     entry.publishedAt = now;
     entry.updatedAt = now;
@@ -230,7 +230,7 @@ export async function publishBrief(id: string, brief: DailyBrief, pdf: Buffer): 
     WHERE id = $1
     RETURNING *, (pdf_data IS NOT NULL) AS has_pdf
   `, [id, JSON.stringify(payload), pdf]);
-  if (!result.rows[0]) throw new Error("發布失敗");
+  if (!result.rows[0]) throw new Error("发布失败");
   return rowToRecord(result.rows[0]);
 }
 

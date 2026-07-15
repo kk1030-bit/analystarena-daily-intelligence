@@ -8,8 +8,8 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 export async function POST(request: Request) {
-  if (!adminConfigured()) return NextResponse.json({ error: "ADMIN_TOKEN 尚未設定" }, { status: 503 });
-  if (!isAdminRequest(request)) return NextResponse.json({ error: "未授權" }, { status: 401 });
+  if (!adminConfigured()) return NextResponse.json({ error: "管理员密码（ADMIN_TOKEN）尚未设置" }, { status: 503 });
+  if (!isAdminRequest(request)) return NextResponse.json({ error: "未授权" }, { status: 401 });
   try {
     const body = (await request.json().catch(() => ({}))) as { useAi?: boolean; useBrowserCollectors?: boolean };
     const brief = await buildLiveBrief({
@@ -19,6 +19,6 @@ export async function POST(request: Request) {
     const record = await saveDraft({ ...brief, status: "draft", storageMode: storageMode() });
     return NextResponse.json(record, { status: 201 });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "產生草稿失敗" }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "生成草稿失败" }, { status: 500 });
   }
 }

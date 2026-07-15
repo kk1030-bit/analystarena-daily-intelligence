@@ -12,6 +12,8 @@ export async function GET() {
     service: "analystarena-daily",
     database,
     aiConfigured: Boolean(process.env.OPENAI_API_KEY),
+    translationEnabled: true,
+    translationLanguage: "zh-CN",
     adminConfigured: adminConfigured(),
     browserCollectorsEnabled:
       browserCollectorMode === "github-actions" || process.env.ENABLE_BROWSER_COLLECTORS === "true",

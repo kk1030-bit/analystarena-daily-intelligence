@@ -95,7 +95,7 @@ async function collectReddit(page: Page): Promise<RawStory[]> {
       stories.push({
         id: idFor(`reddit:${community}:${row.title}`),
         title: row.title,
-        description: `Reddit r/${community} 熱門討論，互動指標 ${engagement}。`,
+        description: `Reddit r/${community} 热门讨论，互动指标 ${engagement}。`,
         url: row.url,
         publishedAt: row.publishedAt || new Date().toISOString(),
         source: `r/${community}`,
@@ -141,7 +141,7 @@ async function collectX(page: Page): Promise<RawStory[]> {
         stories.push({
           id: idFor(`x:${tweet.link}`),
           title: tweet.text.slice(0, 180),
-          description: `X 即時搜尋「${query}」所擷取的公開貼文。`,
+          description: `X 实时搜索“${query}”所抓取的公开帖子。`,
           url: tweet.link,
           publishedAt: tweet.publishedAt || new Date().toISOString(),
           source: `X · ${query}`,
@@ -178,10 +178,10 @@ export async function collectBrowserStories(): Promise<{ stories: RawStory[]; st
         name: "Reddit Playwright",
         ok: reddit.length > 0,
         count: reddit.length,
-        note: reddit.length ? undefined : "瀏覽器來源未回傳內容，已由 Reddit RSS 備援接手",
+        note: reddit.length ? undefined : "浏览器来源未返回内容，已由 Reddit RSS 备用源接手",
       });
     } catch (error) {
-      statuses.push({ name: "Reddit Playwright", ok: false, count: 0, note: error instanceof Error ? error.message : "collector failed" });
+      statuses.push({ name: "Reddit Playwright", ok: false, count: 0, note: error instanceof Error ? error.message : "采集器运行失败" });
     }
 
     try {
@@ -191,10 +191,10 @@ export async function collectBrowserStories(): Promise<{ stories: RawStory[]; st
         name: "X Playwright",
         ok: x.length > 0,
         count: x.length,
-        note: !process.env.X_AUTH_TOKEN ? "未設定 X_AUTH_TOKEN，已跳過登入限定搜尋" : x.length ? undefined : "X 搜尋未回傳可用貼文",
+        note: !process.env.X_AUTH_TOKEN ? "未设置 X 登录凭证（X_AUTH_TOKEN），已跳过需要登录的搜索" : x.length ? undefined : "X 搜索未返回可用帖子",
       });
     } catch (error) {
-      statuses.push({ name: "X Playwright", ok: false, count: 0, note: error instanceof Error ? error.message : "collector failed" });
+      statuses.push({ name: "X Playwright", ok: false, count: 0, note: error instanceof Error ? error.message : "采集器运行失败" });
     }
   } catch (error) {
     const note = error instanceof Error ? error.message : "browser launch failed";

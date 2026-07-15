@@ -17,6 +17,6 @@ export async function GET(request: Request) {
     const records = await listBriefs(status, 60);
     return NextResponse.json({ records, storageMode: storageMode(), admin });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "讀取日報失敗" }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "读取日报失败" }, { status: 500 });
   }
 }

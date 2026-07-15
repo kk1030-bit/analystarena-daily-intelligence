@@ -1,6 +1,7 @@
 import path from "node:path";
 import PDFDocument from "pdfkit";
 import type { DailyBrief, Headline } from "./types";
+import { categoryDisplayNames, extractTermNotes, sourceDisplayName } from "./terms";
 
 const page = { width: 595.28, height: 841.89, margin: 44 };
 const colors = {
@@ -32,7 +33,7 @@ function pdfText(value: string, limit = 2_000): string {
 }
 
 function fontPath(): string {
-  return path.join(process.cwd(), "assets", "fonts", "NotoSansTC-Regular.ttf");
+  return path.join(process.cwd(), "assets", "fonts", "NotoSansSC-Regular.ttf");
 }
 
 function topFive(brief: DailyBrief): Headline[] {
@@ -51,7 +52,7 @@ function drawImpact(doc: PDFKit.PDFDocument, score: number, x: number, y: number
 }
 
 function drawDetailHeader(doc: PDFKit.PDFDocument, date: string): void {
-  doc.fillColor(colors.ink).font("NotoTC").fontSize(8.5).text("ANALYSTARENA / TOP 5 MARKET INTELLIGENCE", page.margin, 30, { lineBreak: false });
+  doc.fillColor(colors.ink).font("NotoSC").fontSize(8.5).text("AnalystArena / 前五大市场情报", page.margin, 30, { lineBreak: false });
   doc.fillColor(colors.muted).fontSize(8.5).text(date, page.width - page.margin - 90, 30, { width: 90, align: "right", lineBreak: false });
   doc.moveTo(page.margin, 48).lineTo(page.width - page.margin, 48).strokeColor(colors.ink).lineWidth(1).stroke();
   doc.y = 67;
@@ -65,17 +66,17 @@ function ensureDetailRoom(doc: PDFKit.PDFDocument, needed: number, date: string)
 
 function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headline[]): void {
   doc.save().rect(0, 0, page.width, 176).fill(colors.ink).restore();
-  doc.fillColor(colors.acid).font("NotoTC").fontSize(9).text("ANALYSTARENA / TAIPEI EDITION", page.margin, 34);
-  doc.fillColor(colors.white).fontSize(31).text("Top 5 Market Intelligence", page.margin, 61, { width: 430 });
-  doc.fillColor("#AEB9B5").fontSize(10).text(`${brief.date}  /  ${brief.status === "published" ? "PUBLISHED REPORT" : "PREVIEW REPORT"}`, page.margin, 113);
-  doc.fillColor("#CBD2CF").fontSize(9.5).text("Five investor-relevant events, consolidated from verified news, official releases and social signals.", page.margin, 139, { width: 470 });
+  doc.fillColor(colors.acid).font("NotoSC").fontSize(9).text("AnalystArena / 台北版", page.margin, 34);
+  doc.fillColor(colors.white).fontSize(31).text("前五大市场情报", page.margin, 61, { width: 430 });
+  doc.fillColor("#AEB9B5").fontSize(10).text(`${brief.date}  /  ${brief.status === "published" ? "已发布报告" : "预览报告"}`, page.margin, 113);
+  doc.fillColor("#CBD2CF").fontSize(9.5).text("从已验证新闻、官方公告与社交媒体信号中，合并整理出五个与投资人最相关的事件。", page.margin, 139, { width: 470 });
 
   doc.y = 210;
-  doc.fillColor(colors.ink).fontSize(10).text("EXECUTIVE OVERVIEW", page.margin, doc.y);
+  doc.fillColor(colors.ink).fontSize(10).text("执行摘要", page.margin, doc.y);
   doc.moveTo(page.margin, doc.y + 17).lineTo(page.width - page.margin, doc.y + 17).strokeColor(colors.ink).lineWidth(1).stroke();
   doc.y += 34;
   doc.fillColor(colors.muted).fontSize(10.5).text(
-    pdfText(`本日從 ${brief.stats.candidates} 則蒐集素材合併為 ${brief.stats.consolidatedEvents} 個事件, 並依市場影響, 時效性, 來源可信度與跨來源驗證選出前五大重要新聞.`),
+    pdfText(`本日从 ${brief.stats.candidates} 则采集素材合并为 ${brief.stats.consolidatedEvents} 个事件, 并依市场影响, 时效性, 来源可信度与跨来源验证选出前五大重要新闻.`),
     page.margin,
     doc.y,
     { width: page.width - page.margin * 2, lineGap: 3 },
@@ -89,13 +90,13 @@ function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headli
     doc.save().rect(page.margin, top, 48, rowHeight - 7).fill(index === 0 ? colors.ink : colors.pale).restore();
     doc.fillColor(index === 0 ? colors.acid : colors.ink).fontSize(15).text(String(index + 1).padStart(2, "0"), page.margin + 10, top + 15, { width: 28, align: "center" });
     const x = page.margin + 62;
-    doc.fillColor(colors.orange).fontSize(8).text(`${headline.ticker} / ${headline.category}`, x, top + 10, { width: 220 });
+    doc.fillColor(colors.orange).fontSize(8).text(`${headline.ticker} / ${categoryDisplayNames[headline.category]}`, x, top + 10, { width: 260 });
     doc.fillColor(colors.ink).fontSize(11.5).text(pdfText(headline.title, 180), x, top + 25, { width: 360, height: 31, ellipsis: true, lineGap: 1 });
     drawImpact(doc, headline.impact, page.width - page.margin - 59, top + 13);
     doc.y = top + rowHeight;
   });
 
-  doc.fillColor(colors.muted).fontSize(8.5).text("詳細事件資訊、關鍵事實、影響判斷與原始來源列於後續頁面。", page.margin, doc.y + 10, { width: 400 });
+  doc.fillColor(colors.muted).fontSize(8.5).text("详细事件信息、关键事实、影响判断与原始来源列于后续页面。", page.margin, doc.y + 10, { width: 400 });
 }
 
 function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: string): void {
@@ -105,14 +106,17 @@ function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: s
   const summary = pdfText(headline.summary, 560);
   const impact = pdfText(headline.marketImpact, 560);
   const facts = factsFor(headline);
-  const sourceLine = pdfText(`來源: ${headline.sources.map((source) => source.name).join(" / ") || "待補充"}`, 360);
+  const termNotes = headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline);
+  const termLine = pdfText(termNotes.length ? `英文术语: ${termNotes.map((item) => `${item.term}=${item.note}`).join("; ")}` : "", 420);
+  const sourceLine = pdfText(`来源: ${headline.sources.map((source) => sourceDisplayName(source.name)).join(" / ") || "待补充"}`, 420);
 
-  const titleHeight = doc.font("NotoTC").fontSize(16).heightOfString(title, { width: innerWidth, lineGap: 2 });
+  const titleHeight = doc.font("NotoSC").fontSize(16).heightOfString(title, { width: innerWidth, lineGap: 2 });
+  const termHeight = termLine ? doc.fontSize(8.8).heightOfString(termLine, { width: innerWidth, lineGap: 2 }) : 0;
   const summaryHeight = doc.fontSize(10.8).heightOfString(summary, { width: innerWidth, lineGap: 3 });
   const factHeights = facts.map((fact) => doc.fontSize(10.5).heightOfString(fact, { width: innerWidth - 22, lineGap: 2 }));
   const factsHeight = factHeights.reduce((sum, height) => sum + height + 7, 0);
   const impactHeight = doc.fontSize(10.5).heightOfString(impact, { width: innerWidth - 18, lineGap: 2 });
-  const blockHeight = 191 + titleHeight + summaryHeight + factsHeight + impactHeight;
+  const blockHeight = 191 + titleHeight + termHeight + (termLine ? 12 : 0) + summaryHeight + factsHeight + impactHeight;
   ensureDetailRoom(doc, blockHeight + 14, date);
 
   const top = doc.y;
@@ -121,20 +125,25 @@ function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: s
   let cursor = top + 17;
   const x = page.margin + 22;
 
-  doc.fillColor(colors.orange).fontSize(8.8).text(`NO. ${String(headline.rank).padStart(2, "0")}   ${headline.ticker}   ${headline.category.toUpperCase()}`, x, cursor, { width: 270, lineBreak: false });
-  doc.fillColor(colors.muted).fontSize(8.8).text(`CONFIDENCE ${headline.confidence}%`, page.width - page.margin - 150, cursor, { width: 128, align: "right", lineBreak: false });
+  doc.fillColor(colors.orange).fontSize(8.8).text(`第 ${String(headline.rank).padStart(2, "0")} 名   ${headline.ticker}   ${categoryDisplayNames[headline.category]}`, x, cursor, { width: 310, lineBreak: false });
+  doc.fillColor(colors.muted).fontSize(8.8).text(`信心 ${headline.confidence}%`, page.width - page.margin - 150, cursor, { width: 128, align: "right", lineBreak: false });
   drawImpact(doc, headline.impact, page.width - page.margin - 78, cursor + 18);
   cursor += 31;
 
   doc.fillColor(colors.ink).fontSize(16).text(title, x, cursor, { width: innerWidth, lineGap: 2 });
   cursor += titleHeight + 14;
 
+  if (termLine) {
+    doc.fillColor(colors.muted).fontSize(8.8).text(termLine, x, cursor, { width: innerWidth, lineGap: 2 });
+    cursor += termHeight + 12;
+  }
+
   doc.fillColor(colors.orange).fontSize(8.5).text("事件摘要", x, cursor);
   cursor += 16;
   doc.fillColor(colors.muted).fontSize(10.8).text(summary, x, cursor, { width: innerWidth, lineGap: 3 });
   cursor += summaryHeight + 14;
 
-  doc.fillColor(colors.orange).fontSize(8.5).text("重要資訊", x, cursor);
+  doc.fillColor(colors.orange).fontSize(8.5).text("重要信息", x, cursor);
   cursor += 17;
   facts.forEach((fact, index) => {
     doc.save().circle(x + 4, cursor + 5, 3).fill(index === 0 ? colors.orange : colors.ink).restore();
@@ -144,7 +153,7 @@ function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: s
   cursor += 5;
 
   doc.save().rect(x, cursor, innerWidth, impactHeight + 36).fill(colors.pale).restore();
-  doc.fillColor(colors.orange).fontSize(8.5).text("市場影響", x + 10, cursor + 9);
+  doc.fillColor(colors.orange).fontSize(8.5).text("市场影响", x + 10, cursor + 9);
   doc.fillColor(colors.ink).fontSize(10.5).text(impact, x + 10, cursor + 23, { width: innerWidth - 20, lineGap: 2 });
   cursor += impactHeight + 47;
 
@@ -157,10 +166,10 @@ export async function generateBriefPdf(brief: DailyBrief): Promise<Buffer> {
     size: "A4",
     margins: { top: page.margin, right: page.margin, bottom: page.margin, left: page.margin },
     bufferPages: true,
-    info: { Title: `AnalystArena Top 5 Market Intelligence ${brief.date}`, Author: "AnalystArena", Subject: "Top five daily market events" },
+    info: { Title: `AnalystArena 前五大市场情报 ${brief.date}`, Author: "AnalystArena", Subject: "每日前五大市场事件" },
   });
-  doc.registerFont("NotoTC", fontPath());
-  doc.font("NotoTC");
+  doc.registerFont("NotoSC", fontPath());
+  doc.font("NotoSC");
 
   const chunks: Buffer[] = [];
   doc.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -179,7 +188,7 @@ export async function generateBriefPdf(brief: DailyBrief): Promise<Buffer> {
   for (let index = range.start; index < range.start + range.count; index += 1) {
     doc.switchToPage(index);
     doc.moveTo(page.margin, page.height - 66).lineTo(page.width - page.margin, page.height - 66).strokeColor(colors.line).lineWidth(0.5).stroke();
-    doc.fillColor(colors.muted).fontSize(7.5).text("資訊整理與研究工具, 不構成投資建議. 請由原始來源獨立查證.", page.margin, page.height - 57, { width: 410, lineBreak: false });
+    doc.fillColor(colors.muted).fontSize(7.5).text("信息整理与研究工具, 不构成投资建议. 请由原始来源独立查证.", page.margin, page.height - 57, { width: 410, lineBreak: false });
     doc.text(`${index + 1} / ${range.count}`, page.width - page.margin - 50, page.height - 57, { width: 50, align: "right", lineBreak: false });
   }
 

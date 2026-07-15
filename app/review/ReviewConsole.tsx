@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Check, FileDown, KeyRound, LoaderCircle, LogOut, PencilLine, Plus, Radar, Save, Send } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { BriefRecord, Category, DailyBrief, Headline } from "@/lib/types";
+import { categoryDisplayNames, extractTermNotes } from "@/lib/terms";
 
 const categories: Category[] = ["Macro", "AI", "Semiconductor", "Crypto", "ETF", "Earnings", "Geopolitics", "Other"];
 
@@ -35,7 +36,7 @@ export function ReviewConsole() {
     try {
       const response = await fetch("/api/briefs", { headers: authHeaders(nextToken), cache: "no-store" });
       const data = await response.json() as { records?: BriefRecord[]; storageMode?: "postgres" | "memory"; admin?: boolean; error?: string };
-      if (!response.ok || !data.admin) throw new Error(data.error || "管理密碼不正確");
+      if (!response.ok || !data.admin) throw new Error(data.error || "管理密码不正确");
       sessionStorage.setItem("analystarena-admin-token", nextToken);
       setToken(nextToken);
       setRecords(data.records ?? []);
@@ -44,7 +45,7 @@ export function ReviewConsole() {
       setSelected(first);
       setDraft(first ? structuredClone(first.brief) : null);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "登入失敗");
+      setMessage(error instanceof Error ? error.message : "登入失败");
     } finally {
       setBusy(false);
     }
@@ -73,7 +74,7 @@ export function ReviewConsole() {
 
   async function generateDraft() {
     setBusy(true);
-    setMessage("正在啟動 Playwright 蒐集、事件合併與 AI 分析，可能需要 1–3 分鐘…");
+    setMessage("正在启动浏览器自动采集（Playwright）、事件合并、自动翻译与人工智能（AI）分析，可能需要 1–3 分钟…");
     try {
       const response = await fetch("/api/briefs/generate", {
         method: "POST",
@@ -81,11 +82,11 @@ export function ReviewConsole() {
         body: JSON.stringify({ useAi: true, useBrowserCollectors: true }),
       });
       const data = await response.json() as BriefRecord & { error?: string };
-      if (!response.ok) throw new Error(data.error || "產生草稿失敗");
+      if (!response.ok) throw new Error(data.error || "生成草稿失败");
       await reload(data.id);
-      setMessage(`已產生 ${data.date} 草稿，請逐則審核後再發布。`);
+      setMessage(`已生成 ${data.date} 草稿，请逐条审核后再发布。`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "產生草稿失敗");
+      setMessage(error instanceof Error ? error.message : "生成草稿失败");
     } finally {
       setBusy(false);
     }
@@ -97,32 +98,32 @@ export function ReviewConsole() {
     try {
       const response = await fetch(`/api/briefs/${selected.id}`, { method: "PATCH", headers: authHeaders(token, true), body: JSON.stringify({ brief: draft }) });
       const data = await response.json() as BriefRecord & { error?: string };
-      if (!response.ok) throw new Error(data.error || "儲存失敗");
+      if (!response.ok) throw new Error(data.error || "保存失败");
       await reload(data.id);
-      setMessage("修改已儲存。這份日報仍是草稿。");
+      setMessage("修改已保存。这份日报仍是草稿。");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "儲存失敗");
+      setMessage(error instanceof Error ? error.message : "保存失败");
     } finally {
       setBusy(false);
     }
   }
 
   async function publish() {
-    if (!selected || !draft || !window.confirm("發布後會成為首頁正式日報並建立不可變的歷史 PDF。確定發布？")) return;
+    if (!selected || !draft || !window.confirm("发布后会成为首页正式日报并建立不可变的历史 PDF。确定发布？")) return;
     setBusy(true);
     try {
       if (hasChanges) {
         const saveResponse = await fetch(`/api/briefs/${selected.id}`, { method: "PATCH", headers: authHeaders(token, true), body: JSON.stringify({ brief: draft }) });
         const saveData = await saveResponse.json() as BriefRecord & { error?: string };
-        if (!saveResponse.ok) throw new Error(saveData.error || "發布前儲存失敗");
+        if (!saveResponse.ok) throw new Error(saveData.error || "发布前保存失败");
       }
       const response = await fetch(`/api/briefs/${selected.id}/publish`, { method: "POST", headers: authHeaders(token) });
       const data = await response.json() as BriefRecord & { error?: string };
-      if (!response.ok) throw new Error(data.error || "發布失敗");
+      if (!response.ok) throw new Error(data.error || "发布失败");
       await reload(data.id);
-      setMessage("日報已正式發布，首頁與歷史 PDF 已同步更新。");
+      setMessage("日报已正式发布，首页与历史 PDF 已同步更新。");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "發布失敗");
+      setMessage(error instanceof Error ? error.message : "发布失败");
     } finally {
       setBusy(false);
     }
@@ -138,13 +139,13 @@ export function ReviewConsole() {
       <main className="review-login">
         <div className="review-login-card">
           <span className="review-logo"><Radar size={25} /></span>
-          <small>ANALYSTARENA REVIEW DESK</small>
-          <h1>人工審核入口</h1>
-          <p>輸入 Render 環境中的 ADMIN_TOKEN。密碼只保存在這個分頁的 sessionStorage。</p>
-          <label><KeyRound size={15} /><input type="password" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void connect()} placeholder="管理密碼" /></label>
-          <button className="primary-button" onClick={() => void connect()} disabled={busy || !tokenInput}>{busy ? <LoaderCircle className="is-spinning" size={16} /> : <Check size={16} />}進入審核台</button>
+          <small>AnalystArena 人工审核台</small>
+          <h1>人工审核入口</h1>
+          <p>输入 Render 环境中的管理员密码（ADMIN_TOKEN）。密码只保存在这个浏览器分页的临时存储中。</p>
+          <label><KeyRound size={15} /><input type="password" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void connect()} placeholder="管理密码" /></label>
+          <button className="primary-button" onClick={() => void connect()} disabled={busy || !tokenInput}>{busy ? <LoaderCircle className="is-spinning" size={16} /> : <Check size={16} />}进入审核台</button>
           {message && <p className="review-error">{message}</p>}
-          <Link href="/">← 返回日報</Link>
+          <Link href="/">← 返回日报</Link>
         </div>
       </main>
     );
@@ -154,35 +155,39 @@ export function ReviewConsole() {
     <div className="review-shell">
       <header className="review-topbar">
         <Link href="/" className="standalone-brand"><span><Radar size={20} /></span>AnalystArena</Link>
-        <div><Link href="/archive">歷史 PDF</Link><button onClick={signOut}><LogOut size={15} />登出</button></div>
+        <div><Link href="/archive">历史 PDF</Link><button onClick={signOut}><LogOut size={15} />退出登录</button></div>
       </header>
       <aside className="review-list">
-        <div><small>REVIEW QUEUE</small><h1>日報審核</h1><p className={`storage-pill storage-${storage}`}>{storage === "postgres" ? "PostgreSQL 已連線" : "記憶體示範模式"}</p></div>
-        <button className="primary-button generate-button" onClick={() => void generateDraft()} disabled={busy}><Plus size={16} />產生今日草稿</button>
+        <div><small>审核队列</small><h1>日报审核</h1><p className={`storage-pill storage-${storage}`}>{storage === "postgres" ? "PostgreSQL 数据库已连接" : "内存示范模式"}</p></div>
+        <button className="primary-button generate-button" onClick={() => void generateDraft()} disabled={busy}><Plus size={16} />生成今日草稿</button>
         <nav>
-          {records.map((record) => <button key={record.id} className={selected?.id === record.id ? "is-selected" : ""} onClick={() => choose(record)}><span>{record.date}</span><b>{record.status === "published" ? "已發布" : "待審核"}</b><small>{record.brief.headlines.length} 則頭條</small></button>)}
-          {!records.length && <p>尚無草稿。請產生今天的第一份日報。</p>}
+          {records.map((record) => <button key={record.id} className={selected?.id === record.id ? "is-selected" : ""} onClick={() => choose(record)}><span>{record.date}</span><b>{record.status === "published" ? "已发布" : "待审核"}</b><small>{record.brief.headlines.length} 则头条</small></button>)}
+          {!records.length && <p>尚无草稿。请生成今天的第一份日报。</p>}
         </nav>
       </aside>
       <main className="review-workspace">
         <div className="review-actions">
-          <div><small>{selected?.status === "published" ? "PUBLISHED" : "DRAFT"}</small><h2>{selected ? `${selected.date} 日報` : "選擇一份日報"}</h2></div>
-          {selected && <div>{selected.hasPdf && <a className="secondary-button" href={`/api/briefs/${selected.id}/pdf`} target="_blank" rel="noreferrer"><FileDown size={15} />PDF</a>}<button className="secondary-button" onClick={() => void save()} disabled={busy || !hasChanges || selected.status !== "draft"}><Save size={15} />儲存</button><button className="publish-button" onClick={() => void publish()} disabled={busy || selected.status === "published"}><Send size={15} />發布日報</button></div>}
+          <div><small>{selected?.status === "published" ? "已发布" : "草稿"}</small><h2>{selected ? `${selected.date} 日报` : "选择一份日报"}</h2></div>
+          {selected && <div>{selected.hasPdf && <a className="secondary-button" href={`/api/briefs/${selected.id}/pdf`} target="_blank" rel="noreferrer"><FileDown size={15} />PDF</a>}<button className="secondary-button" onClick={() => void save()} disabled={busy || !hasChanges || selected.status !== "draft"}><Save size={15} />保存</button><button className="publish-button" onClick={() => void publish()} disabled={busy || selected.status === "published"}><Send size={15} />发布日报</button></div>}
         </div>
         {message && <div className="review-message">{busy && <LoaderCircle className="is-spinning" size={15} />}{message}</div>}
         {draft ? <section className="review-editor">
           {draft.warning && <div className="review-warning">{draft.warning}</div>}
           {draft.headlines.map((headline) => (
             <article key={headline.id}>
-              <header><span>#{headline.rank} · {headline.ticker}</span><div><b>{headline.rankingScore ?? "—"}</b> ranking score <PencilLine size={14} /></div></header>
-              <label>標題<input value={headline.title} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { title: event.target.value })} /></label>
+              <header><span>#{headline.rank} · {headline.ticker}</span><div><b>{headline.rankingScore ?? "—"}</b> 排名分数 <PencilLine size={14} /></div></header>
+              {(headline.termNotes?.length || extractTermNotes(headline).length) ? <div className="term-notes">
+                <span>自动术语说明：</span>
+                {(headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline)).map((item) => <em key={item.term}><b>{item.term}</b>＝{item.note}</em>)}
+              </div> : null}
+              <label>标题<input value={headline.title} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { title: event.target.value })} /></label>
               <label>摘要<textarea rows={3} value={headline.summary} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { summary: event.target.value })} /></label>
-              <label>重要資訊（每行一點）<textarea rows={4} value={(headline.keyPoints ?? []).join("\n")} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { keyPoints: event.target.value.split("\n").map((point) => point.trim()).filter(Boolean).slice(0, 4) })} /></label>
-              <label>市場影響<textarea rows={3} value={headline.marketImpact} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { marketImpact: event.target.value })} /></label>
-              <div className="review-fields"><label>分類<select value={headline.category} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { category: event.target.value as Category })}>{categories.map((category) => <option key={category}>{category}</option>)}</select></label><label>影響<input type="number" min="1" max="5" value={headline.impact} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { impact: Number(event.target.value) })} /></label><label>信心<input type="number" min="1" max="99" value={headline.confidence} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { confidence: Number(event.target.value) })} /></label></div>
+              <label>重要信息（每行一点）<textarea rows={4} value={(headline.keyPoints ?? []).join("\n")} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { keyPoints: event.target.value.split("\n").map((point) => point.trim()).filter(Boolean).slice(0, 4) })} /></label>
+              <label>市场影响<textarea rows={3} value={headline.marketImpact} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { marketImpact: event.target.value })} /></label>
+              <div className="review-fields"><label>分类<select value={headline.category} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { category: event.target.value as Category })}>{categories.map((category) => <option key={category} value={category}>{categoryDisplayNames[category]}</option>)}</select></label><label>影响<input type="number" min="1" max="5" value={headline.impact} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { impact: Number(event.target.value) })} /></label><label>信心<input type="number" min="1" max="99" value={headline.confidence} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { confidence: Number(event.target.value) })} /></label></div>
             </article>
           ))}
-        </section> : <div className="review-empty">從左側選擇草稿，或產生今日草稿開始審核。</div>}
+        </section> : <div className="review-empty">从左侧选择草稿，或生成今日草稿开始审核。</div>}
       </main>
     </div>
   );
