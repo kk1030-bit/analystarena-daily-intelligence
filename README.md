@@ -2,7 +2,31 @@
 
 把官方公告、新闻、Reddit 与 X 的公开信号整理成“可审核、可发布、可保存 PDF”的每日投资情报。
 
+## 在线入口
+
+| 功能 | 网址 |
+| --- | --- |
+| 网站首页 | [analystarena-daily-intelligence.onrender.com](https://analystarena-daily-intelligence.onrender.com/) |
+| 今日热搜榜 | [/trending](https://analystarena-daily-intelligence.onrender.com/trending) |
+| 历史日报与 PDF | [/archive](https://analystarena-daily-intelligence.onrender.com/archive) |
+| 人工审核台（需要管理员凭证） | [/review](https://analystarena-daily-intelligence.onrender.com/review) |
+| Reddit 数据服务说明 | [/api/v1/reddit](https://analystarena-daily-intelligence.onrender.com/api/v1/reddit) |
+| Reddit 搜索接口 | [/api/v1/reddit/search](https://analystarena-daily-intelligence.onrender.com/api/v1/reddit/search) |
+| 服务健康检查 | [/api/health](https://analystarena-daily-intelligence.onrender.com/api/health) |
+| GitHub 仓库 | [kk1030-bit/analystarena-daily-intelligence](https://github.com/kk1030-bit/analystarena-daily-intelligence) |
+
 `/trending` 提供今日热搜榜：置顶当日焦点，并可切换热搜榜、财经榜与科技榜；榜单综合市场影响、发布时间、跨来源验证与讨论热度，每十分钟自动更新，也可手动刷新。
+
+## Reddit 数据服务
+
+采集到的 Reddit 帖子可保存到 PostgreSQL，并通过带凭证的公开搜索接口提供给团队程序。正式环境必须同时配置 `DATABASE_URL` 与 `REDDIT_SEARCH_API_TOKEN`；任何一项缺失时，搜索接口会返回 `503`，避免在未受保护或未持久化的状态下对外提供数据。
+
+```bash
+curl "https://analystarena-daily-intelligence.onrender.com/api/v1/reddit/search?q=Nvidia&subreddit=stocks&limit=20" \
+  -H "Authorization: Bearer $REDDIT_SEARCH_API_TOKEN"
+```
+
+接口也支持 `X-API-Key` 请求头。查询参数、响应格式与状态码请参阅 [Reddit 搜索接口文档](docs/reddit-search-api.md)。仓库与文档不会保存真实凭证。
 
 ## 第三版流程
 
@@ -31,16 +55,17 @@ npm run dev
 - `DATABASE_URL`：PostgreSQL 连接字符串。
 - `ADMIN_TOKEN`：登录人工审核台并保护写入接口。
 - `CRON_SECRET`：保护 `/api/cron/daily`。
+- `REDDIT_SEARCH_API_TOKEN`：保护公开 Reddit 搜索接口；调用方使用 Bearer Token 或 `X-API-Key`。
 - `OPENAI_API_KEY`：启用 AI 摘要、事件合并与影响判断；未设置时自动翻译仍会运行。
 - `X_AUTH_TOKEN`：可选；放在 GitHub Actions repository secret。未设置时 X Playwright 会安全跳过登录限定搜索。
 - `ENABLE_BROWSER_COLLECTORS=true`：只供本机测试直接启用 Playwright；Render 正式环境保持 `false`。
 
 ## 每日排程
 
-`.github/workflows/daily-brief.yml` 每天台北時間 07:00 在 GitHub Actions 執行 Playwright，再把 Reddit/X 素材傳給 Render 產生草稿。請把與 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret；需要 X 登入搜尋時，再加入 `X_AUTH_TOKEN`。
+`.github/workflows/daily-brief.yml` 每天台北时间 07:00 在 GitHub Actions 执行 Playwright，再把 Reddit/X 素材传给 Render 生成草稿。请把与 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret；需要登录 X 搜索时，再加入 `X_AUTH_TOKEN`。
 
-Playwright 不直接跑在 Render，避免免費方案的記憶體被 Chromium 耗盡而重啟服務。
+Playwright 不直接运行在 Render，避免免费方案的内存被 Chromium 耗尽而重启服务。
 
 ## 部署注意
 
-Render 免費 Web Service 沒有持久磁碟，因此 PDF 直接存 PostgreSQL。免費 Render Postgres 目前 30 天到期，只適合測試；長期使用需選擇付費 Render Postgres 或外部持久 PostgreSQL。
+Render 免费 Web Service 没有持久磁盘，因此 PDF 直接存入 PostgreSQL。免费 Render Postgres 目前 30 天到期，只适合测试；长期使用需选择付费 Render Postgres 或外部持久 PostgreSQL。
