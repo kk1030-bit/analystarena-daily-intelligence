@@ -13,6 +13,7 @@ import {
   Download,
   ExternalLink,
   FileText,
+  Flame,
   Globe2,
   LayoutDashboard,
   ListChecks,
@@ -232,6 +233,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         </div>
         <nav aria-label="主要导览">
           <a className="is-current" href="#brief"><LayoutDashboard size={17} />今日简报</a>
+          <a href="/trending"><Flame size={17} />热搜榜</a>
           <a href="#headlines"><Newspaper size={17} />市场头条</a>
           <a href="#social"><MessageCircle size={17} />社交媒体信号</a>
           <a href="#watchlist"><CalendarDays size={17} />观察清单</a>
