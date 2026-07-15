@@ -19,6 +19,14 @@ function numberFromLabel(value: string): number {
   return Math.round(Number(match[1]) * multiplier);
 }
 
+function preciseTimestamp(value: string): { publishedAt: string; collectedAt: string; timestampKind: "published" | "collected" } {
+  const collectedAt = new Date().toISOString();
+  const publishedAt = new Date(value);
+  return Number.isNaN(publishedAt.valueOf())
+    ? { publishedAt: collectedAt, collectedAt, timestampKind: "collected" }
+    : { publishedAt: publishedAt.toISOString(), collectedAt, timestampKind: "published" };
+}
+
 async function executablePath(): Promise<string> {
   const configured = process.env.CHROME_PATH;
   if (configured && existsSync(configured)) return configured;
@@ -92,16 +100,18 @@ async function collectReddit(page: Page): Promise<RawStory[]> {
     for (const row of rows) {
       if (!row.title || !row.url) continue;
       const engagement = numberFromLabel(row.score) + numberFromLabel(row.comments) * 2;
+      const timestamp = preciseTimestamp(row.publishedAt);
       stories.push({
         id: idFor(`reddit:${community}:${row.title}`),
         title: row.title,
         description: `Reddit r/${community} 热门讨论，互动指标 ${engagement}。`,
         url: row.url,
-        publishedAt: row.publishedAt || new Date().toISOString(),
+        publishedAt: timestamp.publishedAt,
         source: `r/${community}`,
         sourceType: "Reddit",
         engagement,
-        collectedAt: new Date().toISOString(),
+        collectedAt: timestamp.collectedAt,
+        timestampKind: timestamp.timestampKind,
       });
     }
   }
@@ -138,16 +148,18 @@ async function collectX(page: Page): Promise<RawStory[]> {
 
       for (const tweet of tweets) {
         if (!tweet.text || !tweet.link) continue;
+        const timestamp = preciseTimestamp(tweet.publishedAt);
         stories.push({
           id: idFor(`x:${tweet.link}`),
           title: tweet.text.slice(0, 180),
           description: `X 实时搜索“${query}”所抓取的公开帖子。`,
           url: tweet.link,
-          publishedAt: tweet.publishedAt || new Date().toISOString(),
+          publishedAt: timestamp.publishedAt,
           source: `X · ${query}`,
           sourceType: "X",
           engagement: numberFromLabel(tweet.metricText),
-          collectedAt: new Date().toISOString(),
+          collectedAt: timestamp.collectedAt,
+          timestampKind: timestamp.timestampKind,
         });
       }
     } catch {

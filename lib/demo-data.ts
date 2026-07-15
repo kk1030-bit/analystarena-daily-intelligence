@@ -2,6 +2,7 @@ import type { DailyBrief } from "./types";
 
 const demoDate = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Taipei" });
 const demoGeneratedAt = new Date().toISOString();
+const demoTimestamp = (time: string) => new Date(`${demoDate}T${time}:00+08:00`).toISOString();
 
 export const demoBrief: DailyBrief = {
   date: demoDate,
@@ -17,6 +18,9 @@ export const demoBrief: DailyBrief = {
       ticker: "NVDA",
       title: "大型云端客户的 AI 资本支出，仍是今日风险偏好的核心变数",
       summary: "市场讨论集中在 AI 伺服器需求、供应节奏与客户资本支出延续性。正式交易前，应优先确认公司公告与主流媒体是否出现一致讯号。",
+      publishedAt: demoTimestamp("06:45"),
+      newsTimeSource: "Google News",
+      timestampKind: "published",
       keyPoints: ["大型云端客户的 AI 资本支出，是目前需求能见度的主要领先指标。", "观察 Blackwell 交付节奏、供应限制与资料中心客户的订单延续性。", "正式结论必须由公司公告及主流财经媒体交叉确认。"],
       marketImpact: "若需求能见度提高，半导体与资料中心供应链可能同步受益；若交付或毛利预期转弱，估值较高标的波动会先放大。",
       category: "AI",
@@ -36,6 +40,9 @@ export const demoBrief: DailyBrief = {
       ticker: "FOMC",
       title: "利率路径重新定价，市场等待下一个能改变共识的官方讯号",
       summary: "短线焦点从单一数据转向联准会措辞、就业与通膨资料的组合。社群押注仅作为情绪指标，仍以官方发布为事实基准。",
+      publishedAt: demoTimestamp("05:30"),
+      newsTimeSource: "Federal Reserve",
+      timestampKind: "published",
       keyPoints: ["市场正同时评估通膨、就业与联准会措辞，而非只看单一数据。", "美债殖利率与降息机率的变化，是成长股估值的重要传导渠道。", "政策判读以联准会正式文件及官员谈话为准。"],
       marketImpact: "殖利率若上行，成长股估值承压；若降息预期提前，科技股、长天期债券与高风险资产可能获得支撑。",
       category: "Macro",
@@ -54,6 +61,9 @@ export const demoBrief: DailyBrief = {
       ticker: "TSM",
       title: "先进制程与先进封装供应，持续牵动 AI 供应链评价",
       summary: "投资人关注产能扩张速度、客户组合与资本支出效率。真正有交易价值的讯号，应由法说、月营收或公司公告交叉确认。",
+      publishedAt: demoTimestamp("04:20"),
+      newsTimeSource: "Company IR",
+      timestampKind: "published",
       keyPoints: ["先进制程及先进封装产能，是 AI 晶片出货能否扩大的关键限制。", "追踪客户组合、资本支出效率与产能扩张速度。", "月营收、法说会和公司公告是主要验证来源。"],
       marketImpact: "供给瓶颈舒缓有利下游客户放量，但也可能改变稀缺性溢价；设备、材料与封装族群将出现不同敏感度。",
       category: "Semiconductor",
@@ -72,6 +82,9 @@ export const demoBrief: DailyBrief = {
       ticker: "AI",
       title: "模型更新与企业导入速度，取代单纯参数竞赛成为焦点",
       summary: "讨论重心逐渐转向推理成本、企业工作流程整合与实际付费转换。未证实的功能截图或匿名爆料不列入主要结论。",
+      publishedAt: demoTimestamp("03:10"),
+      newsTimeSource: "Company blogs",
+      timestampKind: "published",
       keyPoints: ["市场焦点由模型参数转向推理成本、企业导入及付费转换。", "通路、产品体验及工作流程整合将影响模型公司的商业化能力。", "匿名爆料与未验证截图不列入主要事实。"],
       marketImpact: "企业采用加速将利好云端、资料与应用层；成本下降则可能压缩基础模型差异化，让竞争转向通路与产品体验。",
       category: "AI",
@@ -90,6 +103,9 @@ export const demoBrief: DailyBrief = {
       ticker: "BTC",
       title: "ETF 资金流与宏观风险偏好，主导加密资产短线方向",
       summary: "价格讨论热度上升，但单一帐号或匿名贴文不构成投资证据。日报将资金流、监管公告与市场情绪分开呈现。",
+      publishedAt: demoTimestamp("02:40"),
+      newsTimeSource: "SEC",
+      timestampKind: "published",
       keyPoints: ["ETF 资金流与宏观风险偏好共同主导短线价格方向。", "监管公告、资金流与社群情绪会分开判读。", "单一帐号或匿名贴文只视为早期讯号。"],
       marketImpact: "持续流入可支撑相关资产与交易平台；若风险偏好反转，高杠杆部位可能放大价格波动。",
       category: "Crypto",

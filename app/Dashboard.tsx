@@ -9,6 +9,7 @@ import {
   CalendarDays,
   CheckCircle2,
   CircleDot,
+  Clock3,
   Download,
   ExternalLink,
   FileText,
@@ -27,6 +28,7 @@ import {
 import { useMemo, useState } from "react";
 import type { Category, DailyBrief, Headline, Sentiment, SourceType } from "@/lib/types";
 import { categoryDisplayNames as categoryLabels, extractTermNotes, sourceDisplayName } from "@/lib/terms";
+import { formatTaipeiMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
 
 const sentimentLabels: Record<Sentiment, string> = {
   positive: "偏多",
@@ -61,6 +63,7 @@ function SentimentMark({ value }: { value: Sentiment }) {
 }
 
 function HeadlineCard({ headline }: { headline: Headline }) {
+  const newsTime = resolveHeadlineTimestamp(headline);
   return (
     <article className="headline-card">
       <div className="rank-column">
@@ -79,6 +82,12 @@ function HeadlineCard({ headline }: { headline: Headline }) {
           {(headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline)).map((item) => <em key={item.term}><b>{item.term}</b>＝{item.note}</em>)}
         </div> : null}
         <p className="headline-summary">{headline.summary}</p>
+        <div className={`news-time news-time-${newsTime.kind}`}>
+          <Clock3 size={17} aria-hidden="true" />
+          <span>{timestampLabel(newsTime.kind)}</span>
+          <time dateTime={newsTime.value}>{formatTaipeiMinute(newsTime.value)}</time>
+          <small>台北时间{newsTime.source ? ` · 时间来源：${sourceDisplayName(newsTime.source)}` : ""}</small>
+        </div>
         {headline.keyPoints?.length ? <div className="key-facts">
           <div><ListChecks size={16} /><span>重要信息</span></div>
           <ul>{headline.keyPoints.map((point, index) => <li key={`${headline.id}-fact-${index}`}>{point}</li>)}</ul>

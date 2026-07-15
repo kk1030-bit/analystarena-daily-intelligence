@@ -14,17 +14,20 @@ function safeRemoteStories(value: unknown): RawStory[] {
     if (!story || typeof story !== "object") return [];
     const item = story as Partial<RawStory>;
     if ((item.sourceType !== "Reddit" && item.sourceType !== "X") || typeof item.title !== "string" || typeof item.url !== "string" || !/^https?:\/\//.test(item.url)) return [];
+    const collectedAt = new Date().toISOString();
     const publishedAt = new Date(String(item.publishedAt ?? ""));
+    const hasPublishedAt = !Number.isNaN(publishedAt.valueOf());
     return [{
       id: String(item.id ?? crypto.randomUUID()).slice(0, 120),
       title: item.title.slice(0, 240),
       description: String(item.description ?? "").slice(0, 900),
       url: item.url.slice(0, 1_500),
-      publishedAt: Number.isNaN(publishedAt.valueOf()) ? new Date().toISOString() : publishedAt.toISOString(),
+      publishedAt: hasPublishedAt ? publishedAt.toISOString() : collectedAt,
       source: String(item.source ?? item.sourceType).slice(0, 100),
       sourceType: item.sourceType,
       engagement: Math.max(0, Math.min(10_000_000, Number(item.engagement) || 0)),
-      collectedAt: new Date().toISOString(),
+      collectedAt,
+      timestampKind: item.timestampKind === "collected" || !hasPublishedAt ? "collected" : "published",
     }];
   });
 }

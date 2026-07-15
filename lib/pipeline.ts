@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import { collectBrowserStories } from "./collectors/browser";
 import { localizeBriefContent } from "./translation";
 import { categoryDisplayNames } from "./terms";
+import { formatTimestampLine } from "./time";
 import type {
   Category,
   CollectorStatus,
@@ -107,9 +108,11 @@ function storyId(title: string, source: string): string {
   return Math.abs(hash).toString(36);
 }
 
-function validDate(value: string): string {
+function storyTimestamp(value: string, collectedAt: string): { value: string; kind: "published" | "collected" } {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+  return Number.isNaN(date.getTime())
+    ? { value: collectedAt, kind: "collected" }
+    : { value: date.toISOString(), kind: "published" };
 }
 
 async function fetchFeed(feed: FeedDefinition): Promise<RawStory[]> {
@@ -143,16 +146,21 @@ async function fetchFeed(feed: FeedDefinition): Promise<RawStory[]> {
   return items
     .filter((item) => item.title && item.url)
     .slice(0, 16)
-    .map((item) => ({
-      id: storyId(item.title, feed.name),
-      title: stripHtml(item.title),
-      description: stripHtml(item.description),
-      url: item.url,
-      publishedAt: validDate(item.publishedAt),
-      source: feed.name,
-      sourceType: feed.type,
-      collectedAt: new Date().toISOString(),
-    }));
+    .map((item) => {
+      const collectedAt = new Date().toISOString();
+      const timestamp = storyTimestamp(item.publishedAt, collectedAt);
+      return {
+        id: storyId(item.title, feed.name),
+        title: stripHtml(item.title),
+        description: stripHtml(item.description),
+        url: item.url,
+        publishedAt: timestamp.value,
+        source: feed.name,
+        sourceType: feed.type,
+        collectedAt,
+        timestampKind: timestamp.kind,
+      };
+    });
 }
 
 function tokens(value: string): Set<string> {
@@ -238,7 +246,7 @@ function keyPointsFromGroup(group: RawStory[], primary: RawStory): string[] {
   }
 
   if (points.length < 2) {
-    points.push(`目前由 ${new Set(group.map((story) => story.source)).size} 个来源交叉整理，最新资料时间为 ${new Date(primary.publishedAt).toLocaleString("zh-CN", { timeZone: "Asia/Taipei", hour12: false })}。`);
+    points.push(`${formatTimestampLine(primary.publishedAt, primary.timestampKind)}；目前由 ${new Set(group.map((story) => story.source)).size} 个来源交叉整理。`);
   }
   return points.slice(0, 3);
 }
@@ -275,8 +283,9 @@ function deduplicateStories(stories: RawStory[]): RawStory[] {
 
 function headlineFromGroup(group: RawStory[]): Headline {
   const primary = [...group].sort((a, b) => {
+    const timestampDifference = Number(b.timestampKind !== "collected") - Number(a.timestampKind !== "collected");
     const recencyDifference = freshnessScore(b.publishedAt) - freshnessScore(a.publishedAt);
-    return recencyDifference || sourceWeight(b.sourceType) - sourceWeight(a.sourceType);
+    return timestampDifference || recencyDifference || sourceWeight(b.sourceType) - sourceWeight(a.sourceType);
   })[0];
   const combined = group.map((story) => `${story.title} ${story.description}`).join(" ");
   const category = categoryFor(combined);
@@ -300,6 +309,9 @@ function headlineFromGroup(group: RawStory[]): Headline {
     title: primary.title,
     summary: extractedSummary || `${primary.source} 发布此事件；系统已合并 ${group.length} 则相近素材并完成来源查核。`,
     keyPoints,
+    publishedAt: primary.publishedAt,
+    newsTimeSource: primary.source,
+    timestampKind: primary.timestampKind ?? "published",
     marketImpact: `事件主要影响“${categoryDisplayNames[category]}”。目前有 ${uniqueSources} 个来源、${uniqueTypes} 种来源层级；社交媒体热度只作早期信号，不直接视为事实。`,
     category,
     impact,
@@ -313,7 +325,7 @@ function headlineFromGroup(group: RawStory[]): Headline {
       .sort((a, b) => sourceWeight(b.sourceType) - sourceWeight(a.sourceType))
       .filter((story, index, all) => all.findIndex((candidate) => candidate.source === story.source && candidate.url === story.url) === index)
       .slice(0, 6)
-      .map((story) => ({ name: story.source, type: story.sourceType, url: story.url, publishedAt: story.publishedAt })),
+      .map((story) => ({ name: story.source, type: story.sourceType, url: story.url, publishedAt: story.publishedAt, timestampKind: story.timestampKind ?? "published" })),
   };
 }
 
@@ -425,6 +437,10 @@ async function enrichAndMergeWithAi(candidates: Headline[]): Promise<Headline[]>
     if (!bases.length) return [];
     const sources = bases.flatMap((base) => base.sources).filter((source, index, all) => all.findIndex((candidate) => candidate.url === source.url) === index).slice(0, 6);
     const rankingScore = Math.max(...bases.map((base) => base.rankingScore ?? 0));
+    const timeBase = [...bases].sort((a, b) => {
+      const timestampDifference = Number(b.timestampKind !== "collected") - Number(a.timestampKind !== "collected");
+      return timestampDifference || +new Date(b.publishedAt ?? 0) - +new Date(a.publishedAt ?? 0);
+    })[0];
     return [{
       ...bases[0],
       id: bases.map((base) => base.id).sort().join("-").slice(0, 96) || `ai-${itemIndex}`,
@@ -433,6 +449,9 @@ async function enrichAndMergeWithAi(candidates: Headline[]): Promise<Headline[]>
       summary: item.summary.slice(0, 420),
       keyPoints: item.keyPoints.map((point) => point.slice(0, 240)).slice(0, 4),
       marketImpact: item.marketImpact.slice(0, 420),
+      publishedAt: timeBase.publishedAt,
+      newsTimeSource: timeBase.newsTimeSource,
+      timestampKind: timeBase.timestampKind ?? "published",
       category: item.category,
       impact: item.impact,
       confidence: item.confidence,

@@ -10,12 +10,14 @@ export type Category =
 
 export type SourceType = "Official" | "News" | "Reddit" | "X";
 export type Sentiment = "positive" | "neutral" | "negative";
+export type TimestampKind = "published" | "collected";
 
 export interface SourceLink {
   name: string;
   type: SourceType;
   url: string;
   publishedAt?: string;
+  timestampKind?: TimestampKind;
 }
 
 export interface TermNote {
@@ -31,6 +33,9 @@ export interface Headline {
   summary: string;
   keyPoints?: string[];
   termNotes?: TermNote[];
+  publishedAt?: string;
+  newsTimeSource?: string;
+  timestampKind?: TimestampKind;
   marketImpact: string;
   category: Category;
   impact: number;
@@ -101,6 +106,7 @@ export interface RawStory {
   sourceType: SourceType;
   engagement?: number;
   collectedAt?: string;
+  timestampKind?: TimestampKind;
 }
 
 export type BriefStatus = "draft" | "published";

@@ -2,6 +2,7 @@ import path from "node:path";
 import PDFDocument from "pdfkit";
 import type { DailyBrief, Headline } from "./types";
 import { categoryDisplayNames, extractTermNotes, sourceDisplayName } from "./terms";
+import { formatTimestampLine, resolveHeadlineTimestamp } from "./time";
 
 const page = { width: 595.28, height: 841.89, margin: 44 };
 const colors = {
@@ -108,15 +109,18 @@ function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: s
   const facts = factsFor(headline);
   const termNotes = headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline);
   const termLine = pdfText(termNotes.length ? `英文术语: ${termNotes.map((item) => `${item.term}=${item.note}`).join("; ")}` : "", 420);
+  const newsTime = resolveHeadlineTimestamp(headline);
+  const timeLine = pdfText(`${formatTimestampLine(newsTime.value, newsTime.kind)}${newsTime.source ? ` / 时间来源: ${sourceDisplayName(newsTime.source)}` : ""}`, 420);
   const sourceLine = pdfText(`来源: ${headline.sources.map((source) => sourceDisplayName(source.name)).join(" / ") || "待补充"}`, 420);
 
   const titleHeight = doc.font("NotoSC").fontSize(16).heightOfString(title, { width: innerWidth, lineGap: 2 });
   const termHeight = termLine ? doc.fontSize(8.8).heightOfString(termLine, { width: innerWidth, lineGap: 2 }) : 0;
+  const timeHeight = doc.fontSize(9.5).heightOfString(timeLine, { width: innerWidth - 20, lineGap: 2 });
   const summaryHeight = doc.fontSize(10.8).heightOfString(summary, { width: innerWidth, lineGap: 3 });
   const factHeights = facts.map((fact) => doc.fontSize(10.5).heightOfString(fact, { width: innerWidth - 22, lineGap: 2 }));
   const factsHeight = factHeights.reduce((sum, height) => sum + height + 7, 0);
   const impactHeight = doc.fontSize(10.5).heightOfString(impact, { width: innerWidth - 18, lineGap: 2 });
-  const blockHeight = 191 + titleHeight + termHeight + (termLine ? 12 : 0) + summaryHeight + factsHeight + impactHeight;
+  const blockHeight = 218 + titleHeight + termHeight + (termLine ? 12 : 0) + timeHeight + summaryHeight + factsHeight + impactHeight;
   ensureDetailRoom(doc, blockHeight + 14, date);
 
   const top = doc.y;
@@ -137,6 +141,10 @@ function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: s
     doc.fillColor(colors.muted).fontSize(8.8).text(termLine, x, cursor, { width: innerWidth, lineGap: 2 });
     cursor += termHeight + 12;
   }
+
+  doc.save().rect(x, cursor, innerWidth, timeHeight + 20).fill(newsTime.kind === "collected" ? "#FFF0E8" : "#EEF6E8").restore();
+  doc.fillColor(newsTime.kind === "collected" ? colors.orange : "#24766C").fontSize(9.5).text(timeLine, x + 10, cursor + 9, { width: innerWidth - 20, lineGap: 2 });
+  cursor += timeHeight + 31;
 
   doc.fillColor(colors.orange).fontSize(8.5).text("事件摘要", x, cursor);
   cursor += 16;
