@@ -143,9 +143,9 @@ export function ReviewConsole() {
           <small>AnalystArena 人工审核台</small>
           <h1>人工审核入口</h1>
           <p>输入 Render 环境中的管理员密码（ADMIN_TOKEN）。密码只保存在这个浏览器分页的临时存储中。</p>
-          <label><KeyRound size={15} /><input type="password" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void connect()} placeholder="管理密码" /></label>
+          <label><span className="visually-hidden">管理员密码</span><KeyRound size={15} /><input aria-label="管理员密码" aria-invalid={Boolean(message)} autoComplete="current-password" type="password" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void connect()} placeholder="管理密码" /></label>
           <button className="primary-button" onClick={() => void connect()} disabled={busy || !tokenInput}>{busy ? <LoaderCircle className="is-spinning" size={16} /> : <Check size={16} />}进入审核台</button>
-          {message && <p className="review-error">{message}</p>}
+          {message && <p className="review-error" role="alert">{message}</p>}
           <Link href="/">← 返回日报</Link>
         </div>
       </main>
@@ -162,7 +162,7 @@ export function ReviewConsole() {
         <div><small>审核队列</small><h1>日报审核</h1><p className={`storage-pill storage-${storage}`}>{storage === "postgres" ? "PostgreSQL 数据库已连接" : "内存示范模式"}</p></div>
         <button className="primary-button generate-button" onClick={() => void generateDraft()} disabled={busy}><Plus size={16} />生成今日草稿</button>
         <nav>
-          {records.map((record) => <button key={record.id} className={selected?.id === record.id ? "is-selected" : ""} onClick={() => choose(record)}><span>{record.date}</span><b>{record.status === "published" ? "已发布" : "待审核"}</b><small>{record.brief.headlines.length} 则头条</small></button>)}
+          {records.map((record) => <button key={record.id} aria-pressed={selected?.id === record.id} className={selected?.id === record.id ? "is-selected" : ""} onClick={() => choose(record)}><span>{record.date}</span><b>{record.status === "published" ? "已发布" : "待审核"}</b><small>{record.brief.headlines.length} 则头条</small></button>)}
           {!records.length && <p>尚无草稿。请生成今天的第一份日报。</p>}
         </nav>
       </aside>
@@ -171,7 +171,7 @@ export function ReviewConsole() {
           <div><small>{selected?.status === "published" ? "已发布" : "草稿"}</small><h2>{selected ? `${selected.date} 日报` : "选择一份日报"}</h2></div>
           {selected && <div>{selected.hasPdf && <a className="secondary-button" href={`/api/briefs/${selected.id}/pdf`} target="_blank" rel="noreferrer"><FileDown size={15} />PDF</a>}<button className="secondary-button" onClick={() => void save()} disabled={busy || !hasChanges || selected.status !== "draft"}><Save size={15} />保存</button><button className="publish-button" onClick={() => void publish()} disabled={busy || selected.status === "published"}><Send size={15} />发布日报</button></div>}
         </div>
-        {message && <div className="review-message">{busy && <LoaderCircle className="is-spinning" size={15} />}{message}</div>}
+        {message && <div className="review-message" role="status" aria-live="polite">{busy && <LoaderCircle className="is-spinning" size={15} />}{message}</div>}
         {draft ? <section className="review-editor">
           {draft.warning && <div className="review-warning">{draft.warning}</div>}
           {draft.headlines.map((headline) => (

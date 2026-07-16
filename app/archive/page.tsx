@@ -12,7 +12,10 @@ export default async function ArchivePage() {
     <main className="standalone-page">
       <header className="standalone-header">
         <Link href="/" className="standalone-brand"><span><Radar size={21} /></span>AnalystArena</Link>
-        <Link href="/review" className="text-link">人工审核 →</Link>
+        <nav className="standalone-links" aria-label="历史日报导览">
+          <Link href="/trending" className="text-link">今日热搜</Link>
+          <Link href="/review" className="text-link">人工审核 →</Link>
+        </nav>
       </header>
       <section className="archive-hero">
         <span>历史市场情报</span>

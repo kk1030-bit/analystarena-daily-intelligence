@@ -154,20 +154,21 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
 
   return (
     <div className="app-shell trending-shell">
+      <a className="skip-link" href="#hot-board-title">跳至热搜榜</a>
       <aside className="sidebar">
-        <div className="brand-lockup">
+        <Link className="brand-lockup" href="/" aria-label="AnalystArena 首页">
           <div className="brand-symbol"><Radar size={24} /></div>
           <div><strong>AnalystArena</strong><span>每日市场情报</span></div>
-        </div>
+        </Link>
         <nav aria-label="主要导览">
           <Link href="/"><LayoutDashboard size={17} />今日简报</Link>
-          <Link className="is-current" href="/trending"><Flame size={17} />热搜榜</Link>
+          <Link className="is-current" aria-current="page" href="/trending"><Flame size={17} />热搜榜</Link>
           <Link href="/#headlines"><Newspaper size={17} />市场头条</Link>
           <Link href="/#social"><MessageCircle size={17} />社交媒体信号</Link>
           <Link href="/#watchlist"><CalendarDays size={17} />观察清单</Link>
           <Link href="/archive"><Search size={17} />历史日报</Link>
           <Link href="/review"><ShieldCheck size={17} />人工审核</Link>
-          <Link href="/"><FileText size={17} />PDF 报告</Link>
+          <Link href="/"><FileText size={17} />日报与 PDF</Link>
         </nav>
         <div className="sidebar-sources">
           <span>榜单依据</span>
@@ -185,6 +186,7 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
 
       <main className="main-canvas trending-main">
         <header className="topbar">
+          <Link className="mobile-brand" href="/"><Radar size={20} /><span>AnalystArena</span></Link>
           <div className="breadcrumb"><span>热点中心</span><b>/</b><strong>今日榜单</strong></div>
           <div className="topbar-actions">
             <span className="mode-badge mode-live"><Activity size={12} /> 动态热搜</span>
@@ -225,9 +227,9 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
                 <button type="button" onClick={() => setBatch((value) => value + 1)}><RotateCw size={15} />换一批</button>
               </header>
               <div className="hot-tabs" role="tablist" aria-label="热搜榜分类">
-                {tabs.map((tab) => <button key={tab.id} role="tab" aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "is-active" : ""} onClick={() => { setActiveTab(tab.id); setBatch(0); }}>{tab.label}</button>)}
+                {tabs.map((tab) => <button id={`hot-tab-${tab.id}`} aria-controls="hot-list-panel" key={tab.id} role="tab" aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "is-active" : ""} onClick={() => { setActiveTab(tab.id); setBatch(0); }}>{tab.label}</button>)}
               </div>
-              <div className="hot-list" role="tabpanel">
+              <div className="hot-list" id="hot-list-panel" role="tabpanel" aria-labelledby={`hot-tab-${activeTab}`} aria-live="polite" aria-busy={isRefreshing}>
                 {visibleItems.map((item, index) => (
                   <a className="hot-row" href={item.href} target={item.external ? "_blank" : undefined} rel={item.external ? "noreferrer" : undefined} key={item.id}>
                     <span className={`hot-rank hot-rank-${index + 1}`}>{index + 1}</span>
@@ -269,13 +271,20 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
                 <small>市场热度</small>
                 <h3>今日分类强度</h3>
                 <div className="trend-category-list">
-                  {brief.marketHeat.slice(0, 5).map((item) => <div key={item.category}><span>{categoryDisplayNames[item.category]}</span><b>{"●".repeat(item.score)}<i>{"●".repeat(5 - item.score)}</i></b></div>)}
+                  {brief.marketHeat.slice(0, 5).map((item) => <div key={item.category}><span>{categoryDisplayNames[item.category]}</span><span className="trend-strength" role="meter" aria-label={`${categoryDisplayNames[item.category]}强度 ${item.score} / 5`} aria-valuemin={1} aria-valuemax={5} aria-valuenow={item.score}><i style={{ width: `${item.score * 20}%` }} /></span></div>)}
                 </div>
               </section>
             </aside>
           </div>
         </div>
       </main>
+      <nav className="mobile-dock" aria-label="移动端主要导览">
+        <Link href="/"><LayoutDashboard size={18} /><span>简报</span></Link>
+        <Link className="is-current" aria-current="page" href="/trending"><Flame size={18} /><span>热搜</span></Link>
+        <Link href="/#headlines"><Newspaper size={18} /><span>头条</span></Link>
+        <Link href="/#watchlist"><CalendarDays size={18} /><span>观察</span></Link>
+        <Link href="/archive"><Search size={18} /><span>历史</span></Link>
+      </nav>
     </div>
   );
 }
