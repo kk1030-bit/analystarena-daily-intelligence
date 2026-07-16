@@ -353,7 +353,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         <div className="report-wrap">
           <section className="report-masthead">
             <div className="masthead-primary">
-              <div className="edition-line"><span>台北版</span><i />{dateLabel}</div>
+              <div className="edition-line">{dateLabel}</div>
               <h1><span>三分钟</span><em>看懂今日市场</em></h1>
               <p className="hero-deck">从事件发生时间、来源验证到市场影响，一次读完今天真正需要关注的金融变化。</p>
             </div>
