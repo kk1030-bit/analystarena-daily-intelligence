@@ -56,7 +56,19 @@ export interface MarketHeat {
 }
 
 export interface SocialTopic {
+  id?: string;
   label: string;
+  description?: string;
+  url?: string;
+  source?: string;
+  platform?: "Reddit" | "X";
+  publishedAt?: string;
+  timestampKind?: TimestampKind;
+  category?: Category;
+  signalScore?: number;
+  metricKind?: "engagement" | "mentions" | "estimated";
+  relatedHeadlineId?: string;
+  relationKind?: "same-source" | "semantic";
   mentions: number;
   change: number;
   sentiment: Sentiment;

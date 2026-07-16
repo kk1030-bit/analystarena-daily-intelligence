@@ -111,7 +111,13 @@ async function localizeHeadline(headline: Headline): Promise<Headline> {
 }
 
 async function localizeTopics(topics: SocialTopic[]): Promise<SocialTopic[]> {
-  return mapLimited(topics, 3, async (topic) => ({ ...topic, label: await localizeText(topic.label) }));
+  return mapLimited(topics, 3, async (topic) => {
+    const [label, description] = await Promise.all([
+      localizeText(topic.label),
+      topic.description ? localizeText(topic.description) : Promise.resolve(topic.description),
+    ]);
+    return { ...topic, label, description };
+  });
 }
 
 export async function localizeBriefContent(brief: DailyBrief): Promise<DailyBrief> {

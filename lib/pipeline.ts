@@ -483,16 +483,61 @@ function marketHeat(headlines: Headline[]): MarketHeat[] {
   });
 }
 
-function socialTopics(stories: RawStory[], type: "Reddit" | "X"): SocialTopic[] {
-  return stories.filter((story) => story.sourceType === type)
+function signalRelation(story: RawStory, headlines: Headline[]): Pick<SocialTopic, "relatedHeadlineId" | "relationKind"> {
+  const cleanUrl = story.url.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase();
+  const sameSource = headlines.find((headline) => headline.sources.some((source) => {
+    const sourceUrl = source.url.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase();
+    return cleanUrl.length > 12 && sourceUrl === cleanUrl;
+  }));
+  if (sameSource) return { relatedHeadlineId: sameSource.id, relationKind: "same-source" };
+
+  const storyText = `${story.title} ${story.description}`;
+  const storyCategory = categoryFor(storyText);
+  const candidates = headlines
+    .filter((headline) => headline.category === storyCategory && hoursApart(story.publishedAt, headline.publishedAt ?? story.publishedAt) <= 96)
+    .map((headline) => {
+      const headlineText = `${headline.ticker} ${headline.title} ${headline.summary} ${(headline.keyPoints ?? []).join(" ")}`;
+      const ticker = headline.ticker.toLowerCase();
+      const tickerMatch = ticker.length >= 3 && storyText.toLowerCase().includes(ticker);
+      return { headline, score: similarity(storyText, headlineText) + (tickerMatch ? 0.2 : 0) };
+    })
+    .sort((left, right) => right.score - left.score);
+  const best = candidates[0];
+  return best && best.score >= 0.34
+    ? { relatedHeadlineId: best.headline.id, relationKind: "semantic" }
+    : {};
+}
+
+function socialTopics(stories: RawStory[], type: "Reddit" | "X", headlines: Headline[]): SocialTopic[] {
+  const selected = stories.filter((story) => story.sourceType === type)
     .sort((a, b) => (b.engagement ?? 0) - (a.engagement ?? 0) || +new Date(b.publishedAt) - +new Date(a.publishedAt))
-    .slice(0, 3)
-    .map((story, index) => ({
+    .slice(0, 6);
+  const engagementValues = selected.map((story, index) => Math.max(1, story.engagement ?? 12 - index * 2));
+  const peakEngagement = Math.max(1, ...engagementValues);
+
+  return selected.map((story, index) => {
+    const engagement = engagementValues[index];
+    const relativeEngagement = Math.log1p(engagement) / Math.log1p(peakEngagement);
+    const signalScore = Math.max(20, Math.min(99, Math.round(relativeEngagement * 58 + freshnessScore(story.publishedAt) * 0.38)));
+    return {
+      id: story.id,
       label: story.title.slice(0, 54),
-      mentions: Math.max(1, story.engagement ?? 12 - index * 3),
-      change: Math.max(-9, 24 - index * 8),
+      description: concise(story.description || story.title, 320),
+      url: story.url,
+      source: story.source,
+      platform: type,
+      publishedAt: story.publishedAt,
+      timestampKind: story.timestampKind ?? "published",
+      category: categoryFor(`${story.title} ${story.description}`),
+      signalScore,
+      metricKind: story.engagement === undefined ? "estimated" : "engagement",
+      mentions: engagement,
+      // 保留旧字段以兼容历史 JSON；没有连续快照前不伪造涨幅。
+      change: 0,
       sentiment: sentimentFor(`${story.title} ${story.description}`),
-    }));
+      ...signalRelation(story, headlines),
+    };
+  });
 }
 
 export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}): Promise<DailyBrief> {
@@ -554,7 +599,7 @@ export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}):
     },
     headlines,
     marketHeat: marketHeat(headlines),
-    socialBuzz: { reddit: socialTopics(stories, "Reddit"), x: socialTopics(stories, "X") },
+    socialBuzz: { reddit: socialTopics(stories, "Reddit", headlines), x: socialTopics(stories, "X", headlines) },
     watchlist: [
       { time: "美东时间 08:30", event: "美国重要经济数据与官方谈话", why: "观察利率预期是否重新定价", category: "Macro" },
       { time: "盘前", event: "公司公告与重大新闻", why: "交叉确认社群出现的早期讯号", category: "Earnings" },
