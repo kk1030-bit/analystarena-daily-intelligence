@@ -5,7 +5,7 @@ import { Check, FileDown, KeyRound, LoaderCircle, LogOut, PencilLine, Plus, Rada
 import { useEffect, useMemo, useState } from "react";
 import type { BriefRecord, Category, DailyBrief, Headline } from "@/lib/types";
 import { categoryDisplayNames, extractTermNotes } from "@/lib/terms";
-import { fromTaipeiDateTimeInput, toTaipeiDateTimeInput } from "@/lib/time";
+import { fromBeijingDateTimeInput, toBeijingDateTimeInput } from "@/lib/time";
 
 const categories: Category[] = ["Macro", "AI", "Semiconductor", "Crypto", "ETF", "Earnings", "Geopolitics", "Other"];
 
@@ -184,7 +184,7 @@ export function ReviewConsole() {
               <label>标题<input value={headline.title} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { title: event.target.value })} /></label>
               <label>摘要<textarea rows={3} value={headline.summary} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { summary: event.target.value })} /></label>
               <div className="review-fields review-time-fields">
-                <label>新闻时间（台北时间）<input type="datetime-local" value={toTaipeiDateTimeInput(headline.publishedAt)} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { publishedAt: fromTaipeiDateTimeInput(event.target.value) })} /></label>
+                <label>新闻时间（北京时间）<input type="datetime-local" value={toBeijingDateTimeInput(headline.publishedAt)} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { publishedAt: fromBeijingDateTimeInput(event.target.value) })} /></label>
                 <label>时间依据<select value={headline.timestampKind ?? "published"} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { timestampKind: event.target.value === "collected" ? "collected" : "published" })}><option value="published">新闻发布时间</option><option value="collected">采集时间</option></select></label>
                 <label>时间来源<input value={headline.newsTimeSource ?? headline.sources[0]?.name ?? ""} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { newsTimeSource: event.target.value })} /></label>
               </div>

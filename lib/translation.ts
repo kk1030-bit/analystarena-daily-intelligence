@@ -7,6 +7,8 @@ const translationCache = new Map<string, string>();
 
 function normalizeMainlandTerms(value: string): string {
   const replacements: Array<[RegExp, string]> = [
+    [/[台臺]北[时時][间間]/g, "北京时间"],
+    [/Taipei\s+Time/gi, "北京时间"],
     [/联准会/g, "美联储"],
     [/讯号/g, "信号"],
     [/资讯/g, "信息"],
@@ -111,7 +113,13 @@ async function localizeHeadline(headline: Headline): Promise<Headline> {
 }
 
 async function localizeTopics(topics: SocialTopic[]): Promise<SocialTopic[]> {
-  return mapLimited(topics, 3, async (topic) => ({ ...topic, label: await localizeText(topic.label) }));
+  return mapLimited(topics, 3, async (topic) => {
+    const [label, description] = await Promise.all([
+      localizeText(topic.label),
+      topic.description ? localizeText(topic.description) : Promise.resolve(topic.description),
+    ]);
+    return { ...topic, label, description };
+  });
 }
 
 export async function localizeBriefContent(brief: DailyBrief): Promise<DailyBrief> {

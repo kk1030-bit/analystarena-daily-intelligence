@@ -177,7 +177,7 @@ export async function collectBrowserStories(): Promise<{ stories: RawStory[]; st
     browser = await launchBrowser();
     const context = await browser.newContext({
       locale: "en-US",
-      timezoneId: "Asia/Taipei",
+      timezoneId: "Asia/Shanghai",
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
     });
     const page = await context.newPage();

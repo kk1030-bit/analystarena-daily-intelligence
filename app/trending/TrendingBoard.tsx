@@ -25,8 +25,9 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { useMemo, useState, useTransition } from "react";
+import { resolveSignalHeadline, signalMetricLabel, signalStrength, socialSignalId } from "@/lib/investor-view";
 import { categoryDisplayNames, sourceDisplayName } from "@/lib/terms";
-import { formatTaipeiMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
+import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
 import type { Category, DailyBrief, TimestampKind } from "@/lib/types";
 
 type BoardTab = "all" | "finance" | "technology";
@@ -74,7 +75,8 @@ function normalizeTitle(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]/g, "").slice(0, 48);
 }
 
-function makeItems(brief: DailyBrief): TrendingItem[] {
+function makeItems(brief: DailyBrief, contextBatch: string): TrendingItem[] {
+  const batchQuery = encodeURIComponent(contextBatch);
   const headlineItems: TrendingItem[] = [...brief.headlines]
     .sort((left, right) => left.rank - right.rank)
     .map((headline) => {
@@ -84,8 +86,8 @@ function makeItems(brief: DailyBrief): TrendingItem[] {
         title: headline.title,
         description: headline.summary,
         category: headline.category,
-        href: headline.sources[0]?.url ?? "/#headlines",
-        external: Boolean(headline.sources[0]?.url),
+        href: `/headlines?event=${encodeURIComponent(headline.id)}&context=trending&batch=${batchQuery}`,
+        external: false,
         score: scoreForHeadline(brief, headline.rank),
         mentions: headline.mentions,
         badge: headline.rank <= 3 ? "热" : (headline.freshnessScore ?? 0) >= 86 ? "新" : undefined,
@@ -95,23 +97,30 @@ function makeItems(brief: DailyBrief): TrendingItem[] {
       };
     });
 
-  const socialItems: TrendingItem[] = [
-    ...brief.socialBuzz.reddit.map((topic, index) => ({ topic, platform: "Reddit", index })),
-    ...brief.socialBuzz.x.map((topic, index) => ({ topic, platform: "X", index })),
-  ].map(({ topic, platform, index }) => ({
-    id: `social-${platform}-${index}-${topic.label}`,
-    title: topic.label,
-    description: `${platform} 今日出现 ${topic.mentions} 次相关讨论，热度变化 ${topic.change >= 0 ? "+" : ""}${topic.change}%。社交媒体只作为市场情绪信号。`,
-    category: topicCategory(topic.label),
-    href: "/#social",
-    external: false,
-    score: Math.max(45, Math.min(96, 48 + Math.round(topic.mentions * 0.55 + Math.abs(topic.change) * 0.35))),
-    mentions: topic.mentions,
-    badge: topic.change >= 20 ? "热" : topic.change >= 10 ? "新" : undefined,
-    source: `${platform} 讨论热度`,
-    publishedAt: brief.generatedAt,
-    timestampKind: "collected" as const,
-  }));
+  const socialEntries = [
+    ...brief.socialBuzz.reddit.map((topic, index) => ({ topic, platform: "Reddit" as const, index })),
+    ...brief.socialBuzz.x.map((topic, index) => ({ topic, platform: "X" as const, index })),
+  ];
+  const socialItems: TrendingItem[] = socialEntries.map(({ topic, platform, index }) => {
+    const related = resolveSignalHeadline(topic, brief.headlines);
+    const sourceTypes = new Set(related?.sources.map((source) => source.type) ?? []);
+    const scoreCap = sourceTypes.has("Official") ? 93 : sourceTypes.has("News") ? 90 : related ? 84 : 76;
+    const score = Math.min(signalStrength(topic), scoreCap);
+    return {
+      id: `social-${socialSignalId(topic, platform, index)}`,
+      title: topic.label,
+      description: topic.description ?? `${platform} ${signalMetricLabel(topic)}为 ${topic.mentions}；社交媒体只作为市场情绪信号。`,
+      category: topic.category ?? topicCategory(topic.label),
+      href: `/signals?platform=${platform.toLowerCase()}&signal=${encodeURIComponent(socialSignalId(topic, platform, index))}&context=trending&batch=${batchQuery}`,
+      external: false,
+      score,
+      mentions: topic.mentions,
+      badge: score >= 80 ? "热" : score >= 65 ? "新" : undefined,
+      source: topic.source ?? `${platform} 公开讨论`,
+      publishedAt: topic.publishedAt ?? brief.generatedAt,
+      timestampKind: topic.timestampKind ?? "collected" as const,
+    };
+  });
 
   const seen = new Set<string>();
   return [...headlineItems, ...socialItems]
@@ -131,12 +140,12 @@ function matchesTab(item: TrendingItem, tab: BoardTab): boolean {
   return true;
 }
 
-export function TrendingBoard({ brief }: { brief: DailyBrief }) {
+export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; contextBatch: string }) {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<BoardTab>("all");
   const [batch, setBatch] = useState(0);
   const [isRefreshing, startRefresh] = useTransition();
-  const items = useMemo(() => makeItems(brief), [brief]);
+  const items = useMemo(() => makeItems(brief, contextBatch), [brief, contextBatch]);
   const filtered = useMemo(() => items.filter((item) => matchesTab(item, activeTab)), [activeTab, items]);
   const visibleItems = useMemo(() => {
     if (filtered.length <= 5 || batch === 0) return filtered.slice(0, 15);
@@ -146,7 +155,7 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
     return [...leaders, ...rest.slice(offset), ...rest.slice(0, offset)].slice(0, 15);
   }, [batch, filtered]);
   const lead = items[0];
-  const updatedAt = formatTaipeiMinute(brief.generatedAt);
+  const updatedAt = formatBeijingMinute(brief.generatedAt);
 
   function refreshPage() {
     startRefresh(() => router.replace(`/trending?refresh=${Date.now()}`, { scroll: false }));
@@ -163,8 +172,8 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
         <nav aria-label="主要导览">
           <Link href="/"><LayoutDashboard size={17} />今日简报</Link>
           <Link className="is-current" aria-current="page" href="/trending"><Flame size={17} />热搜榜</Link>
-          <Link href="/#headlines"><Newspaper size={17} />市场头条</Link>
-          <Link href="/#social"><MessageCircle size={17} />社交媒体信号</Link>
+          <Link href={`/headlines?context=trending&batch=${encodeURIComponent(contextBatch)}`}><Newspaper size={17} />市场头条</Link>
+          <Link href={`/signals?context=trending&batch=${encodeURIComponent(contextBatch)}`}><MessageCircle size={17} />社交媒体信号</Link>
           <Link href="/#watchlist"><CalendarDays size={17} />观察清单</Link>
           <Link href="/archive"><Search size={17} />历史日报</Link>
           <Link href="/review"><ShieldCheck size={17} />人工审核</Link>
@@ -206,7 +215,7 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
             <div className="trending-hero-note">
               <strong>把市场今天正在关注的事情放到最前面</strong>
               <p>综合新闻重要性、发布时间、跨来源数量与讨论热度；榜单不是搜索次数的简单堆叠。</p>
-              <div><Clock3 size={14} />榜单更新时间：{updatedAt}（台北时间）</div>
+              <div><Clock3 size={14} />榜单更新时间：{updatedAt}（北京时间）</div>
             </div>
           </section>
 
@@ -216,7 +225,7 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
               <small>{categoryDisplayNames[lead.category]} · 热度 {lead.score}</small>
               <h2>{lead.title}</h2>
               <p>{lead.description}</p>
-              <footer><span>{timestampLabel(lead.timestampKind)}：{formatTaipeiMinute(lead.publishedAt)}（台北时间）</span><b>{sourceDisplayName(lead.source)} <ArrowUpRight size={13} /></b></footer>
+              <footer><span>{timestampLabel(lead.timestampKind)}：{formatBeijingMinute(lead.publishedAt)}（北京时间）</span><b>{sourceDisplayName(lead.source)} <ArrowUpRight size={13} /></b></footer>
             </div>
           </a>}
 
@@ -236,7 +245,7 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
                     <div className="hot-row-content">
                       <div><span>{categoryDisplayNames[item.category]}</span>{item.badge && <i className={`hot-badge hot-badge-${item.badge === "热" ? "hot" : "new"}`}>{item.badge}</i>}</div>
                       <strong>{item.title}</strong>
-                      <small>{sourceDisplayName(item.source)} · {formatTaipeiMinute(item.publishedAt)} · {item.mentions} 次讨论</small>
+                      <small>{sourceDisplayName(item.source)} · {formatBeijingMinute(item.publishedAt)} · 热度指标 {item.mentions}</small>
                     </div>
                     <div className="hot-row-score"><span>热度</span><b>{item.score}</b><ChevronRight size={15} /></div>
                   </a>
@@ -281,8 +290,8 @@ export function TrendingBoard({ brief }: { brief: DailyBrief }) {
       <nav className="mobile-dock" aria-label="移动端主要导览">
         <Link href="/"><LayoutDashboard size={18} /><span>简报</span></Link>
         <Link className="is-current" aria-current="page" href="/trending"><Flame size={18} /><span>热搜</span></Link>
-        <Link href="/#headlines"><Newspaper size={18} /><span>头条</span></Link>
-        <Link href="/#watchlist"><CalendarDays size={18} /><span>观察</span></Link>
+        <Link href={`/headlines?context=trending&batch=${encodeURIComponent(contextBatch)}`}><Newspaper size={18} /><span>头条</span></Link>
+        <Link href={`/signals?context=trending&batch=${encodeURIComponent(contextBatch)}`}><MessageCircle size={18} /><span>信号</span></Link>
         <Link href="/archive"><Search size={18} /><span>历史</span></Link>
       </nav>
     </div>

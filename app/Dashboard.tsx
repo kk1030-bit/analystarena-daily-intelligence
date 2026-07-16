@@ -33,8 +33,9 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Category, DailyBrief, Headline, Sentiment, SourceType } from "@/lib/types";
+import { signalMetricLabel, signalStrength, socialSignalId } from "@/lib/investor-view";
 import { categoryDisplayNames as categoryLabels, extractTermNotes, sourceDisplayName } from "@/lib/terms";
-import { formatTaipeiMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
+import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
 
 const sentimentLabels: Record<Sentiment, string> = {
   positive: "偏多",
@@ -69,7 +70,7 @@ function SentimentMark({ value }: { value: Sentiment }) {
 }
 
 function pulseTime(value?: string) {
-  const formatted = formatTaipeiMinute(value);
+  const formatted = formatBeijingMinute(value);
   const match = formatted.match(/(\d{2}:\d{2})$/);
   return match?.[1] ?? "待确认";
 }
@@ -78,7 +79,15 @@ function sourceLayerCount(headline: Headline) {
   return Math.max(1, headline.crossSourceCount ?? new Set(headline.sources.map((source) => source.type)).size);
 }
 
-function MarketPulse({ headlines }: { headlines: Headline[] }) {
+function liveContextSuffix(contextBatch?: string): string {
+  return contextBatch ? `&context=trending&batch=${encodeURIComponent(contextBatch)}` : "";
+}
+
+function liveContextQuery(contextBatch?: string): string {
+  return contextBatch ? `?context=trending&batch=${encodeURIComponent(contextBatch)}` : "";
+}
+
+function MarketPulse({ headlines, contextBatch }: { headlines: Headline[]; contextBatch?: string }) {
   const topStories = [...headlines]
     .sort((left, right) => left.rank - right.rank)
     .slice(0, 5)
@@ -104,7 +113,7 @@ function MarketPulse({ headlines }: { headlines: Headline[] }) {
           return (
             <a
               className={`pulse-event pulse-impact-${headline.impact} pulse-layers-${Math.min(layers, 4)}`}
-              href={`#headline-${headline.id}`}
+              href={`/headlines?event=${encodeURIComponent(headline.id)}${liveContextSuffix(contextBatch)}`}
               key={headline.id}
               role="listitem"
               aria-label={`第 ${headline.rank} 名，${headline.ticker}，${headline.title}`}
@@ -142,7 +151,7 @@ function WatchPanel({ items }: { items: DailyBrief["watchlist"] }) {
   );
 }
 
-function HeadlineCard({ headline }: { headline: Headline }) {
+function HeadlineCard({ headline, contextBatch }: { headline: Headline; contextBatch?: string }) {
   const newsTime = resolveHeadlineTimestamp(headline);
   return (
     <article className={`headline-card headline-rank-${headline.rank}`} id={`headline-${headline.id}`}>
@@ -166,8 +175,8 @@ function HeadlineCard({ headline }: { headline: Headline }) {
         <div className={`news-time news-time-${newsTime.kind}`}>
           <Clock3 size={17} aria-hidden="true" />
           <span>{timestampLabel(newsTime.kind)}</span>
-          <time dateTime={newsTime.value}>{formatTaipeiMinute(newsTime.value)}</time>
-          <small>台北时间{newsTime.source ? ` · 时间来源：${sourceDisplayName(newsTime.source)}` : ""}</small>
+          <time dateTime={newsTime.value}>{formatBeijingMinute(newsTime.value)}</time>
+          <small>北京时间{newsTime.source ? ` · 时间来源：${sourceDisplayName(newsTime.source)}` : ""}</small>
         </div>
         {headline.keyPoints?.length ? <div className="key-facts">
           <div><ListChecks size={16} /><span>重要信息</span></div>
@@ -195,12 +204,16 @@ function HeadlineCard({ headline }: { headline: Headline }) {
             {headline.crossSourceCount !== undefined && <span><Globe2 size={13} /> {headline.crossSourceCount} 种来源</span>}
           </div>
         </footer>
+        <a className="headline-research-link" href={`/headlines?event=${encodeURIComponent(headline.id)}${liveContextSuffix(contextBatch)}`}>
+          <span>打开事件研究</span><small>查看证据层级、影响路径与下一步确认点</small><ArrowRight size={16} />
+        </a>
       </div>
     </article>
   );
 }
 
-function BuzzPanel({ title, kind, topics }: { title: string; kind: "reddit" | "x"; topics: DailyBrief["socialBuzz"]["reddit"] }) {
+function BuzzPanel({ title, kind, topics, contextBatch }: { title: string; kind: "reddit" | "x"; topics: DailyBrief["socialBuzz"]["reddit"]; contextBatch?: string }) {
+  const platform = kind === "reddit" ? "Reddit" : "X";
   return (
     <section className="side-card buzz-card">
       <div className="side-card-heading">
@@ -212,22 +225,24 @@ function BuzzPanel({ title, kind, topics }: { title: string; kind: "reddit" | "x
       </div>
       <div className="buzz-list">
         {topics.length ? topics.map((topic, index) => (
-          <div className="buzz-row" key={`${kind}-${topic.label}`}>
+          <a className="buzz-row" href={`/signals?platform=${kind}&signal=${encodeURIComponent(socialSignalId(topic, platform, index))}${liveContextSuffix(contextBatch)}`} key={socialSignalId(topic, platform, index)}>
             <span className="buzz-index">0{index + 1}</span>
             <div className="buzz-content">
               <strong>{topic.label}</strong>
-              <span>{topic.mentions} 次讨论 · <b className={topic.change >= 0 ? "change-up" : "change-down"}>{topic.change >= 0 ? "+" : ""}{topic.change}%</b></span>
+              <span>{signalMetricLabel(topic)} {topic.mentions} · <b>信号强度 {signalStrength(topic)}</b></span>
             </div>
             <SentimentMark value={topic.sentiment} />
-          </div>
+          </a>
         )) : <p className="empty-note">本次未取得足够的公开讨论信息。</p>}
       </div>
+      <a className="buzz-all-link" href={`/signals?filter=${kind}${liveContextSuffix(contextBatch)}`}>查看全部并验证事实 <ArrowRight size={14} /></a>
     </section>
   );
 }
 
 export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   const [brief, setBrief] = useState(initialBrief);
+  const [contextBatch, setContextBatch] = useState<string>();
   const [activeCategory, setActiveCategory] = useState<Category | "All">("All");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -245,7 +260,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   const weekday = ["日", "一", "二", "三", "四", "五", "六"][new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
   const dateLabel = `${year} 年 ${month} 月 ${day} 日 / 周${weekday}`;
   const generatedParts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Taipei",
+    timeZone: "Asia/Shanghai",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -254,7 +269,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
     hourCycle: "h23",
   }).formatToParts(new Date(brief.generatedAt));
   const generated = Object.fromEntries(generatedParts.map((part) => [part.type, part.value]));
-  const generatedLabel = `${generated.year}-${generated.month}-${generated.day} ${generated.hour}:${generated.minute} TPE`;
+  const generatedLabel = `${generated.year}-${generated.month}-${generated.day} ${generated.hour}:${generated.minute} BJT`;
 
   async function refreshBrief() {
     setIsRefreshing(true);
@@ -268,6 +283,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
       if (!response.ok) throw new Error("更新请求失败");
       const nextBrief = (await response.json()) as DailyBrief;
       setBrief(nextBrief);
+      setContextBatch(response.headers.get("X-AnalystArena-Batch") ?? undefined);
       setActiveCategory("All");
       setNotice(nextBrief.warning || `完成更新：${nextBrief.stats.candidates} 则素材已进入分析流程。`);
     } catch {
@@ -315,8 +331,8 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         <nav aria-label="主要导览">
           <a className="is-current" aria-current="page" href="#brief"><LayoutDashboard size={17} />今日简报</a>
           <a href="/trending"><Flame size={17} />热搜榜</a>
-          <a href="#headlines"><Newspaper size={17} />市场头条</a>
-          <a href="#social"><MessageCircle size={17} />社交媒体信号</a>
+          <a href={`/headlines${liveContextQuery(contextBatch)}`}><Newspaper size={17} />市场头条</a>
+          <a href={`/signals${liveContextQuery(contextBatch)}`}><MessageCircle size={17} />社交媒体信号</a>
           <a href="#watchlist"><CalendarDays size={17} />观察清单</a>
           <a href="/archive"><Search size={17} />历史日报</a>
           <a href="/review"><ShieldCheck size={17} />人工审核</a>
@@ -372,7 +388,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
 
           {notice && <div className="notice-bar" role="status" aria-live="polite"><Sparkles size={15} /><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="关闭通知">×</button></div>}
 
-          <MarketPulse headlines={brief.headlines} />
+          <MarketPulse headlines={brief.headlines} contextBatch={contextBatch} />
 
           <section className="stat-grid" aria-label="本日分析摘要">
             <div><span>进入分析</span><strong>{brief.stats.candidates}</strong><small>候选素材</small></div>
@@ -393,7 +409,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
 
           <div className="content-grid">
             <div className="headline-list">
-              {visibleHeadlines.map((headline) => <HeadlineCard headline={headline} key={headline.id} />)}
+              {visibleHeadlines.map((headline) => <HeadlineCard headline={headline} contextBatch={contextBatch} key={headline.id} />)}
             </div>
 
             <aside className="right-rail">
@@ -416,8 +432,8 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
               <WatchPanel items={brief.watchlist} />
 
               <div id="social">
-                <BuzzPanel title="Reddit 热门讨论" kind="reddit" topics={brief.socialBuzz.reddit} />
-                <BuzzPanel title="X 讨论动能" kind="x" topics={brief.socialBuzz.x} />
+                <BuzzPanel title="Reddit 热门讨论" kind="reddit" topics={brief.socialBuzz.reddit} contextBatch={contextBatch} />
+                <BuzzPanel title="X 讨论动能" kind="x" topics={brief.socialBuzz.x} contextBatch={contextBatch} />
               </div>
             </aside>
           </div>
@@ -425,15 +441,15 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           <footer className="report-footer">
             <div className="footer-brand"><Globe2 size={18} /><strong>AnalystArena 每日市场情报</strong></div>
             <p>本报告为信息整理与研究工具，不构成投资建议。请点击原始来源完成独立查证。</p>
-            <span>生成时间：{generatedLabel.replace("TPE", "台北")}</span>
+            <span>生成时间：{generatedLabel.replace("BJT", "北京")}</span>
           </footer>
         </div>
       </main>
       <nav className="mobile-dock" aria-label="移动端主要导览">
         <a className="is-current" aria-current="page" href="#brief"><LayoutDashboard size={18} /><span>简报</span></a>
         <a href="/trending"><Flame size={18} /><span>热搜</span></a>
-        <a href="#headlines"><Newspaper size={18} /><span>头条</span></a>
-        <a href="#watchlist"><CalendarDays size={18} /><span>观察</span></a>
+        <a href={`/headlines${liveContextQuery(contextBatch)}`}><Newspaper size={18} /><span>头条</span></a>
+        <a href={`/signals${liveContextQuery(contextBatch)}`}><MessageCircle size={18} /><span>信号</span></a>
         <a href="/archive"><Search size={18} /><span>历史</span></a>
       </nav>
     </div>
