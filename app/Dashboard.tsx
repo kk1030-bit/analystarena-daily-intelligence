@@ -8,6 +8,7 @@ import {
   Bot,
   CalendarDays,
   CheckCircle2,
+  ChevronRight,
   CircleDot,
   Clock3,
   Download,
@@ -15,7 +16,9 @@ import {
   FileText,
   Flame,
   Globe2,
+  Gauge,
   LayoutDashboard,
+  Layers3,
   ListChecks,
   MessageCircle,
   Newspaper,
@@ -23,7 +26,9 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Signal,
   Sparkles,
+  Timer,
   TrendingUp,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -63,12 +68,87 @@ function SentimentMark({ value }: { value: Sentiment }) {
   );
 }
 
+function pulseTime(value?: string) {
+  const formatted = formatTaipeiMinute(value);
+  const match = formatted.match(/(\d{2}:\d{2})$/);
+  return match?.[1] ?? "待确认";
+}
+
+function sourceLayerCount(headline: Headline) {
+  return Math.max(1, headline.crossSourceCount ?? new Set(headline.sources.map((source) => source.type)).size);
+}
+
+function MarketPulse({ headlines }: { headlines: Headline[] }) {
+  const topStories = [...headlines]
+    .sort((left, right) => left.rank - right.rank)
+    .slice(0, 5)
+    .sort((left, right) => {
+      const leftTime = new Date(resolveHeadlineTimestamp(left).value ?? 0).valueOf();
+      const rightTime = new Date(resolveHeadlineTimestamp(right).value ?? 0).valueOf();
+      return leftTime - rightTime || left.rank - right.rank;
+    });
+
+  return (
+    <section className="market-pulse" aria-labelledby="market-pulse-title">
+      <header className="pulse-header">
+        <div>
+          <span><Signal size={15} aria-hidden="true" />过去 24 小时</span>
+          <h2 id="market-pulse-title">今日市场冲击带</h2>
+        </div>
+        <p>节点亮度代表市场影响，来源层级越多，验证基础越完整。</p>
+      </header>
+      <div className="pulse-track" role="list" aria-label="今日前五大事件时间轴">
+        {topStories.map((headline) => {
+          const newsTime = resolveHeadlineTimestamp(headline);
+          const layers = sourceLayerCount(headline);
+          return (
+            <a
+              className={`pulse-event pulse-impact-${headline.impact} pulse-layers-${Math.min(layers, 4)}`}
+              href={`#headline-${headline.id}`}
+              key={headline.id}
+              role="listitem"
+              aria-label={`第 ${headline.rank} 名，${headline.ticker}，${headline.title}`}
+            >
+              <div className="pulse-meta"><span>排名 {String(headline.rank).padStart(2, "0")}</span><time dateTime={newsTime.value}>{pulseTime(newsTime.value)}</time></div>
+              <i className="pulse-node"><span /></i>
+              <div className="pulse-copy"><strong>{headline.ticker}</strong><span>{headline.title}</span></div>
+              <small><ImpactDots score={headline.impact} />{layers} 类来源<ChevronRight size={14} aria-hidden="true" /></small>
+            </a>
+          );
+        })}
+      </div>
+      {!topStories.length && <p className="pulse-empty">目前没有可用于建立市场冲击带的事件。</p>}
+    </section>
+  );
+}
+
+function WatchPanel({ items }: { items: DailyBrief["watchlist"] }) {
+  return (
+    <section className="side-card watch-card" id="watchlist">
+      <div className="side-card-heading">
+        <div className="icon-box icon-box-gold"><CalendarDays size={18} /></div>
+        <div><span>下一交易日</span><h3>明日观察清单</h3></div>
+      </div>
+      <div className="watch-rail-list">
+        {items.map((item, index) => (
+          <article key={`${item.event}-${index}`}>
+            <div><span>{item.time}</span><small>{categoryLabels[item.category]}</small></div>
+            <h4>{item.event}</h4>
+            <p>{item.why}</p>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function HeadlineCard({ headline }: { headline: Headline }) {
   const newsTime = resolveHeadlineTimestamp(headline);
   return (
-    <article className="headline-card">
+    <article className={`headline-card headline-rank-${headline.rank}`} id={`headline-${headline.id}`}>
       <div className="rank-column">
-        <span>0{headline.rank}</span>
+        <small>排名</small>
+        <span>{String(headline.rank).padStart(2, "0")}</span>
         <div />
       </div>
       <div className="headline-body">
@@ -226,13 +306,14 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#brief">跳至主要内容</a>
       <aside className="sidebar">
-        <div className="brand-lockup">
+        <a className="brand-lockup" href="#brief" aria-label="AnalystArena 首页">
           <div className="brand-symbol"><Radar size={24} /></div>
           <div><strong>AnalystArena</strong><span>每日市场情报</span></div>
-        </div>
+        </a>
         <nav aria-label="主要导览">
-          <a className="is-current" href="#brief"><LayoutDashboard size={17} />今日简报</a>
+          <a className="is-current" aria-current="page" href="#brief"><LayoutDashboard size={17} />今日简报</a>
           <a href="/trending"><Flame size={17} />热搜榜</a>
           <a href="#headlines"><Newspaper size={17} />市场头条</a>
           <a href="#social"><MessageCircle size={17} />社交媒体信号</a>
@@ -257,6 +338,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
 
       <main className="main-canvas" id="brief">
         <header className="topbar">
+          <a className="mobile-brand" href="#brief"><Radar size={20} /><span>AnalystArena</span></a>
           <div className="breadcrumb"><span>市场情报</span><b>/</b><strong>每日简报</strong></div>
           <div className="topbar-actions">
             <span className={`mode-badge mode-${brief.mode}`}>{brief.status === "published" ? "已发布" : brief.mode === "live" ? "实时预览" : "示范模式"}</span>
@@ -270,33 +352,41 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
 
         <div className="report-wrap">
           <section className="report-masthead">
-            <div>
-              <div className="edition-line"><span>台北版</span><i />{dateLabel}</div>
-              <h1>每日<br /><em>市场情报</em></h1>
+            <div className="masthead-primary">
+              <div className="edition-line">{dateLabel}</div>
+              <h1><span>三分钟</span><em>看懂今日市场</em></h1>
+              <p className="hero-deck">从事件发生时间、来源验证到市场影响，一次读完今天真正需要关注的金融变化。</p>
             </div>
             <div className="masthead-note">
-              <span>投资人晨间情报</span>
-              <p>把官方信息、新闻与社交媒体讨论整理成可验证、可排序的市场事件。</p>
-              <div><CheckCircle2 size={15} /> 来源优先，社交媒体仅作为信号</div>
+              <span>今日决策入口</span>
+              <p>先看市场冲击带，再进入前五大事件。每则结论都保留时间、重要信息和原始来源。</p>
+              <div className="briefing-signal"><CheckCircle2 size={16} />官方与新闻负责验证，社交讨论负责发现信号</div>
+              <dl className="intelligence-status">
+                <div><dt><Gauge size={15} />核心事件</dt><dd>{brief.stats.topStories} 则</dd></div>
+                <div><dt><Layers3 size={15} />合并素材</dt><dd>{brief.stats.consolidatedEvents} 组</dd></div>
+                <div><dt><Timer size={15} />更新时间</dt><dd>{generated.hour}:{generated.minute}</dd></div>
+              </dl>
               <small className="print-disclaimer">本报告为信息整理与研究工具，不构成投资建议。请由原始来源完成独立查证。</small>
             </div>
           </section>
 
-          {notice && <div className="notice-bar"><Sparkles size={15} /><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="关闭通知">×</button></div>}
+          {notice && <div className="notice-bar" role="status" aria-live="polite"><Sparkles size={15} /><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="关闭通知">×</button></div>}
+
+          <MarketPulse headlines={brief.headlines} />
 
           <section className="stat-grid" aria-label="本日分析摘要">
-            <div><span>候选素材</span><strong>{brief.stats.candidates}</strong><small>已采集信息</small></div>
-            <div><span>合并事件</span><strong>{brief.stats.consolidatedEvents}</strong><small>合并后事件</small></div>
-            <div><span>核心头条</span><strong>{brief.stats.topStories}</strong><small>排序后新闻</small></div>
-            <div className="stat-accent"><span>可用来源</span><strong>{brief.stats.sourcesOnline}</strong><small>在线信息来源</small></div>
+            <div><span>进入分析</span><strong>{brief.stats.candidates}</strong><small>候选素材</small></div>
+            <div><span>完成合并</span><strong>{brief.stats.consolidatedEvents}</strong><small>独立市场事件</small></div>
+            <div><span>今日必读</span><strong>{brief.stats.topStories}</strong><small>影响排序头条</small></div>
+            <div className="stat-accent"><span>验证网络</span><strong>{brief.stats.sourcesOnline}</strong><small>在线信息来源</small></div>
           </section>
 
           <div className="section-heading" id="headlines">
-            <div><span>01 / 重点新闻</span><h2>今日市场头条</h2></div>
+            <div><span>按市场影响排序</span><h2>今日五大重要事件</h2></div>
             <div className="category-filters" aria-label="分类筛选">
-              <button className={activeCategory === "All" ? "is-active" : ""} onClick={() => setActiveCategory("All")}>全部</button>
+              <button type="button" aria-pressed={activeCategory === "All"} className={activeCategory === "All" ? "is-active" : ""} onClick={() => setActiveCategory("All")}>全部</button>
               {categories.map((category) => (
-                <button className={activeCategory === category ? "is-active" : ""} onClick={() => setActiveCategory(category)} key={category}>{categoryLabels[category]}</button>
+                <button type="button" aria-pressed={activeCategory === category} className={activeCategory === category ? "is-active" : ""} onClick={() => setActiveCategory(category)} key={category}>{categoryLabels[category]}</button>
               ))}
             </div>
           </div>
@@ -323,28 +413,14 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
                 <p className="method-note"><ShieldCheck size={14} /> 分数综合市场影响、来源可信度、时效性与跨来源验证。</p>
               </section>
 
+              <WatchPanel items={brief.watchlist} />
+
               <div id="social">
                 <BuzzPanel title="Reddit 热门讨论" kind="reddit" topics={brief.socialBuzz.reddit} />
                 <BuzzPanel title="X 讨论动能" kind="x" topics={brief.socialBuzz.x} />
               </div>
             </aside>
           </div>
-
-          <section className="watch-section" id="watchlist">
-            <div className="section-heading watch-heading">
-              <div><span>02 / 下一交易日</span><h2>明日观察清单</h2></div>
-              <p>只保留可能改变市场共识的事件</p>
-            </div>
-            <div className="watch-grid">
-              {brief.watchlist.map((item, index) => (
-                <article key={`${item.event}-${index}`}>
-                  <span className="watch-time">{item.time}</span>
-                  <div><small>{categoryLabels[item.category]}</small><h3>{item.event}</h3><p>{item.why}</p></div>
-                  <ArrowUpRight size={19} />
-                </article>
-              ))}
-            </div>
-          </section>
 
           <footer className="report-footer">
             <div className="footer-brand"><Globe2 size={18} /><strong>AnalystArena 每日市场情报</strong></div>
@@ -353,6 +429,13 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           </footer>
         </div>
       </main>
+      <nav className="mobile-dock" aria-label="移动端主要导览">
+        <a className="is-current" aria-current="page" href="#brief"><LayoutDashboard size={18} /><span>简报</span></a>
+        <a href="/trending"><Flame size={18} /><span>热搜</span></a>
+        <a href="#headlines"><Newspaper size={18} /><span>头条</span></a>
+        <a href="#watchlist"><CalendarDays size={18} /><span>观察</span></a>
+        <a href="/archive"><Search size={18} /><span>历史</span></a>
+      </nav>
     </div>
   );
 }
