@@ -7,6 +7,8 @@ const translationCache = new Map<string, string>();
 
 function normalizeMainlandTerms(value: string): string {
   const replacements: Array<[RegExp, string]> = [
+    [/[台臺]北[时時][间間]/g, "北京时间"],
+    [/Taipei\s+Time/gi, "北京时间"],
     [/联准会/g, "美联储"],
     [/讯号/g, "信号"],
     [/资讯/g, "信息"],
