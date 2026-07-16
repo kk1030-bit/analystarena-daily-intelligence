@@ -34,7 +34,7 @@ import {
   sourceTypeLabel,
 } from "@/lib/investor-view";
 import { categoryDisplayNames, sourceDisplayName } from "@/lib/terms";
-import { formatTaipeiMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
+import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
 import type { Category, DailyBrief, Headline, Sentiment } from "@/lib/types";
 
 const sentimentLabels: Record<Sentiment, string> = { positive: "偏多", neutral: "中性", negative: "偏空" };
@@ -52,7 +52,7 @@ function EventRow({ headline, active, onSelect }: { headline: Headline; active: 
     <button className={`event-row${active ? " is-active" : ""}`} type="button" aria-pressed={active} onClick={onSelect}>
       <span className="event-rank">{String(headline.rank).padStart(2, "0")}</span>
       <span className="event-row-copy">
-        <small><b>{headline.ticker}</b>{categoryDisplayNames[headline.category]} · {formatTaipeiMinute(time.value)}</small>
+        <small><b>{headline.ticker}</b>{categoryDisplayNames[headline.category]} · {formatBeijingMinute(time.value)}</small>
         <strong>{headline.title}</strong>
         <em className={`evidence-pill evidence-${evidence.level}`}>{evidence.label}</em>
       </span>
@@ -166,7 +166,7 @@ function EventDossier({ brief, headline, relatedSignals, context, contextBatch }
         </div>
         <h2>{headline.title}</h2>
         <p>{headline.summary}</p>
-        <div className="dossier-time"><Clock3 size={17} /><span>{timestampLabel(eventTime.kind)}</span><time dateTime={eventTime.value}>{formatTaipeiMinute(eventTime.value)}</time><small>台北时间 · {eventTime.source ? sourceDisplayName(eventTime.source) : "来源待确认"}</small></div>
+        <div className="dossier-time"><Clock3 size={17} /><span>{timestampLabel(eventTime.kind)}</span><time dateTime={eventTime.value}>{formatBeijingMinute(eventTime.value)}</time><small>北京时间 · {eventTime.source ? sourceDisplayName(eventTime.source) : "来源待确认"}</small></div>
       </header>
 
       <section className="decision-strip" aria-label="事件判断指标">
@@ -205,7 +205,7 @@ function EventDossier({ brief, headline, relatedSignals, context, contextBatch }
           {sources.map((source, index) => (
             <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}>
               <span className={`source-tier source-${source.type.toLowerCase()}`}>{sourceTypeLabel(source.type)}</span>
-              <div><strong>{sourceDisplayName(source.name)}</strong><small>{source.publishedAt ? `${timestampLabel(source.timestampKind ?? "published")} · ${formatTaipeiMinute(source.publishedAt)}` : "原始时间未提供"}</small></div>
+              <div><strong>{sourceDisplayName(source.name)}</strong><small>{source.publishedAt ? `${timestampLabel(source.timestampKind ?? "published")} · ${formatBeijingMinute(source.publishedAt)}` : "原始时间未提供"}</small></div>
               <ExternalLink size={16} />
             </a>
           ))}

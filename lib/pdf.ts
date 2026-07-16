@@ -67,7 +67,7 @@ function ensureDetailRoom(doc: PDFKit.PDFDocument, needed: number, date: string)
 
 function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headline[]): void {
   doc.save().rect(0, 0, page.width, 176).fill(colors.ink).restore();
-  doc.fillColor(colors.acid).font("NotoSC").fontSize(9).text("AnalystArena / 台北版", page.margin, 34);
+  doc.fillColor(colors.acid).font("NotoSC").fontSize(9).text("AnalystArena / 每日市场情报", page.margin, 34);
   doc.fillColor(colors.white).fontSize(31).text("前五大市场情报", page.margin, 61, { width: 430 });
   doc.fillColor("#AEB9B5").fontSize(10).text(`${brief.date}  /  ${brief.status === "published" ? "已发布报告" : "预览报告"}`, page.margin, 113);
   doc.fillColor("#CBD2CF").fontSize(9.5).text("从已验证新闻、官方公告与社交媒体信号中，合并整理出五个与投资人最相关的事件。", page.margin, 139, { width: 470 });

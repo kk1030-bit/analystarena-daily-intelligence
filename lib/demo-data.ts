@@ -1,6 +1,6 @@
 import type { DailyBrief } from "./types";
 
-const demoDate = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Taipei" });
+const demoDate = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" });
 const demoGeneratedAt = new Date().toISOString();
 const demoTimestamp = (time: string) => new Date(`${demoDate}T${time}:00+08:00`).toISOString();
 

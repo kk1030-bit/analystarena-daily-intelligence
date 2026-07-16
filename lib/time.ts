@@ -1,7 +1,7 @@
 import type { Headline, TimestampKind } from "./types";
 
-const taipeiFormatter = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Asia/Taipei",
+const beijingFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai",
   year: "numeric",
   month: "2-digit",
   day: "2-digit",
@@ -13,10 +13,10 @@ const taipeiFormatter = new Intl.DateTimeFormat("en-CA", {
 function dateParts(value: string): Record<string, string> | null {
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return null;
-  return Object.fromEntries(taipeiFormatter.formatToParts(date).map((part) => [part.type, part.value]));
+  return Object.fromEntries(beijingFormatter.formatToParts(date).map((part) => [part.type, part.value]));
 }
 
-export function formatTaipeiMinute(value?: string): string {
+export function formatBeijingMinute(value?: string): string {
   if (!value) return "时间待确认";
   const parts = dateParts(value);
   if (!parts) return "时间待确认";
@@ -28,17 +28,17 @@ export function timestampLabel(kind?: TimestampKind): string {
 }
 
 export function formatTimestampLine(value?: string, kind?: TimestampKind): string {
-  return `${timestampLabel(kind)}：${formatTaipeiMinute(value)}（台北时间）`;
+  return `${timestampLabel(kind)}：${formatBeijingMinute(value)}（北京时间）`;
 }
 
-export function toTaipeiDateTimeInput(value?: string): string {
+export function toBeijingDateTimeInput(value?: string): string {
   if (!value) return "";
   const parts = dateParts(value);
   if (!parts) return "";
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
 }
 
-export function fromTaipeiDateTimeInput(value: string): string | undefined {
+export function fromBeijingDateTimeInput(value: string): string | undefined {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return undefined;
   const date = new Date(`${value}:00+08:00`);
   return Number.isNaN(date.valueOf()) ? undefined : date.toISOString();

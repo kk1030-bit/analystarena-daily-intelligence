@@ -585,7 +585,7 @@ export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}):
   const headlines = selectWithQuotas(finalCandidates, 8);
   const sourcesOnline = collectorStatuses.filter((status) => status.ok).length;
   const brief: DailyBrief = {
-    date: new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Taipei" }),
+    date: new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" }),
     generatedAt: new Date().toISOString(),
     mode: "live",
     aiEnabled,

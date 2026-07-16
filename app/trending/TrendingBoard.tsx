@@ -27,7 +27,7 @@ import {
 import { useMemo, useState, useTransition } from "react";
 import { resolveSignalHeadline, signalMetricLabel, signalStrength, socialSignalId } from "@/lib/investor-view";
 import { categoryDisplayNames, sourceDisplayName } from "@/lib/terms";
-import { formatTaipeiMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
+import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
 import type { Category, DailyBrief, TimestampKind } from "@/lib/types";
 
 type BoardTab = "all" | "finance" | "technology";
@@ -155,7 +155,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
     return [...leaders, ...rest.slice(offset), ...rest.slice(0, offset)].slice(0, 15);
   }, [batch, filtered]);
   const lead = items[0];
-  const updatedAt = formatTaipeiMinute(brief.generatedAt);
+  const updatedAt = formatBeijingMinute(brief.generatedAt);
 
   function refreshPage() {
     startRefresh(() => router.replace(`/trending?refresh=${Date.now()}`, { scroll: false }));
@@ -215,7 +215,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
             <div className="trending-hero-note">
               <strong>把市场今天正在关注的事情放到最前面</strong>
               <p>综合新闻重要性、发布时间、跨来源数量与讨论热度；榜单不是搜索次数的简单堆叠。</p>
-              <div><Clock3 size={14} />榜单更新时间：{updatedAt}（台北时间）</div>
+              <div><Clock3 size={14} />榜单更新时间：{updatedAt}（北京时间）</div>
             </div>
           </section>
 
@@ -225,7 +225,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
               <small>{categoryDisplayNames[lead.category]} · 热度 {lead.score}</small>
               <h2>{lead.title}</h2>
               <p>{lead.description}</p>
-              <footer><span>{timestampLabel(lead.timestampKind)}：{formatTaipeiMinute(lead.publishedAt)}（台北时间）</span><b>{sourceDisplayName(lead.source)} <ArrowUpRight size={13} /></b></footer>
+              <footer><span>{timestampLabel(lead.timestampKind)}：{formatBeijingMinute(lead.publishedAt)}（北京时间）</span><b>{sourceDisplayName(lead.source)} <ArrowUpRight size={13} /></b></footer>
             </div>
           </a>}
 
@@ -245,7 +245,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
                     <div className="hot-row-content">
                       <div><span>{categoryDisplayNames[item.category]}</span>{item.badge && <i className={`hot-badge hot-badge-${item.badge === "热" ? "hot" : "new"}`}>{item.badge}</i>}</div>
                       <strong>{item.title}</strong>
-                      <small>{sourceDisplayName(item.source)} · {formatTaipeiMinute(item.publishedAt)} · 热度指标 {item.mentions}</small>
+                      <small>{sourceDisplayName(item.source)} · {formatBeijingMinute(item.publishedAt)} · 热度指标 {item.mentions}</small>
                     </div>
                     <div className="hot-row-score"><span>热度</span><b>{item.score}</b><ChevronRight size={15} /></div>
                   </a>

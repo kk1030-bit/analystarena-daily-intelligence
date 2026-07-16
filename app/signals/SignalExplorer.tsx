@@ -34,7 +34,7 @@ import {
   type SignalPlatform,
 } from "@/lib/investor-view";
 import { categoryDisplayNames, sourceDisplayName } from "@/lib/terms";
-import { formatTaipeiMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
+import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
 import type { DailyBrief, Headline, Sentiment } from "@/lib/types";
 
 type PlatformFilter = "all" | "reddit" | "x";
@@ -78,7 +78,7 @@ function SignalRow({ entry, brief, headline, active, onSelect }: { entry: Signal
     <button className={`signal-row${active ? " is-active" : ""}`} type="button" aria-pressed={active} onClick={onSelect}>
       <span className={`signal-platform signal-platform-${entry.platform.toLowerCase()}`}>{entry.platform === "Reddit" ? "r/" : "X"}</span>
       <span className="signal-row-copy">
-        <small>{sourceDisplayName(entry.topic.source ?? entry.platform)} · {formatTaipeiMinute(timestamp.value)}</small>
+        <small>{sourceDisplayName(entry.topic.source ?? entry.platform)} · {formatBeijingMinute(timestamp.value)}</small>
         <strong>{entry.topic.label}</strong>
         <span><em className={`evidence-pill evidence-${evidence.level}`}>{evidence.label}</em><b>强度 {signalStrength(entry.topic)}</b></span>
       </span>
@@ -237,7 +237,7 @@ function SignalDossier({ brief, entry, headline, context, contextBatch }: { brie
         </div>
         <h2>{topic.label}</h2>
         <p>{topic.description ?? "旧版历史记录只保存了主题名称；可查看原始来源或关联事件继续查证。"}</p>
-        <div className="dossier-time"><Clock3 size={17} /><span>{signalTimeLabel(timestamp.kind, timestamp.fallback)}</span><time dateTime={timestamp.value}>{formatTaipeiMinute(timestamp.value)}</time><small>台北时间{timestamp.fallback ? " · 旧记录未保存原帖时间" : ""}</small></div>
+        <div className="dossier-time"><Clock3 size={17} /><span>{signalTimeLabel(timestamp.kind, timestamp.fallback)}</span><time dateTime={timestamp.value}>{formatBeijingMinute(timestamp.value)}</time><small>北京时间{timestamp.fallback ? " · 旧记录未保存原帖时间" : ""}</small></div>
       </header>
 
       <section className="decision-strip signal-metrics" aria-label="社交信号指标">
@@ -275,7 +275,7 @@ function SignalDossier({ brief, entry, headline, context, contextBatch }: { brie
         <header><Newspaper size={18} /><div><span>LINKED MARKET EVENT</span><h3>关联市场事件</h3></div></header>
         {headline ? <Link className="linked-event-card" href={`/headlines?event=${encodeURIComponent(headline.id)}${context === "trending" ? `&context=trending${contextBatch ? `&batch=${encodeURIComponent(contextBatch)}` : ""}` : ""}`}>
           <span className="linked-event-rank">{String(headline.rank).padStart(2, "0")}</span>
-          <div><small>{headline.ticker} · {categoryDisplayNames[headline.category]} · {eventEvidence?.label}</small><strong>{headline.title}</strong><p>{headline.marketImpact}</p><footer>{eventTime && `${timestampLabel(eventTime.kind)} · ${formatTaipeiMinute(eventTime.value)}`}<b>打开事件研究 <ArrowRight size={14} /></b></footer></div>
+          <div><small>{headline.ticker} · {categoryDisplayNames[headline.category]} · {eventEvidence?.label}</small><strong>{headline.title}</strong><p>{headline.marketImpact}</p><footer>{eventTime && `${timestampLabel(eventTime.kind)} · ${formatBeijingMinute(eventTime.value)}`}<b>打开事件研究 <ArrowRight size={14} /></b></footer></div>
         </Link> : <div className="unlinked-event"><Sparkles size={20} /><div><strong>本期尚无可安全关联的市场事件</strong><p>系统不会只凭“AI”“市场”等泛词强行配对。请先查看原帖，等待官方或新闻来源出现。</p></div></div>}
       </section>
 

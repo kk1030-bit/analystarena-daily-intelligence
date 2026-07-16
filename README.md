@@ -31,7 +31,7 @@ curl "https://analystarena-daily-intelligence.onrender.com/api/v1/reddit/search?
 ## 第三版流程
 
 1. RSS 与 Playwright 采集公开内容。
-2. 保存来源原始发布时间，并统一显示到“年、月、日、时、分”（台北时间）；来源没有精确时间时明确标为采集时间。
+2. 保存来源原始发布时间，并统一显示到“年、月、日、时、分”（北京时间）；来源没有精确时间时明确标为采集时间。
 3. 先过滤例行 SEC 公告，再以事件相似度合并素材。
 4. 从每个事件提取摘要、2–4 个重要信息与市场影响，再依时效性、跨来源层数、可信度及互动计分。
 5. 套用分类配额与来源上限，避免单一来源占满版面。
@@ -62,7 +62,7 @@ npm run dev
 
 ## 每日排程
 
-`.github/workflows/daily-brief.yml` 每天台北时间 07:00 在 GitHub Actions 执行 Playwright，再把 Reddit/X 素材传给 Render 生成草稿。请把与 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret；需要登录 X 搜索时，再加入 `X_AUTH_TOKEN`。
+`.github/workflows/daily-brief.yml` 每天北京时间 07:00 在 GitHub Actions 执行 Playwright，再把 Reddit/X 素材传给 Render 生成草稿。请把与 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret；需要登录 X 搜索时，再加入 `X_AUTH_TOKEN`。
 
 Playwright 不直接运行在 Render，避免免费方案的内存被 Chromium 耗尽而重启服务。
 

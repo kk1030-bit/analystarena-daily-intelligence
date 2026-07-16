@@ -35,7 +35,7 @@ import { useMemo, useState } from "react";
 import type { Category, DailyBrief, Headline, Sentiment, SourceType } from "@/lib/types";
 import { signalMetricLabel, signalStrength, socialSignalId } from "@/lib/investor-view";
 import { categoryDisplayNames as categoryLabels, extractTermNotes, sourceDisplayName } from "@/lib/terms";
-import { formatTaipeiMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
+import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
 
 const sentimentLabels: Record<Sentiment, string> = {
   positive: "偏多",
@@ -70,7 +70,7 @@ function SentimentMark({ value }: { value: Sentiment }) {
 }
 
 function pulseTime(value?: string) {
-  const formatted = formatTaipeiMinute(value);
+  const formatted = formatBeijingMinute(value);
   const match = formatted.match(/(\d{2}:\d{2})$/);
   return match?.[1] ?? "待确认";
 }
@@ -175,8 +175,8 @@ function HeadlineCard({ headline, contextBatch }: { headline: Headline; contextB
         <div className={`news-time news-time-${newsTime.kind}`}>
           <Clock3 size={17} aria-hidden="true" />
           <span>{timestampLabel(newsTime.kind)}</span>
-          <time dateTime={newsTime.value}>{formatTaipeiMinute(newsTime.value)}</time>
-          <small>台北时间{newsTime.source ? ` · 时间来源：${sourceDisplayName(newsTime.source)}` : ""}</small>
+          <time dateTime={newsTime.value}>{formatBeijingMinute(newsTime.value)}</time>
+          <small>北京时间{newsTime.source ? ` · 时间来源：${sourceDisplayName(newsTime.source)}` : ""}</small>
         </div>
         {headline.keyPoints?.length ? <div className="key-facts">
           <div><ListChecks size={16} /><span>重要信息</span></div>
@@ -260,7 +260,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   const weekday = ["日", "一", "二", "三", "四", "五", "六"][new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
   const dateLabel = `${year} 年 ${month} 月 ${day} 日 / 周${weekday}`;
   const generatedParts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Taipei",
+    timeZone: "Asia/Shanghai",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -269,7 +269,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
     hourCycle: "h23",
   }).formatToParts(new Date(brief.generatedAt));
   const generated = Object.fromEntries(generatedParts.map((part) => [part.type, part.value]));
-  const generatedLabel = `${generated.year}-${generated.month}-${generated.day} ${generated.hour}:${generated.minute} TPE`;
+  const generatedLabel = `${generated.year}-${generated.month}-${generated.day} ${generated.hour}:${generated.minute} BJT`;
 
   async function refreshBrief() {
     setIsRefreshing(true);
@@ -441,7 +441,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           <footer className="report-footer">
             <div className="footer-brand"><Globe2 size={18} /><strong>AnalystArena 每日市场情报</strong></div>
             <p>本报告为信息整理与研究工具，不构成投资建议。请点击原始来源完成独立查证。</p>
-            <span>生成时间：{generatedLabel.replace("TPE", "台北")}</span>
+            <span>生成时间：{generatedLabel.replace("BJT", "北京")}</span>
           </footer>
         </div>
       </main>
