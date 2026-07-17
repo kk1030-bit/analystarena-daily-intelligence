@@ -60,6 +60,29 @@ try {
     "\u672a\u6536\u5f55\u7684\u516c\u53f8\u4e13\u540d\u4e0d\u5e94\u8ba9\u5df2\u5b8c\u6210\u7684\u4e2d\u6587\u7ffb\u8bd1\u88ab\u8bef\u5224\u4e3a\u5931\u8d25",
   );
 
+  const translatedSocialSource = "\u5728\u8d5b\u8f66\u8fd0\u52a8\u4e2d\uff0c\u5fae\u5c0f\u5dee\u8ddd\u5f88\u91cd\u8981\u3002OpenAI \u7684 Joyce Ruffell \u548c @RaceTekSystems \u8054\u5408\u521b\u59cb\u4eba @GarageGuyChase \u8ba8\u8bba\u5982\u4f55\u4f7f\u7528 AI \u6570\u636e\u505a\u51fa\u66f4\u5feb\u7684\u51b3\u7b56 - x.com";
+  globalThis.fetch = (async () => googleResponse(translatedSocialSource)) as typeof fetch;
+  assert.equal(
+    await localizeText("In racing, tiny margins matter and teams use AI for faster decisions from x.com"),
+    translatedSocialSource,
+    "\u5df2\u7ffb\u8bd1\u7684\u6b63\u6587\u4e0d\u5f97\u56e0\u793e\u4ea4\u8d26\u53f7\u6216\u6765\u6e90\u57df\u540d\u88ab\u8bef\u5224\u4e3a\u5931\u8d25",
+  );
+
+  globalThis.fetch = (async () => googleResponse("\u7279\u65af\u62c9\u80a1\u7968\u5728 7 \u6708 22 \u65e5\u524d\u503c\u5f97\u4e70\u5165\u5417\uff1f - The Motley Fool")) as typeof fetch;
+  assert.equal(
+    await localizeText("Should you buy Tesla stock before July 22? - The Motley Fool"),
+    "\u7279\u65af\u62c9\u80a1\u7968\u5728 7 \u6708 22 \u65e5\u524d\u503c\u5f97\u4e70\u5165\u5417\uff1f - The Motley Fool",
+    "\u5a92\u4f53\u54c1\u724c\u540d\u4e0d\u5f97\u8ba9\u5df2\u5b8c\u6210\u7684\u4e2d\u6587\u8bd1\u6587\u5931\u8d25",
+  );
+
+  const incompleteCandidateInput = "Revenue outlook validator regression";
+  globalThis.fetch = (async () => googleResponse("\u5e02\u573a outlook remains weak with lower demand")) as typeof fetch;
+  assert.equal(
+    await localizeText(incompleteCandidateInput),
+    incompleteCandidateInput,
+    "\u771f\u6b63\u6b8b\u7559\u7684\u82f1\u6587\u53d9\u8ff0\u4ecd\u5fc5\u987b\u88ab\u4e25\u683c\u62d2\u7edd",
+  );
+
   calls = 0;
   globalThis.fetch = (async () => {
     calls += 1;
