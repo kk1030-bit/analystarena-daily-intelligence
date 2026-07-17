@@ -76,6 +76,8 @@ function clean(value: string): string {
 
 function isPreservedEnglishToken(token: string): boolean {
   const normalized = token.toLowerCase();
+  if (/^@[A-Za-z0-9_]{1,30}$/.test(token)) return true;
+  if (/^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/.test(token)) return true;
   if (preservedTerms.has(normalized)) return true;
   if (/^q[1-4]$/i.test(token)) return true;
   if (/^\$[a-z]{1,6}$/i.test(token)) return true;
@@ -86,10 +88,20 @@ function isPreservedEnglishToken(token: string): boolean {
 }
 
 function hasTranslatableEnglish(value: string): boolean {
-  const tokens = value.match(/\$?[A-Za-z]+(?:[./'-][A-Za-z]+)*|Q[1-4]/g) ?? [];
+  const tokens = value.match(/[@$]?[A-Za-z][A-Za-z0-9_]*(?:[./'-][A-Za-z0-9_]+)*|Q[1-4]/g) ?? [];
   const hasChineseContext = /[\u3400-\u9FFF]/.test(value);
-  return tokens.some((token) => {
+  return tokens.some((token, index) => {
     if (isPreservedEnglishToken(token)) return false;
+    const previous = tokens[index - 1] ?? "";
+    const next = tokens[index + 1] ?? "";
+    const titleCased = (candidate: string) => /^[A-Z][A-Za-z]{2,}$/.test(candidate);
+    // Media and company names often retain small connector words after the
+    // surrounding prose has been translated (for example The Motley Fool or
+    // Bank of America). Keep those identifiers, but still reject lowercase
+    // English prose such as "the market".
+    if (hasChineseContext && commonEnglishProse.has(token.toLowerCase())) {
+      if ((titleCased(previous) && titleCased(next)) || (token === "The" && titleCased(next))) return false;
+    }
     if (commonEnglishProse.has(token.toLowerCase())) return true;
     // Once the surrounding sentence is Chinese, a title-cased token is most
     // likely a company, person or product name (for example Palantir). Keeping
