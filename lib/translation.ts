@@ -4,7 +4,7 @@ import type { DailyBrief, Headline, SocialTopic, TermNote } from "./types";
 import { extractTermNotes } from "./terms";
 
 const toSimplified = OpenCC.Converter({ from: "tw", to: "cn" });
-const TRANSLATION_CACHE_PREFIX = "zh-CN:v2:";
+const TRANSLATION_CACHE_PREFIX = "zh-CN:v3:";
 const TRANSLATION_CACHE_LIMIT = 2_000;
 const TRANSLATION_CONCURRENCY = 4;
 const translationCache = new Map<string, string>();
@@ -30,10 +30,16 @@ const commonEnglishProse = new Set([
   "revenue", "rise", "rises", "sales", "shares", "strong", "surge", "surges", "the", "to", "up", "weak", "with",
 ]);
 
+// The PDF's Simplified Chinese font does not cover every writing system. Any
+// remaining narrative in these scripts must be translated before publication
+// instead of silently turning into missing-glyph boxes in the report.
+const translatableForeignScript = /[\u0400-\u052F\u0590-\u06FF\u0900-\u097F\u0E00-\u0E7F\u1100-\u11FF\u3040-\u30FF\u3130-\u318F\u31F0-\u31FF\uA960-\uA97F\uAC00-\uD7FF]/u;
+
 function normalizeMainlandTerms(value: string): string {
   const replacements: Array<[RegExp, string]> = [
     [/[\u53f0\u81fa]\u5317[\u65f6\u6642][\u95f4\u9593]/g, "\u5317\u4eac\u65f6\u95f4"],
     [/Taipei\s+Time/gi, "\u5317\u4eac\u65f6\u95f4"],
+    [/조선일보/g, "朝鲜日报"],
     [/\u8054\u51c6\u4f1a/g, "\u7f8e\u8054\u50a8"],
     [/\u8baf\u53f7/g, "\u4fe1\u53f7"],
     [/\u8d44\u8baf/g, "\u4fe1\u606f"],
@@ -87,7 +93,8 @@ function isPreservedEnglishToken(token: string): boolean {
   return false;
 }
 
-function hasTranslatableEnglish(value: string): boolean {
+function hasTranslatableText(value: string): boolean {
+  if (translatableForeignScript.test(value)) return true;
   const tokens = value.match(/[@$]?[A-Za-z][A-Za-z0-9_]*(?:[./'-][A-Za-z0-9_]+)*|Q[1-4]/g) ?? [];
   const hasChineseContext = /[\u3400-\u9FFF]/.test(value);
   return tokens.some((token, index) => {
@@ -171,7 +178,7 @@ async function translateWithGoogle(value: string): Promise<string> {
       if (!response.ok) throw new Error(`\u81ea\u52a8\u7ffb\u8bd1\u670d\u52a1\u8fd4\u56de ${response.status}`);
       const translated = simplify(clean(translationFromGooglePayload(await response.json() as unknown)));
       if (!translated) throw new Error("\u81ea\u52a8\u7ffb\u8bd1\u670d\u52a1\u672a\u8fd4\u56de\u5185\u5bb9");
-      if (hasTranslatableEnglish(translated)) throw new Error("\u81ea\u52a8\u7ffb\u8bd1\u7ed3\u679c\u4ecd\u5305\u542b\u82f1\u6587\u53d9\u8ff0");
+      if (hasTranslatableText(translated)) throw new Error("\u81ea\u52a8\u7ffb\u8bd1\u7ed3\u679c\u4ecd\u5305\u542b\u672a\u7ffb\u8bd1\u53d9\u8ff0");
       return translated;
     } catch (error) {
       lastError = error;
@@ -189,12 +196,13 @@ async function translateWithOpenAI(value: string): Promise<string> {
     instructions: [
       "\u5c06\u8f93\u5165\u51c6\u786e\u7ffb\u8bd1\u4e3a\u7b80\u4f53\u4e2d\u6587\uff0c\u53ea\u8f93\u51fa\u8bd1\u6587\u3002",
       "\u4fdd\u7559\u516c\u53f8\u540d\u3001\u4ea7\u54c1\u540d\u3001\u80a1\u7968\u4ee3\u7801\u3001\u6570\u5b57\u548c\u5e38\u89c1\u91d1\u878d\u7f29\u5199\uff0c\u4e0d\u5f97\u589e\u52a0\u539f\u6587\u6ca1\u6709\u7684\u4fe1\u606f\u3002",
+      "\u97e9\u6587\u3001\u65e5\u6587\u5047\u540d\u3001\u897f\u91cc\u5c14\u5b57\u6bcd\u7b49\u975e\u62c9\u4e01\u6587\u5b57\u5fc5\u987b\u8bd1\u6210\u901a\u7528\u7b80\u4f53\u4e2d\u6587\u540d\uff1b\u65e0\u56fa\u5b9a\u8bd1\u540d\u65f6\u97f3\u8bd1\uff0c\u4e0d\u5f97\u4fdd\u7559\u539f\u6587\u5b57\u7b26\u3002",
     ].join("\n"),
     input: value,
   });
   const translated = simplify(clean(response.output_text));
   if (!translated) throw new Error("OpenAI \u7ffb\u8bd1\u5907\u7528\u670d\u52a1\u672a\u8fd4\u56de\u5185\u5bb9");
-  if (hasTranslatableEnglish(translated)) throw new Error("OpenAI \u7ffb\u8bd1\u7ed3\u679c\u4ecd\u5305\u542b\u82f1\u6587\u53d9\u8ff0");
+  if (hasTranslatableText(translated)) throw new Error("OpenAI \u7ffb\u8bd1\u7ed3\u679c\u4ecd\u5305\u542b\u672a\u7ffb\u8bd1\u53d9\u8ff0");
   return translated;
 }
 
@@ -228,7 +236,7 @@ export async function localizeText(value: string): Promise<string> {
   const normalized = clean(value);
   if (!normalized) return normalized;
   const simplified = simplify(normalized);
-  if (!hasTranslatableEnglish(simplified)) return simplified;
+  if (!hasTranslatableText(simplified)) return simplified;
   try {
     return await translateEnglish(simplified);
   } catch {
@@ -281,7 +289,7 @@ function untranslatedCriticalFields(headlines: Headline[]): string[] {
       ...(headline.keyPoints ?? []).map((point, index): [string, string] => [`keyPoints[${index}]`, point]),
     ];
     return fields
-      .filter(([, value]) => hasTranslatableEnglish(value))
+      .filter(([, value]) => hasTranslatableText(value))
       .map(([field]) => `headlines.${headline.id}.${field}`);
   });
 }
