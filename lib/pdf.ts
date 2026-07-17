@@ -87,6 +87,12 @@ function equityDirectionColor(direction: EquityImpactDirection): string {
   return colors.muted;
 }
 
+function needsTranslationPreviewNotice(brief: DailyBrief): boolean {
+  if (brief.status === "published") return false;
+  if (brief.translationEnabled === false) return true;
+  return /(?:翻译|翻譯)[^。；;]{0,24}(?:待人工确认|待人工確認|待确认|待確認|未完成)/.test(brief.warning ?? "");
+}
+
 function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headline[]): void {
   doc.save().rect(0, 0, page.width, 176).fill(colors.ink).restore();
   doc.fillColor(colors.acid).font("NotoSC").fontSize(9).text("AnalystArena / 每日市场情报", page.margin, 34);
@@ -94,7 +100,20 @@ function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headli
   doc.fillColor("#AEB9B5").fontSize(10).text(`${brief.date}  /  ${brief.status === "published" ? "已发布报告" : "预览报告"}`, page.margin, 113);
   doc.fillColor("#CBD2CF").fontSize(9.5).text("从已验证新闻、官方公告与社交媒体信号中，合并整理出五个与投资人最相关的事件。", page.margin, 139, { width: 470 });
 
-  doc.y = 210;
+  if (needsTranslationPreviewNotice(brief)) {
+    const noticeTop = 198;
+    const noticeHeight = 48;
+    doc.save().roundedRect(page.margin, noticeTop, page.width - page.margin * 2, noticeHeight, 3).fillAndStroke("#FFF3E7", colors.orange).restore();
+    doc.fillColor(colors.orange).fontSize(8.5).text("翻译待确认", page.margin + 12, noticeTop + 10, { width: 78, lineBreak: false });
+    doc.fillColor(colors.ink).fontSize(9.2).text("部分内容的自动翻译仍待人工确认。本文件仅供预览，不代表已审核发布；请以原始来源与正式日报为准。", page.margin + 98, noticeTop + 8, {
+      width: page.width - page.margin * 2 - 110,
+      height: 32,
+      lineGap: 2,
+    });
+    doc.y = noticeTop + noticeHeight + 18;
+  } else {
+    doc.y = 210;
+  }
   doc.fillColor(colors.ink).fontSize(10).text("执行摘要", page.margin, doc.y);
   doc.moveTo(page.margin, doc.y + 17).lineTo(page.width - page.margin, doc.y + 17).strokeColor(colors.ink).lineWidth(1).stroke();
   doc.y += 34;

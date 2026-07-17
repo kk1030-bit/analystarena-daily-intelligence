@@ -35,8 +35,45 @@ const pdf = await generateBriefPdf(stressBrief);
 assert.ok(pdf.length > 25_000, "压力测试 PDF 内容异常");
 assert.equal(pdf.subarray(0, 4).toString("ascii"), "%PDF", "输出不是 PDF 文件");
 
+const completePreviewPdf = await generateBriefPdf({
+  ...stressBrief,
+  status: "draft",
+  translationEnabled: true,
+  warning: undefined,
+});
+const disabledTranslationPreviewPdf = await generateBriefPdf({
+  ...stressBrief,
+  status: "draft",
+  translationEnabled: false,
+  warning: undefined,
+});
+const pendingTranslationPreviewPdf = await generateBriefPdf({
+  ...stressBrief,
+  status: "draft",
+  translationEnabled: true,
+  warning: "部分字段的自动翻译待人工确认。",
+});
+assert.ok(disabledTranslationPreviewPdf.length > completePreviewPdf.length + 100, "翻译未完成的预览 PDF 必须显示独立提示");
+assert.ok(pendingTranslationPreviewPdf.length > completePreviewPdf.length + 100, "含翻译待确认警告的预览 PDF 必须显示独立提示");
+
+const completePublishedPdf = await generateBriefPdf({
+  ...stressBrief,
+  status: "published",
+  translationEnabled: true,
+  warning: undefined,
+});
+const flaggedPublishedPdf = await generateBriefPdf({
+  ...stressBrief,
+  status: "published",
+  translationEnabled: false,
+  warning: "部分字段的自动翻译待人工确认。",
+});
+assert.equal(flaggedPublishedPdf.length, completePublishedPdf.length, "已发布 PDF 不应显示预览翻译提示");
+
 const outputDirectory = path.join(process.cwd(), "tmp", "pdfs");
 await mkdir(outputDirectory, { recursive: true });
 const outputPath = path.join(outputDirectory, "publish-layout-stress.pdf");
 await writeFile(outputPath, pdf);
-console.log(outputPath);
+const previewOutputPath = path.join(outputDirectory, "preview-translation-notice.pdf");
+await writeFile(previewOutputPath, disabledTranslationPreviewPdf);
+console.log(outputPath, previewOutputPath);
