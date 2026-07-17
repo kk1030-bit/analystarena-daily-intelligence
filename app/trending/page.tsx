@@ -1,6 +1,5 @@
-import { demoBrief } from "@/lib/demo-data";
-import { getLatestPublished } from "@/lib/db";
-import { getCachedHotSearchBrief, normalizeHotSearchBatchKey } from "@/lib/live-brief";
+import { getDisplayBrief } from "@/lib/display-brief";
+import { getLiveBriefContextBrief, normalizeLiveBriefContext } from "@/lib/live-brief";
 import { localizeBriefContent } from "@/lib/translation";
 import { TrendingBoard } from "./TrendingBoard";
 
@@ -8,15 +7,14 @@ export const dynamic = "force-dynamic";
 
 export default async function TrendingPage({ searchParams }: { searchParams: Promise<{ refresh?: string }> }) {
   const { refresh } = await searchParams;
-  const batchKey = normalizeHotSearchBatchKey(refresh);
+  const context = normalizeLiveBriefContext(refresh);
   let brief;
 
   try {
-    brief = await getCachedHotSearchBrief(batchKey);
+    brief = await getLiveBriefContextBrief(context.contextKey);
   } catch {
-    const latest = await getLatestPublished().catch(() => null);
-    brief = await localizeBriefContent(latest?.brief ?? demoBrief);
+    brief = await localizeBriefContent((await getDisplayBrief()).brief);
   }
 
-  return <TrendingBoard brief={brief} contextBatch={batchKey} />;
+  return <TrendingBoard brief={brief} contextBatch={context.contextKey} />;
 }

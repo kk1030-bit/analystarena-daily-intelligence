@@ -171,7 +171,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
         </Link>
         <nav aria-label="主要导览">
           <Link href="/"><LayoutDashboard size={17} />今日简报</Link>
-          <Link className="is-current" aria-current="page" href="/trending"><Flame size={17} />热搜榜</Link>
+          <Link className="is-current" aria-current="page" href={`/trending?refresh=${encodeURIComponent(contextBatch)}`}><Flame size={17} />热搜榜</Link>
           <Link href={`/headlines?context=trending&batch=${encodeURIComponent(contextBatch)}`}><Newspaper size={17} />市场头条</Link>
           <Link href={`/signals?context=trending&batch=${encodeURIComponent(contextBatch)}`}><MessageCircle size={17} />社交媒体信号</Link>
           <Link href="/#watchlist"><CalendarDays size={17} />观察清单</Link>
@@ -289,7 +289,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
       </main>
       <nav className="mobile-dock" aria-label="移动端主要导览">
         <Link href="/"><LayoutDashboard size={18} /><span>简报</span></Link>
-        <Link className="is-current" aria-current="page" href="/trending"><Flame size={18} /><span>热搜</span></Link>
+        <Link className="is-current" aria-current="page" href={`/trending?refresh=${encodeURIComponent(contextBatch)}`}><Flame size={18} /><span>热搜</span></Link>
         <Link href={`/headlines?context=trending&batch=${encodeURIComponent(contextBatch)}`}><Newspaper size={18} /><span>头条</span></Link>
         <Link href={`/signals?context=trending&batch=${encodeURIComponent(contextBatch)}`}><MessageCircle size={18} /><span>信号</span></Link>
         <Link href="/archive"><Search size={18} /><span>历史</span></Link>

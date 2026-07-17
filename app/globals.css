@@ -112,6 +112,8 @@ a { color: inherit; text-decoration: none; }
 .refresh-status.is-refreshing > i { animation: status-pulse 1.2s ease-in-out infinite; }
 .refresh-status.has-error { border-color: rgba(181, 59, 50, .52); }
 .refresh-status.has-error > i { background: var(--red); box-shadow: 0 0 0 3px rgba(181, 59, 50, .11); }
+.refresh-status.has-fallback { border-color: rgba(213, 151, 44, .58); }
+.refresh-status.has-fallback > i { background: #d5972c; box-shadow: 0 0 0 3px rgba(213, 151, 44, .13); }
 .mode-badge { font-size: 10px; font-weight: 800; letter-spacing: .12em; border: 1px solid #aeb2aa; padding: 8px 9px; }
 .mode-live { border-color: #7b9e46; background: #eff6da; color: #48651f; }
 .mode-demo { color: #746e5e; }

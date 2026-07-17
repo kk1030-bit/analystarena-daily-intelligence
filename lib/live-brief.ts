@@ -1,19 +1,56 @@
-import { unstable_cache } from "next/cache";
-import { buildLiveBrief } from "./pipeline";
+import { getBriefByDate, getLatestPublished, saveDraft, storageMode } from "./db";
+import { buildLiveBrief, type BuildBriefOptions } from "./pipeline";
+import { beijingDateKey } from "./time";
 import type { DailyBrief } from "./types";
 
-declare global {
-  var __analystArenaLiveBriefInflight: Map<string, Promise<DailyBrief>> | undefined;
-  var __analystArenaLastLiveBrief: DailyBrief | undefined;
+export type LiveBriefFallback = "none" | "draft" | "published";
+
+export interface LiveBriefResult {
+  brief: DailyBrief;
+  fallback: LiveBriefFallback;
+  errorCode?: "LIVE_BRIEF_COLLECTION_FAILED";
 }
 
-const inflight = globalThis.__analystArenaLiveBriefInflight ?? new Map<string, Promise<DailyBrief>>();
-globalThis.__analystArenaLiveBriefInflight = inflight;
+declare global {
+  var __analystArenaLiveBriefCache: Map<string, LiveBriefCacheEntry> | undefined;
+}
 
-export const STALE_LIVE_BRIEF_WARNING = "本轮实时来源或翻译暂时不可用，当前保留上一份完整简体中文快照。";
+interface LiveBriefCacheEntry {
+  promise: Promise<LiveBriefResult>;
+  expiresAt: number;
+}
+
+const liveCache = globalThis.__analystArenaLiveBriefCache ?? new Map<string, LiveBriefCacheEntry>();
+globalThis.__analystArenaLiveBriefCache = liveCache;
+
+const TEN_MINUTES_MS = 600_000;
+// A public manual refresh can bypass the ten-minute dashboard snapshot, but all
+// callers share one collection per two-minute window. The key is derived only
+// from server time and uses a fixed slot ring, so callers cannot create
+// unbounded cache entries or amplify upstream collector traffic.
+export const MANUAL_REFRESH_WINDOW_MS = 120_000;
+// Include the current bucket plus enough previous buckets to keep links stable
+// for the full ten-minute interval between dashboard refreshes.
+const MANUAL_CONTEXT_BUCKETS = Math.ceil(TEN_MINUTES_MS / MANUAL_REFRESH_WINDOW_MS) + 1;
+const MANUAL_CACHE_SLOTS = MANUAL_CONTEXT_BUCKETS;
+const MANUAL_SNAPSHOT_TTL_SECONDS = TEN_MINUTES_MS / 1_000;
+export const STALE_LIVE_BRIEF_WARNING = "实时采集暂时失败，当前显示数据库中最近可用的日报。";
+
+function mergeWarnings(...warnings: Array<string | undefined>): string | undefined {
+  const unique = [...new Set(warnings.map((warning) => warning?.trim()).filter((warning): warning is string => Boolean(warning)))];
+  return unique.join(" ") || undefined;
+}
 
 export function hotSearchBatchKey(now = Date.now()): string {
-  return String(Math.floor(now / 600_000));
+  return String(Math.floor(now / TEN_MINUTES_MS));
+}
+
+export function manualRefreshBatchKey(now = Date.now()): string {
+  return String(Math.floor(now / MANUAL_REFRESH_WINDOW_MS));
+}
+
+export function manualRefreshContextKey(now = Date.now()): string {
+  return `manual:${manualRefreshBatchKey(now)}`;
 }
 
 export function normalizeHotSearchBatchKey(value?: string): string {
@@ -21,46 +58,157 @@ export function normalizeHotSearchBatchKey(value?: string): string {
   if (!value || !/^\d{1,16}$/.test(value)) return String(current);
   const numeric = Number(value);
   if (!Number.isSafeInteger(numeric)) return String(current);
-  const bucket = numeric >= 100_000_000_000 ? Math.floor(numeric / 600_000) : numeric;
+  const bucket = numeric >= 100_000_000_000 ? Math.floor(numeric / TEN_MINUTES_MS) : numeric;
   // Public routes may only address the active or immediately previous batch.
   // This keeps shared deep links useful without letting arbitrary query values
   // create unbounded cache keys and trigger repeated collection work.
   return bucket === current || bucket === current - 1 ? String(bucket) : String(current);
 }
 
-export function getCachedHotSearchBrief(batchKey?: string): Promise<DailyBrief> {
-  const safeBatchKey = normalizeHotSearchBatchKey(batchKey);
-  const existing = inflight.get(safeBatchKey);
-  if (existing) return existing;
+function normalizeManualRefreshBatchKey(value?: string): string {
+  const current = Number(manualRefreshBatchKey());
+  if (!value || !/^\d{1,16}$/.test(value)) return String(current);
+  const numeric = Number(value);
+  if (!Number.isSafeInteger(numeric)) return String(current);
+  const bucket = numeric >= 100_000_000_000 ? Math.floor(numeric / MANUAL_REFRESH_WINDOW_MS) : numeric;
+  return bucket <= current && bucket >= current - (MANUAL_CONTEXT_BUCKETS - 1) ? String(bucket) : String(current);
+}
 
-  // Two alternating slots cap persistent cache growth while each slot is still
-  // older than the ten-minute revalidation window when it is reused.
-  const cacheSlot = String(Number(safeBatchKey) % 2);
-  const request = unstable_cache(
-    async () => {
+export interface LiveBriefContext {
+  kind: "shared" | "manual";
+  batchKey: string;
+  contextKey: string;
+}
+
+export function normalizeLiveBriefContext(value?: string): LiveBriefContext {
+  const manualMatch = value?.match(/^manual:(\d{1,16})$/);
+  if (manualMatch) {
+    const batchKey = normalizeManualRefreshBatchKey(manualMatch[1]);
+    return { kind: "manual", batchKey, contextKey: `manual:${batchKey}` };
+  }
+  const batchKey = normalizeHotSearchBatchKey(value);
+  return { kind: "shared", batchKey, contextKey: batchKey };
+}
+
+async function getPersistentFallback(): Promise<LiveBriefResult | null> {
+  // Production fallback must survive process restarts and instance changes.
+  // Do not silently substitute the development-only in-memory database.
+  if (storageMode() !== "postgres") return null;
+
+  const today = await getBriefByDate(beijingDateKey()).catch(() => null);
+  if (today) {
+    const fallback = today.status === "draft" ? "draft" : "published";
+    return {
+      brief: {
+        ...structuredClone(today.brief),
+        warning: mergeWarnings(today.brief.warning, STALE_LIVE_BRIEF_WARNING),
+      },
+      fallback,
+      errorCode: "LIVE_BRIEF_COLLECTION_FAILED",
+    };
+  }
+
+  const published = await getLatestPublished().catch(() => null);
+  if (!published) return null;
+  return {
+    brief: {
+      ...structuredClone(published.brief),
+      warning: mergeWarnings(published.brief.warning, STALE_LIVE_BRIEF_WARNING),
+    },
+    fallback: "published",
+    errorCode: "LIVE_BRIEF_COLLECTION_FAILED",
+  };
+}
+
+export async function buildFreshLiveBrief(
+  options: BuildBriefOptions = { useAi: false, useBrowserCollectors: false },
+): Promise<LiveBriefResult> {
+  try {
+    let brief = await buildLiveBrief({ ...options, strictTranslation: false });
+    if (storageMode() === "postgres") {
       try {
-        return await buildLiveBrief({ useAi: false, useBrowserCollectors: false });
+        const existing = await getBriefByDate(brief.date);
+        if (!existing) {
+          const saved = await saveDraft(brief);
+          brief = saved.brief;
+        } else if (existing.status === "published") {
+          brief = {
+            ...brief,
+            warning: mergeWarnings(brief.warning, "今日正式日报已发布，本次实时结果仅作为页面预览，不会覆盖已发布版本。"),
+          };
+        }
       } catch (error) {
-        const previous = globalThis.__analystArenaLastLiveBrief;
-        if (!previous) throw error;
-        return {
-          ...structuredClone(previous),
-          warning: STALE_LIVE_BRIEF_WARNING,
+        console.error("Unable to persist live brief draft", error);
+        brief = {
+          ...brief,
+          warning: mergeWarnings(brief.warning, "本次实时结果暂未写入数据库，页面仍可继续查看。"),
         };
       }
+    }
+    return { brief, fallback: "none" };
+  } catch (error) {
+    const persisted = await getPersistentFallback();
+    if (persisted) return persisted;
+    throw error;
+  }
+}
+
+function getCachedResult(
+  kind: "shared" | "manual",
+  batchKey: string,
+  ttlSeconds: number,
+): Promise<LiveBriefResult> {
+  const requestKey = `${kind}:${batchKey}`;
+  const now = Date.now();
+  const existing = liveCache.get(requestKey);
+  if (existing && existing.expiresAt > now) return existing.promise;
+  if (existing) liveCache.delete(requestKey);
+
+  // Exact batch keys prevent an expired cache slot from returning old content
+  // under a new batch label. The map only retains addressable public contexts.
+  const request = buildFreshLiveBrief({ useAi: false, useBrowserCollectors: false });
+  const cacheEntry: LiveBriefCacheEntry = { promise: request, expiresAt: Number.POSITIVE_INFINITY };
+  liveCache.set(requestKey, cacheEntry);
+
+  const limit = kind === "manual" ? MANUAL_CACHE_SLOTS : 2;
+  const family = [...liveCache.keys()]
+    .filter((key) => key.startsWith(`${kind}:`))
+    .sort((left, right) => Number(right.slice(right.indexOf(":") + 1)) - Number(left.slice(left.indexOf(":") + 1)));
+  for (const staleKey of family.slice(limit)) liveCache.delete(staleKey);
+
+  void request.then(
+    () => {
+      if (liveCache.get(requestKey) === cacheEntry) cacheEntry.expiresAt = Date.now() + ttlSeconds * 1_000;
     },
-    ["analystarena-hot-search-v3-zh-cn", cacheSlot],
-    { revalidate: 600 },
-  )()
-    .then((brief) => {
-      if (brief.warning !== STALE_LIVE_BRIEF_WARNING) {
-        globalThis.__analystArenaLastLiveBrief = structuredClone(brief);
-      }
-      return brief;
-    })
-    .finally(() => {
-      inflight.delete(safeBatchKey);
-    });
-  inflight.set(safeBatchKey, request);
+    () => {
+      if (liveCache.get(requestKey) === cacheEntry) liveCache.delete(requestKey);
+    },
+  );
   return request;
+}
+
+export function getCachedHotSearchResult(batchKey?: string): Promise<LiveBriefResult> {
+  const safeBatchKey = normalizeHotSearchBatchKey(batchKey);
+  return getCachedResult("shared", safeBatchKey, TEN_MINUTES_MS / 1_000);
+}
+
+export async function getCachedHotSearchBrief(batchKey?: string): Promise<DailyBrief> {
+  return (await getCachedHotSearchResult(batchKey)).brief;
+}
+
+export function getForcedHotSearchResult(now = Date.now()): Promise<LiveBriefResult> {
+  return getCachedResult("manual", manualRefreshBatchKey(now), MANUAL_SNAPSHOT_TTL_SECONDS);
+}
+
+export function getLiveBriefContextResult(value?: string): Promise<LiveBriefResult> {
+  const context = normalizeLiveBriefContext(value);
+  return getCachedResult(
+    context.kind,
+    context.batchKey,
+    context.kind === "manual" ? MANUAL_SNAPSHOT_TTL_SECONDS : TEN_MINUTES_MS / 1_000,
+  );
+}
+
+export async function getLiveBriefContextBrief(value?: string): Promise<DailyBrief> {
+  return (await getLiveBriefContextResult(value)).brief;
 }

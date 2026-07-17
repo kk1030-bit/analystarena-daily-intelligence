@@ -16,6 +16,11 @@ function dateParts(value: string): Record<string, string> | null {
   return Object.fromEntries(beijingFormatter.formatToParts(date).map((part) => [part.type, part.value]));
 }
 
+export function beijingDateKey(value: Date = new Date()): string {
+  const parts = Object.fromEntries(beijingFormatter.formatToParts(value).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
 export function formatBeijingMinute(value?: string): string {
   if (!value) return "时间待确认";
   const parts = dateParts(value);
