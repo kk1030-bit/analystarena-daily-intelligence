@@ -15,6 +15,7 @@ export async function POST(request: Request) {
     const brief = await buildLiveBrief({
       useAi: body.useAi !== false,
       useBrowserCollectors: process.env.NODE_ENV !== "production" && body.useBrowserCollectors !== false,
+      strictTranslation: false,
     });
     const record = await saveDraft({ ...brief, status: "draft", storageMode: storageMode() });
     return NextResponse.json(record, { status: 201 });

@@ -27,6 +27,7 @@ interface FeedDefinition {
 export interface BuildBriefOptions {
   useAi?: boolean;
   useBrowserCollectors?: boolean;
+  strictTranslation?: boolean;
   seedStories?: RawStory[];
   seedCollectorStatuses?: CollectorStatus[];
 }
@@ -607,5 +608,5 @@ export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}):
       { time: "盘后", event: "科技与半导体供应链更新", why: "追踪 AI 资本支出与供给能见度", category: "Semiconductor" },
     ],
   };
-  return localizeBriefContent(brief, { strict: true });
+  return localizeBriefContent(brief, { strict: normalized.strictTranslation ?? true });
 }
