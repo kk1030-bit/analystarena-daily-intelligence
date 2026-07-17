@@ -1,6 +1,6 @@
 import path from "node:path";
 import PDFDocument from "pdfkit";
-import type { DailyBrief, Headline } from "./types";
+import type { DailyBrief, EquityImpactDirection, Headline } from "./types";
 import { categoryDisplayNames, extractTermNotes, sourceDisplayName } from "./terms";
 import { formatTimestampLine, resolveHeadlineTimestamp } from "./time";
 
@@ -13,6 +13,9 @@ const colors = {
   pale: "#F1F3ED",
   line: "#D4D9D2",
   white: "#FFFFFF",
+  upside: "#24766C",
+  downside: "#C43D2F",
+  mixed: "#9A6500",
 };
 
 function pdfText(value: string, limit = 2_000): string {
@@ -65,6 +68,25 @@ function ensureDetailRoom(doc: PDFKit.PDFDocument, needed: number, date: string)
   drawDetailHeader(doc, date);
 }
 
+function boundedTextHeight(
+  doc: PDFKit.PDFDocument,
+  value: string,
+  width: number,
+  fontSize: number,
+  lineGap: number,
+  maxHeight: number,
+): number {
+  const measured = doc.font("NotoSC").fontSize(fontSize).heightOfString(value, { width, lineGap });
+  return Math.min(maxHeight, Math.max(fontSize + 2, Math.ceil(measured) + 1));
+}
+
+function equityDirectionColor(direction: EquityImpactDirection): string {
+  if (direction === "potential_upside") return colors.upside;
+  if (direction === "potential_downside") return colors.downside;
+  if (direction === "mixed") return colors.mixed;
+  return colors.muted;
+}
+
 function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headline[]): void {
   doc.save().rect(0, 0, page.width, 176).fill(colors.ink).restore();
   doc.fillColor(colors.acid).font("NotoSC").fontSize(9).text("AnalystArena / 每日市场情报", page.margin, 34);
@@ -106,6 +128,13 @@ function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: s
   const title = pdfText(headline.title, 220);
   const summary = pdfText(headline.summary, 560);
   const impact = pdfText(headline.marketImpact, 560);
+  const equityRows = (headline.equityImpacts ?? [])
+    .filter((item) => item.reviewStatus !== "rejected" && item.mappingConfidence >= 70)
+    .slice(0, 3)
+    .map((item) => ({
+      direction: item.direction,
+      text: pdfText(`${item.symbol} / ${item.direction === "potential_upside" ? "潜在受益" : item.direction === "potential_downside" ? "潜在承压" : item.direction === "mixed" ? "多空并存" : "方向待确认"} / 映射可信度 ${item.mappingConfidence}%: ${item.mechanism}`, 300),
+    }));
   const facts = factsFor(headline);
   const termNotes = headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline);
   const termLine = pdfText(termNotes.length ? `英文术语: ${termNotes.map((item) => `${item.term}=${item.note}`).join("; ")}` : "", 420);
@@ -113,14 +142,18 @@ function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: s
   const timeLine = pdfText(`${formatTimestampLine(newsTime.value, newsTime.kind)}${newsTime.source ? ` / 时间来源: ${sourceDisplayName(newsTime.source)}` : ""}`, 420);
   const sourceLine = pdfText(`来源: ${headline.sources.map((source) => sourceDisplayName(source.name)).join(" / ") || "待补充"}`, 420);
 
-  const titleHeight = doc.font("NotoSC").fontSize(16).heightOfString(title, { width: innerWidth, lineGap: 2 });
-  const termHeight = termLine ? doc.fontSize(8.8).heightOfString(termLine, { width: innerWidth, lineGap: 2 }) : 0;
-  const timeHeight = doc.fontSize(9.5).heightOfString(timeLine, { width: innerWidth - 20, lineGap: 2 });
-  const summaryHeight = doc.fontSize(10.8).heightOfString(summary, { width: innerWidth, lineGap: 3 });
-  const factHeights = facts.map((fact) => doc.fontSize(10.5).heightOfString(fact, { width: innerWidth - 22, lineGap: 2 }));
+  // Every section has an explicit vertical budget. PDFKit otherwise moves overflowing text
+  // to an implicit page, leaving the surrounding card clipped on the previous page.
+  const titleHeight = boundedTextHeight(doc, title, innerWidth, 16, 2, 42);
+  const termHeight = termLine ? boundedTextHeight(doc, termLine, innerWidth, 8.8, 2, 24) : 0;
+  const timeHeight = boundedTextHeight(doc, timeLine, innerWidth - 20, 9.5, 2, 20);
+  const summaryHeight = boundedTextHeight(doc, summary, innerWidth, 10.8, 3, 48);
+  const factHeights = facts.map((fact) => boundedTextHeight(doc, fact, innerWidth - 22, 10.5, 2, 27));
   const factsHeight = factHeights.reduce((sum, height) => sum + height + 7, 0);
-  const impactHeight = doc.fontSize(10.5).heightOfString(impact, { width: innerWidth - 18, lineGap: 2 });
-  const blockHeight = 218 + titleHeight + termHeight + (termLine ? 12 : 0) + timeHeight + summaryHeight + factsHeight + impactHeight;
+  const impactHeight = boundedTextHeight(doc, impact, innerWidth - 20, 10.5, 2, 48);
+  const equityHeights = equityRows.map((row) => boundedTextHeight(doc, row.text, innerWidth - 20, 9.4, 2, 27));
+  const equitiesHeight = equityRows.length ? 31 + equityHeights.reduce((sum, height) => sum + height + 7, 0) : 0;
+  const blockHeight = 218 + titleHeight + termHeight + (termLine ? 12 : 0) + timeHeight + summaryHeight + factsHeight + impactHeight + equitiesHeight;
   ensureDetailRoom(doc, blockHeight + 14, date);
 
   const top = doc.y;
@@ -134,36 +167,46 @@ function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: s
   drawImpact(doc, headline.impact, page.width - page.margin - 78, cursor + 18);
   cursor += 31;
 
-  doc.fillColor(colors.ink).fontSize(16).text(title, x, cursor, { width: innerWidth, lineGap: 2 });
+  doc.fillColor(colors.ink).fontSize(16).text(title, x, cursor, { width: innerWidth, height: titleHeight, lineGap: 2, ellipsis: true });
   cursor += titleHeight + 14;
 
   if (termLine) {
-    doc.fillColor(colors.muted).fontSize(8.8).text(termLine, x, cursor, { width: innerWidth, lineGap: 2 });
+    doc.fillColor(colors.muted).fontSize(8.8).text(termLine, x, cursor, { width: innerWidth, height: termHeight, lineGap: 2, ellipsis: true });
     cursor += termHeight + 12;
   }
 
   doc.save().rect(x, cursor, innerWidth, timeHeight + 20).fill(newsTime.kind === "collected" ? "#FFF0E8" : "#EEF6E8").restore();
-  doc.fillColor(newsTime.kind === "collected" ? colors.orange : "#24766C").fontSize(9.5).text(timeLine, x + 10, cursor + 9, { width: innerWidth - 20, lineGap: 2 });
+  doc.fillColor(newsTime.kind === "collected" ? colors.orange : colors.upside).fontSize(9.5).text(timeLine, x + 10, cursor + 9, { width: innerWidth - 20, height: timeHeight, lineGap: 2, ellipsis: true });
   cursor += timeHeight + 31;
 
   doc.fillColor(colors.orange).fontSize(8.5).text("事件摘要", x, cursor);
   cursor += 16;
-  doc.fillColor(colors.muted).fontSize(10.8).text(summary, x, cursor, { width: innerWidth, lineGap: 3 });
+  doc.fillColor(colors.muted).fontSize(10.8).text(summary, x, cursor, { width: innerWidth, height: summaryHeight, lineGap: 3, ellipsis: true });
   cursor += summaryHeight + 14;
 
   doc.fillColor(colors.orange).fontSize(8.5).text("重要信息", x, cursor);
   cursor += 17;
   facts.forEach((fact, index) => {
     doc.save().circle(x + 4, cursor + 5, 3).fill(index === 0 ? colors.orange : colors.ink).restore();
-    doc.fillColor(colors.ink).fontSize(10.5).text(fact, x + 17, cursor, { width: innerWidth - 22, lineGap: 2 });
+    doc.fillColor(colors.ink).fontSize(10.5).text(fact, x + 17, cursor, { width: innerWidth - 22, height: factHeights[index], lineGap: 2, ellipsis: true });
     cursor += factHeights[index] + 7;
   });
   cursor += 5;
 
   doc.save().rect(x, cursor, innerWidth, impactHeight + 36).fill(colors.pale).restore();
   doc.fillColor(colors.orange).fontSize(8.5).text("市场影响", x + 10, cursor + 9);
-  doc.fillColor(colors.ink).fontSize(10.5).text(impact, x + 10, cursor + 23, { width: innerWidth - 20, lineGap: 2 });
+  doc.fillColor(colors.ink).fontSize(10.5).text(impact, x + 10, cursor + 23, { width: innerWidth - 20, height: impactHeight, lineGap: 2, ellipsis: true });
   cursor += impactHeight + 47;
+
+  if (equityRows.length) {
+    doc.fillColor(colors.orange).fontSize(8.5).text("关联美股（映射可信度并非上涨概率）", x, cursor);
+    cursor += 17;
+    equityRows.forEach((row, index) => {
+      doc.fillColor(equityDirectionColor(row.direction)).fontSize(9.4).text(row.text, x + 10, cursor, { width: innerWidth - 20, height: equityHeights[index], lineGap: 2, ellipsis: true });
+      cursor += equityHeights[index] + 7;
+    });
+    cursor += 7;
+  }
 
   doc.fillColor(colors.muted).fontSize(8.5).text(sourceLine, x, cursor, { width: innerWidth, lineBreak: false, ellipsis: true });
   doc.y = top + blockHeight + 14;

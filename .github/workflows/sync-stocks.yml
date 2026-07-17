@@ -1,0 +1,35 @@
+name: Sync US stock database
+
+on:
+  schedule:
+    # 05:30 Asia/Shanghai / Beijing time (GitHub Actions cron uses UTC)
+    - cron: "30 21 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: analystarena-stock-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      STOCK_SYNC_ENDPOINT: ${{ vars.STOCK_SYNC_ENDPOINT || 'https://analystarena-daily-intelligence.onrender.com/api/cron/stocks/sync' }}
+      YFINANCE_CACHE_DIR: ${{ github.workspace }}/.cache/yfinance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: scripts/requirements-yfinance.txt
+      - name: Install yfinance sync dependencies
+        run: python -m pip install -r scripts/requirements-yfinance.txt
+      - name: Refresh profiles and recent daily prices
+        run: >-
+          python scripts/sync-yfinance.py
+          --endpoint "$STOCK_SYNC_ENDPOINT"
+          --batch-size 20
+          --download-batch-size 40

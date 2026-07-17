@@ -1,5 +1,6 @@
 import { demoBrief } from "@/lib/demo-data";
 import { getLatestPublished } from "@/lib/db";
+import { attachEquityImpacts } from "@/lib/equity-impact";
 import { getCachedHotSearchBrief, normalizeHotSearchBatchKey } from "@/lib/live-brief";
 import { localizeBriefContent } from "@/lib/translation";
 import { HeadlineExplorer } from "./HeadlineExplorer";
@@ -22,5 +23,6 @@ export default async function HeadlinesPage({ searchParams }: { searchParams: Pr
     const latest = await getLatestPublished().catch(() => null);
     brief = await localizeBriefContent(latest?.brief ?? demoBrief);
   }
+  brief = { ...brief, headlines: await attachEquityImpacts(brief.headlines) };
   return <HeadlineExplorer brief={brief} initialEvent={event} context={isTrendingContext ? "trending" : undefined} contextBatch={contextBatch} />;
 }

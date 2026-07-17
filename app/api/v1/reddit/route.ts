@@ -5,7 +5,17 @@ import { storageMode } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const origin = new URL(request.url).origin;
+  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const forwardedProtocol = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const renderHost = process.env.RENDER_EXTERNAL_HOSTNAME;
+  const trustedForwardedHost = forwardedHost && /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(forwardedHost)
+    ? forwardedHost
+    : null;
+  const origin = renderHost
+    ? `https://${renderHost}`
+    : trustedForwardedHost
+      ? `${forwardedProtocol === "http" ? "http" : "https"}://${trustedForwardedHost}`
+      : new URL(request.url).origin;
   return NextResponse.json({
     service: "AnalystArena Reddit Search API",
     version: "v1",

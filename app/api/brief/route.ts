@@ -3,7 +3,7 @@ import { demoBrief } from "@/lib/demo-data";
 import { buildLiveBrief } from "@/lib/pipeline";
 import { getLatestPublished } from "@/lib/db";
 import { isAdminRequest } from "@/lib/auth";
-import { getCachedHotSearchBrief, hotSearchBatchKey } from "@/lib/live-brief";
+import { getCachedHotSearchBrief, hotSearchBatchKey, STALE_LIVE_BRIEF_WARNING } from "@/lib/live-brief";
 import { localizeBriefContent } from "@/lib/translation";
 
 export const runtime = "nodejs";
@@ -11,13 +11,17 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const published = await getLatestPublished().catch(() => null);
-  return NextResponse.json(await localizeBriefContent(published?.brief ?? demoBrief));
+  return NextResponse.json(await localizeBriefContent(published?.brief ?? demoBrief), {
+    headers: { "Cache-Control": "no-store" },
+  });
 }
 
 export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as { live?: boolean; useAi?: boolean; useBrowserCollectors?: boolean };
-    if (!body.live) return NextResponse.json(await localizeBriefContent(demoBrief));
+    if (!body.live) return NextResponse.json(await localizeBriefContent(demoBrief, { strict: true }), {
+      headers: { "Cache-Control": "no-store" },
+    });
     const admin = isAdminRequest(request);
 
     // Anonymous dashboard refreshes reuse the same bounded ten-minute snapshot
@@ -27,21 +31,27 @@ export async function POST(request: Request) {
     if (!privilegedBuild) {
       const batchKey = hotSearchBatchKey();
       const brief = await getCachedHotSearchBrief(batchKey);
-      return NextResponse.json(brief, { headers: { "X-AnalystArena-Batch": batchKey } });
+      return NextResponse.json(brief, { headers: {
+        "Cache-Control": "no-store",
+        "X-AnalystArena-Batch": batchKey,
+        "X-AnalystArena-Generated-At": brief.generatedAt,
+        "X-AnalystArena-Stale": brief.warning === STALE_LIVE_BRIEF_WARNING ? "1" : "0",
+      } });
     }
 
-    return NextResponse.json(await buildLiveBrief({
+    const brief = await buildLiveBrief({
       useAi: body.useAi !== false,
       useBrowserCollectors: body.useBrowserCollectors === true,
-    }));
+    });
+    return NextResponse.json(brief, { headers: {
+      "Cache-Control": "no-store",
+      "X-AnalystArena-Generated-At": brief.generatedAt,
+    } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "未知错误";
-    return NextResponse.json(
-      {
-        ...(await localizeBriefContent(demoBrief)),
-        warning: `实时来源更新失败，已保留示范日报。${message}`,
-      },
-      { status: 200 },
-    );
+    console.error("Live brief refresh failed", error);
+    return NextResponse.json({
+      error: "实时简报更新失败，页面将保留上一份可用的简体中文内容。",
+      code: "LIVE_BRIEF_UPDATE_FAILED",
+    }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
 }
