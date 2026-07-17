@@ -75,6 +75,14 @@ try {
     "\u5a92\u4f53\u54c1\u724c\u540d\u4e0d\u5f97\u8ba9\u5df2\u5b8c\u6210\u7684\u4e2d\u6587\u8bd1\u6587\u5931\u8d25",
   );
 
+  const translatedFundBrand = "\u65bd\u74e6\u5e03\u65b0\u5174\u5e02\u573a ETF \u4e0e iShares MSCI \u65b0\u5174\u5e02\u573a ETF\uff1a\u54ea\u4e2a\u66f4\u597d\u4e70\uff1f\u6742\u4e03\u6742\u516b\u7684\u50bb\u74dc";
+  globalThis.fetch = (async () => googleResponse(translatedFundBrand)) as typeof fetch;
+  assert.equal(
+    await localizeText("Schwab Emerging Markets ETF vs iShares MSCI Emerging Markets ETF: Which is the Better Buy? The Motley Fool"),
+    translatedFundBrand,
+    "iShares \u8fd9\u7c7b\u9a7c\u5cf0\u54c1\u724c\u540d\u4e0d\u5f97\u8ba9\u5df2\u5b8c\u6210\u7684\u4e2d\u6587\u8bd1\u6587\u5931\u8d25",
+  );
+
   const incompleteCandidateInput = "Revenue outlook validator regression";
   globalThis.fetch = (async () => googleResponse("\u5e02\u573a outlook remains weak with lower demand")) as typeof fetch;
   assert.equal(
@@ -125,6 +133,7 @@ try {
   const nonStrict = await localizeBriefContent(briefWith(failedText));
   assert.equal(nonStrict.translationEnabled, false, "\u7ffb\u8bd1\u5931\u8d25\u65f6\u4e0d\u5f97\u8bef\u6807\u4e3a\u5df2\u542f\u7528\u7b80\u4f53\u4e2d\u6587");
   assert.equal(nonStrict.headlines[0].title, failedText);
+  assert.match(nonStrict.warning ?? "", /\u5f85\u4eba\u5de5\u786e\u8ba4/, "\u8349\u7a3f\u5fc5\u987b\u663e\u793a\u672a\u5b8c\u6210\u7ffb\u8bd1\u7684\u4eba\u5de5\u5ba1\u6838\u8b66\u544a");
   assert.equal(calls, 2, "Google \u7ffb\u8bd1\u5e94\u5c1d\u8bd5\u4e24\u6b21\uff0c\u540c\u6587\u672c\u5e76\u53d1\u5e94\u5355\u98de");
 
   await assert.rejects(

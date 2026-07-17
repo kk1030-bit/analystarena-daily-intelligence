@@ -95,6 +95,7 @@ function hasTranslatableEnglish(value: string): boolean {
     const previous = tokens[index - 1] ?? "";
     const next = tokens[index + 1] ?? "";
     const titleCased = (candidate: string) => /^[A-Z][A-Za-z]{2,}$/.test(candidate);
+    if (hasChineseContext && /^[a-z]+[A-Z][A-Za-z0-9]*$/.test(token)) return false;
     // Media and company names often retain small connector words after the
     // surrounding prose has been translated (for example The Motley Fool or
     // Bank of America). Keep those identifiers, but still reject lowercase
@@ -301,11 +302,14 @@ export async function localizeBriefContent(
   if (options.strict && incomplete.length) {
     throw new Error(`\u7b80\u4f53\u4e2d\u6587\u7ffb\u8bd1\u672a\u5b8c\u6210\uff1a${incomplete.join("\u3001")}`);
   }
+  const translationWarning = incomplete.length
+    ? `\u90e8\u5206\u5b57\u6bb5\u7684\u81ea\u52a8\u7ffb\u8bd1\u5f85\u4eba\u5de5\u786e\u8ba4\uff1a${incomplete.join("\u3001")}`
+    : undefined;
 
   return {
     ...brief,
     translationEnabled: incomplete.length === 0,
-    warning: brief.warning ? await localizeText(brief.warning) : brief.warning,
+    warning: [brief.warning ? await localizeText(brief.warning) : brief.warning, translationWarning].filter(Boolean).join(" ") || undefined,
     headlines,
     marketHeat: brief.marketHeat.map((item, index) => ({ ...item, note: heatNotes[index] })),
     socialBuzz: { reddit, x },

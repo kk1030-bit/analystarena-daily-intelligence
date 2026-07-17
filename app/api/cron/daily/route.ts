@@ -51,6 +51,7 @@ export async function POST(request: Request) {
     const brief = await buildLiveBrief({
       useAi: true,
       useBrowserCollectors: false,
+      strictTranslation: false,
       seedStories,
       seedCollectorStatuses: safeStatuses(body.statuses),
     });
