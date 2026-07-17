@@ -70,6 +70,69 @@ function responseErrorMessage(value: unknown): string | null {
   return typeof payload.code === "string" ? `${detail}（${payload.code}）` : detail;
 }
 
+function safePdfErrorDetail(value: string | null): string | null {
+  if (!value) return null;
+  const detail = value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").replace(/^error:\s*/i, "").trim();
+  if (!detail || detail.length > 240) return null;
+  // Never surface stack traces, credentials, connection strings, server paths,
+  // or implementation details returned by an upstream service.
+  if (/(?:database_url|authorization|bearer\s|password|secret|token|api[_-]?key|connection string|postgres(?:ql)?:\/\/|https?:\/\/|sqlstate|prisma|stack trace|\bat\s+\S+\s*\(|[a-z]:\\|\/app\/|node_modules)/i.test(detail)) return null;
+  return detail;
+}
+
+function readablePdfError(status: number, serverDetail: string | null): string {
+  const detail = safePdfErrorDetail(serverDetail);
+  const normalized = detail?.toLowerCase() ?? "";
+
+  if (status === 413 || /(?:content|payload|body).*(?:large|size)|内容过大/.test(normalized)) {
+    return "PDF 生成失败：日报内容过大，请缩短新闻内容后重试。";
+  }
+  if (/translation|untranslated|翻译未完成|翻译不完整/.test(normalized)) {
+    return "PDF 生成失败：部分内容尚未完成简体中文翻译，请稍后重试。";
+  }
+  if (status === 400 || /invalid|format|incomplete|格式不正确|内容不完整/.test(normalized)) {
+    return "PDF 生成失败：日报资料不完整，请先重新更新今日简报。";
+  }
+  if (status === 401 || status === 403) {
+    return "PDF 生成失败：当前没有导出权限，请重新登录后再试。";
+  }
+  if (status === 429) {
+    return "PDF 生成请求过于频繁，请稍后再试。";
+  }
+  if (status === 408 || status === 502 || status === 503 || status === 504 || /timeout|timed out/.test(normalized)) {
+    return "PDF 生成服务暂时无法完成请求，请稍后再试。";
+  }
+  if (/font|glyph|字体|字形/.test(normalized)) {
+    return "PDF 生成失败：报告字体暂时无法加载，请稍后再试。";
+  }
+  if (/render|document|渲染/.test(normalized)) {
+    return "PDF 生成失败：报告内容暂时无法渲染，请稍后再试。";
+  }
+  if (detail && /[\u3400-\u9fff]/.test(detail) && !/internal server error|pdf (?:generation )?failed/i.test(detail)) {
+    return `PDF 生成失败：${detail}`;
+  }
+  return "PDF 生成失败：服务器暂时无法完成报告，请稍后再试。";
+}
+
+async function pdfErrorFromResponse(response: Response): Promise<string> {
+  let detail: string | null = null;
+  try {
+    const body = await response.text();
+    if (body) {
+      try {
+        const payload = JSON.parse(body) as unknown;
+        detail = responseErrorMessage(payload) ?? (typeof payload === "string" ? payload : null);
+      } catch {
+        detail = body;
+      }
+    }
+  } catch {
+    // The status code still provides a safe, useful fallback when the body
+    // cannot be read (for example, after a proxy disconnect).
+  }
+  return readablePdfError(response.status, detail);
+}
+
 function refreshFallbackFromHeaders(headers: Headers): RefreshFallback {
   const value = headers.get("X-AnalystArena-Fallback")?.toLowerCase();
   if (value === "draft" || value === "published" || value === "memory") return value;
@@ -448,15 +511,22 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ brief }),
       });
-      if (!response.ok) throw new Error("PDF 生成失败");
+      if (!response.ok) throw new Error(await pdfErrorFromResponse(response));
+      const translationWarning = response.headers.get("X-AnalystArena-Translation-Warning")
+        ?? response.headers.get("X-Translation-Warning");
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = url;
       link.download = `AnalystArena-Top5-${brief.date}.pdf`;
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
-    } catch {
-      setNotice("目前无法生成 PDF，请稍后再试。");
+      setNotice(translationWarning && translationWarning !== "0" && translationWarning.toLowerCase() !== "false"
+        ? "PDF 已下载；部分内容仍在完成简体中文翻译，正式发布前请人工复核。"
+        : "PDF 已生成并开始下载。");
+    } catch (error) {
+      setNotice(error instanceof Error && error.message.startsWith("PDF ")
+        ? error.message
+        : "PDF 生成失败：网络连接异常，请检查网络后重试。");
     } finally {
       setIsExporting(false);
     }
