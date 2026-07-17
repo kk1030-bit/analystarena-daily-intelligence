@@ -31,11 +31,23 @@ import {
   Timer,
   TrendingUp,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Category, DailyBrief, Headline, Sentiment, SourceType } from "@/lib/types";
 import { signalMetricLabel, signalStrength, socialSignalId } from "@/lib/investor-view";
 import { categoryDisplayNames as categoryLabels, extractTermNotes, sourceDisplayName } from "@/lib/terms";
 import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
+
+const AUTO_REFRESH_INTERVAL_MS = 10 * 60 * 1_000;
+const REFRESH_TIMEOUT_MS = 90 * 1_000;
+
+type RefreshOrigin = "manual" | "auto";
+
+function formatCountdown(totalSeconds: number): string {
+  const safeSeconds = Math.max(0, totalSeconds);
+  const minutes = Math.floor(safeSeconds / 60);
+  const seconds = safeSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
 
 const sentimentLabels: Record<Sentiment, string> = {
   positive: "偏多",
@@ -153,6 +165,7 @@ function WatchPanel({ items }: { items: DailyBrief["watchlist"] }) {
 
 function HeadlineCard({ headline, contextBatch }: { headline: Headline; contextBatch?: string }) {
   const newsTime = resolveHeadlineTimestamp(headline);
+  const visibleEquities = (headline.equityImpacts ?? []).filter((item) => item.reviewStatus !== "rejected" && item.mappingConfidence >= 70).slice(0, 3);
   return (
     <article className={`headline-card headline-rank-${headline.rank}`} id={`headline-${headline.id}`}>
       <div className="rank-column">
@@ -186,6 +199,14 @@ function HeadlineCard({ headline, contextBatch }: { headline: Headline; contextB
           <span>市场影响</span>
           <p>{headline.marketImpact}</p>
         </div>
+        {visibleEquities.length ? <section className="equity-impact-summary" aria-label="新闻关联美股">
+          <header><TrendingUp size={16} /><div><span>NEWS → STOCKS</span><strong>潜在受益／承压美股</strong></div><small>映射可信度，不是上涨概率</small></header>
+          <div>
+            {visibleEquities.map((item) => <a href={`/headlines?event=${encodeURIComponent(headline.id)}${liveContextSuffix(contextBatch)}`} className={`equity-chip equity-${item.direction}`} title={item.mechanism} key={item.symbol}>
+              <b>{item.symbol}</b><span>{item.direction === "potential_upside" ? "潜在受益" : item.direction === "potential_downside" ? "潜在承压" : item.direction === "mixed" ? "多空并存" : "方向待确认"}</span><em>{item.mappingConfidence}%</em>
+            </a>)}
+          </div>
+        </section> : null}
         <footer className="headline-footer">
           <div className="source-list" aria-label="信息来源">
             {headline.sources.map((source, index) => (
@@ -247,6 +268,12 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(AUTO_REFRESH_INTERVAL_MS / 1_000);
+  const [lastSuccessfulAt, setLastSuccessfulAt] = useState(initialBrief.generatedAt);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const requestInFlightRef = useRef(false);
+  const nextRefreshAtRef = useRef(0);
+  const activeRequestRef = useRef<AbortController | null>(null);
 
   const categories = useMemo(() => {
     return Array.from(new Set(brief.headlines.map((headline) => headline.category)));
@@ -270,28 +297,87 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   }).formatToParts(new Date(brief.generatedAt));
   const generated = Object.fromEntries(generatedParts.map((part) => [part.type, part.value]));
   const generatedLabel = `${generated.year}-${generated.month}-${generated.day} ${generated.hour}:${generated.minute} BJT`;
+  const countdownLabel = formatCountdown(secondsUntilRefresh);
+  const lastSuccessfulLabel = pulseTime(lastSuccessfulAt);
 
-  async function refreshBrief() {
+  const refreshBrief = useCallback(async (origin: RefreshOrigin = "manual") => {
+    if (requestInFlightRef.current) return;
+    requestInFlightRef.current = true;
+    const refreshStartedAt = Date.now();
     setIsRefreshing(true);
-    setNotice(null);
+    setRefreshError(null);
+    if (origin === "manual") setNotice(null);
+    const controller = new AbortController();
+    activeRequestRef.current = controller;
+    const timeoutId = window.setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
     try {
       const response = await fetch("/api/brief", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ live: true, useAi: true }),
+        signal: controller.signal,
       });
       if (!response.ok) throw new Error("更新请求失败");
       const nextBrief = (await response.json()) as DailyBrief;
+      // A failed collection may return the previous server snapshot. Keep the
+      // exact brief already on screen and surface a retry state instead.
+      if (response.headers.get("X-AnalystArena-Stale") === "1" || (nextBrief.mode === "demo" && nextBrief.warning)) {
+        throw new Error(nextBrief.warning || "本轮更新未取得新快照");
+      }
       setBrief(nextBrief);
       setContextBatch(response.headers.get("X-AnalystArena-Batch") ?? undefined);
-      setActiveCategory("All");
-      setNotice(nextBrief.warning || `完成更新：${nextBrief.stats.candidates} 则素材已进入分析流程。`);
-    } catch {
-      setNotice("目前无法更新实时来源，页面仍保留上一份可用日报。");
+      setLastSuccessfulAt(nextBrief.generatedAt);
+      if (origin === "manual") {
+        setActiveCategory("All");
+        setNotice(nextBrief.warning || `完成更新：${nextBrief.stats.candidates} 则素材已进入分析流程。`);
+      } else {
+        setActiveCategory((current) => current === "All" || nextBrief.headlines.some((headline) => headline.category === current) ? current : "All");
+      }
+    } catch (error) {
+      const timedOut = error instanceof DOMException && error.name === "AbortError";
+      const message = timedOut
+        ? "自动更新超时，已保留上一份简报。"
+        : "自动更新失败，已保留上一份简报。";
+      setRefreshError(message);
+      if (origin === "manual") setNotice("目前无法更新实时来源，页面仍保留上一份可用日报。");
     } finally {
+      window.clearTimeout(timeoutId);
+      if (activeRequestRef.current === controller) activeRequestRef.current = null;
+      requestInFlightRef.current = false;
       setIsRefreshing(false);
+      nextRefreshAtRef.current = refreshStartedAt + AUTO_REFRESH_INTERVAL_MS;
+      setSecondsUntilRefresh(Math.max(0, Math.ceil((nextRefreshAtRef.current - Date.now()) / 1_000)));
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    nextRefreshAtRef.current = Date.now() + AUTO_REFRESH_INTERVAL_MS;
+
+    const tick = () => {
+      const remainingMs = nextRefreshAtRef.current - Date.now();
+      setSecondsUntilRefresh(Math.max(0, Math.ceil(remainingMs / 1_000)));
+      if (remainingMs <= 0 && document.visibilityState === "visible" && !requestInFlightRef.current) {
+        void refreshBrief("auto");
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+
+    tick();
+    // Start with the shared server snapshot immediately; the zero-delay task is
+    // cancellable so React Strict Mode does not fire two mount refreshes.
+    const initialRefreshId = window.setTimeout(() => void refreshBrief("auto"), 0);
+    const intervalId = window.setInterval(tick, 1_000);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearTimeout(initialRefreshId);
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      activeRequestRef.current?.abort();
+    };
+  }, [refreshBrief]);
 
   async function exportPdf() {
     if (brief.status === "published" && brief.id) {
@@ -357,9 +443,30 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           <a className="mobile-brand" href="#brief"><Radar size={20} /><span>AnalystArena</span></a>
           <div className="breadcrumb"><span>市场情报</span><b>/</b><strong>每日简报</strong></div>
           <div className="topbar-actions">
+            <div
+              className={`refresh-status${isRefreshing ? " is-refreshing" : ""}${refreshError ? " has-error" : ""}`}
+              title={refreshError ?? `每 10 分钟自动更新；上次成功更新于北京时间 ${lastSuccessfulLabel}`}
+            >
+              <i aria-hidden="true" />
+              <div>
+                <strong>
+                  {isRefreshing
+                    ? "正在更新…"
+                    : refreshError
+                      ? "更新失败"
+                      : <><span className="refresh-status-prefix">自动更新 </span>{countdownLabel}</>}
+                </strong>
+                <small>上次 {lastSuccessfulLabel}（北京时间）</small>
+              </div>
+              {(isRefreshing || refreshError) && (
+                <span className="visually-hidden" role="status">
+                  {refreshError ?? "正在自动更新今日简报"}
+                </span>
+              )}
+            </div>
             <span className={`mode-badge mode-${brief.mode}`}>{brief.status === "published" ? "已发布" : brief.mode === "live" ? "实时预览" : "示范模式"}</span>
             <button className="secondary-button" type="button" onClick={() => void exportPdf()} disabled={isExporting}><Download size={16} />{isExporting ? "制作中…" : "前五大 PDF"}</button>
-            <button className="primary-button" type="button" onClick={refreshBrief} disabled={isRefreshing}>
+            <button className="primary-button" type="button" onClick={() => void refreshBrief("manual")} disabled={isRefreshing}>
               <RefreshCw size={16} className={isRefreshing ? "is-spinning" : ""} />
               {isRefreshing ? "分析中..." : "立即更新"}
             </button>

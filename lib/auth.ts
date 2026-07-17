@@ -34,3 +34,15 @@ export function isRedditSearchRequest(request: Request): boolean {
   return safeEqual(authorization, process.env.REDDIT_SEARCH_API_TOKEN)
     || safeEqual(apiKey, process.env.REDDIT_SEARCH_API_TOKEN);
 }
+
+export function stockSearchConfigured(): boolean {
+  return Boolean(process.env.STOCK_SEARCH_API_TOKEN);
+}
+
+export function isStockSearchRequest(request: Request): boolean {
+  if (!process.env.STOCK_SEARCH_API_TOKEN) return false;
+  const authorization = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  const apiKey = request.headers.get("x-api-key") ?? "";
+  return safeEqual(authorization, process.env.STOCK_SEARCH_API_TOKEN)
+    || safeEqual(apiKey, process.env.STOCK_SEARCH_API_TOKEN);
+}

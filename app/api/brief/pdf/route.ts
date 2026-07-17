@@ -20,7 +20,7 @@ export async function POST(request: Request) {
     const invalid = brief.headlines.some((headline) => typeof headline.title !== "string" || typeof headline.summary !== "string" || typeof headline.marketImpact !== "string");
     if (invalid) return NextResponse.json({ error: "新闻内容不完整" }, { status: 400 });
 
-    const localized = await localizeBriefContent(brief);
+    const localized = await localizeBriefContent(brief, { strict: true });
     const pdf = await generateBriefPdf(localized);
     return new Response(new Uint8Array(pdf), {
       headers: {

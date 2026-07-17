@@ -73,6 +73,14 @@ export function ReviewConsole() {
     setDraft({ ...draft, headlines: draft.headlines.map((headline) => headline.id === id ? { ...headline, ...changes } : headline) });
   }
 
+  function reviewEquityImpact(headlineId: string, symbol: string, reviewStatus: "approved" | "rejected") {
+    const headline = draft?.headlines.find((item) => item.id === headlineId);
+    if (!headline?.equityImpacts) return;
+    updateHeadline(headlineId, {
+      equityImpacts: headline.equityImpacts.map((item) => item.symbol === symbol ? { ...item, reviewStatus } : item),
+    });
+  }
+
   async function generateDraft() {
     setBusy(true);
     setMessage("正在启动浏览器自动采集（Playwright）、事件合并、自动翻译与人工智能（AI）分析，可能需要 1–3 分钟…");
@@ -190,6 +198,13 @@ export function ReviewConsole() {
               </div>
               <label>重要信息（每行一点）<textarea rows={4} value={(headline.keyPoints ?? []).join("\n")} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { keyPoints: event.target.value.split("\n").map((point) => point.trim()).filter(Boolean).slice(0, 4) })} /></label>
               <label>市场影响<textarea rows={3} value={headline.marketImpact} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { marketImpact: event.target.value })} /></label>
+              {headline.equityImpacts?.length ? <section className="review-equity-impacts">
+                <header><span>新闻关联美股</span><small>请确认传导理由；映射可信度不是上涨概率</small></header>
+                {headline.equityImpacts.map((item) => <div className={`review-equity-row review-equity-${item.reviewStatus}`} key={item.symbol}>
+                  <b>{item.symbol}</b><p><strong>{item.companyName} · {item.direction === "potential_upside" ? "潜在受益" : item.direction === "potential_downside" ? "潜在承压" : item.direction === "mixed" ? "多空并存" : "方向待确认"}</strong><span>{item.mechanism}</span></p><em>{item.mappingConfidence}%</em>
+                  <div><button type="button" disabled={selected?.status === "published"} aria-pressed={item.reviewStatus === "approved"} onClick={() => reviewEquityImpact(headline.id, item.symbol, "approved")}>批准</button><button type="button" disabled={selected?.status === "published"} aria-pressed={item.reviewStatus === "rejected"} onClick={() => reviewEquityImpact(headline.id, item.symbol, "rejected")}>驳回</button></div>
+                </div>)}
+              </section> : null}
               <div className="review-fields"><label>分类<select value={headline.category} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { category: event.target.value as Category })}>{categories.map((category) => <option key={category} value={category}>{categoryDisplayNames[category]}</option>)}</select></label><label>影响<input type="number" min="1" max="5" value={headline.impact} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { impact: Number(event.target.value) })} /></label><label>信心<input type="number" min="1" max="99" value={headline.confidence} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { confidence: Number(event.target.value) })} /></label></div>
             </article>
           ))}

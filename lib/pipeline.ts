@@ -2,6 +2,7 @@ import { XMLParser } from "fast-xml-parser";
 import OpenAI from "openai";
 import { collectBrowserStories } from "./collectors/browser";
 import { saveRedditStories } from "./db";
+import { attachEquityImpacts } from "./equity-impact";
 import { localizeBriefContent } from "./translation";
 import { categoryDisplayNames } from "./terms";
 import { formatTimestampLine } from "./time";
@@ -123,7 +124,7 @@ async function fetchFeed(feed: FeedDefinition): Promise<RawStory[]> {
       Accept: "application/rss+xml, application/atom+xml, application/xml, text/xml",
     },
     signal: AbortSignal.timeout(10_000),
-    next: { revalidate: 600 },
+    cache: "no-store",
   });
   if (!response.ok) throw new Error(`${feed.name}: ${response.status}`);
 
@@ -582,7 +583,7 @@ export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}):
     warning = "尚未设置 OpenAI 密钥；自动简体中文翻译仍已启用，目前摘要、事件合并与市场影响使用可重现的规则流程。";
   }
 
-  const headlines = selectWithQuotas(finalCandidates, 8);
+  const headlines = await attachEquityImpacts(selectWithQuotas(finalCandidates, 8));
   const sourcesOnline = collectorStatuses.filter((status) => status.ok).length;
   const brief: DailyBrief = {
     date: new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" }),
@@ -606,5 +607,5 @@ export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}):
       { time: "盘后", event: "科技与半导体供应链更新", why: "追踪 AI 资本支出与供给能见度", category: "Semiconductor" },
     ],
   };
-  return localizeBriefContent(brief);
+  return localizeBriefContent(brief, { strict: true });
 }

@@ -154,6 +154,7 @@ function EventDossier({ brief, headline, relatedSignals, context, contextBatch }
   const risks = headlineRiskFlags(headline);
   const watch = brief.watchlist.find((item) => item.category === headline.category);
   const layers = headline.crossSourceCount ?? new Set(headline.sources.map((source) => source.type)).size;
+  const equityImpacts = (headline.equityImpacts ?? []).filter((item) => item.reviewStatus !== "rejected");
 
   return (
     <article className="event-dossier" id="event-dossier" key={headline.id}>
@@ -198,6 +199,23 @@ function EventDossier({ brief, headline, relatedSignals, context, contextBatch }
           </div>
         </section>
       </div>
+
+      {equityImpacts.length ? <section className="dossier-section equity-impact-dossier">
+        <header><Activity size={18} /><div><span>NEWS → US EQUITIES</span><h3>潜在受益／承压美股</h3></div><small>只显示数据库中可验证的股票</small></header>
+        <div className="equity-impact-grid">
+          {equityImpacts.map((item) => <article className={`equity-impact-card equity-${item.direction}`} key={item.symbol}>
+            <div className="equity-impact-card-head"><b>{item.symbol}</b><span>{item.companyName}</span><em>{item.mappingConfidence}% 映射可信度</em></div>
+            <strong>{item.direction === "potential_upside" ? "潜在受益" : item.direction === "potential_downside" ? "潜在承压" : item.direction === "mixed" ? "多空并存" : "方向待确认"}</strong>
+            <p>{item.mechanism}</p>
+            <dl>
+              <div><dt>关系</dt><dd>{item.relation === "issuer" ? "新闻主体" : item.relation === "supplier" ? "供应链" : item.relation === "customer" ? "客户" : item.relation === "competitor" ? "竞争者" : item.relation === "sector_peer" ? "同业" : "宏观暴露"}</dd></div>
+              <div><dt>行情资料</dt><dd>{item.marketContext?.lastPrice !== undefined ? `${item.marketContext.asOf} · $${item.marketContext.lastPrice.toFixed(2)}` : "暂无事件发生前的可用行情"}</dd></div>
+            </dl>
+            <footer><span>反向情景</span><p>{item.counterCase}</p></footer>
+          </article>)}
+        </div>
+        <p className="equity-method-note">系统先确认公司代码或已审核业务暴露，再判断可能传导方向；结果不是股价预测，也不会把新闻后的涨跌倒推成因果关系。</p>
+      </section> : null}
 
       <section className="dossier-section evidence-section">
         <header><Globe2 size={18} /><div><span>EVIDENCE LEDGER</span><h3>证据与原始来源</h3></div></header>

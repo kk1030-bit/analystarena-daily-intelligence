@@ -25,6 +25,41 @@ export interface TermNote {
   note: string;
 }
 
+export type EquityImpactDirection = "potential_upside" | "potential_downside" | "mixed" | "unclear";
+export type EquityRelation = "issuer" | "supplier" | "customer" | "competitor" | "sector_peer" | "macro_exposure";
+export type ImpactReviewStatus = "auto_pending" | "approved" | "rejected" | "edited";
+
+export interface EquityImpactEvidence {
+  basis: "explicit_symbol" | "company_alias" | "event_rule" | "curated_exposure";
+  statement: string;
+  weight: number;
+}
+
+export interface EquityMarketContext {
+  asOf: string;
+  lastPrice?: number;
+  return1dPct?: number;
+  return5dPct?: number;
+  volumeVs20d?: number;
+  freshness: "fresh" | "stale" | "missing";
+}
+
+export interface EquityImpactAssessment {
+  symbol: string;
+  providerSymbol: string;
+  companyName: string;
+  direction: EquityImpactDirection;
+  relation: EquityRelation;
+  mappingConfidence: number;
+  mechanism: string;
+  assumptions: string[];
+  counterCase: string;
+  evidence: EquityImpactEvidence[];
+  marketContext?: EquityMarketContext;
+  engineVersion: string;
+  reviewStatus: ImpactReviewStatus;
+}
+
 export interface Headline {
   id: string;
   rank: number;
@@ -37,6 +72,7 @@ export interface Headline {
   newsTimeSource?: string;
   timestampKind?: TimestampKind;
   marketImpact: string;
+  equityImpacts?: EquityImpactAssessment[];
   category: Category;
   impact: number;
   confidence: number;
@@ -171,4 +207,60 @@ export interface CollectorStatus {
   ok: boolean;
   count: number;
   note?: string;
+}
+
+export interface StockProfile {
+  symbol: string;
+  providerSymbol: string;
+  shortName?: string;
+  longName?: string;
+  exchange?: string;
+  currency?: string;
+  country?: string;
+  sector?: string;
+  industry?: string;
+  website?: string;
+  businessSummary?: string;
+  marketCap?: number;
+  averageVolume3m?: number;
+  aliases: string[];
+  exposureTags: string[];
+  active: boolean;
+  profileFetchOk?: boolean;
+  sourceUpdatedAt: string;
+}
+
+export interface StockPriceDaily {
+  symbol: string;
+  tradingDate: string;
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  adjustedClose?: number;
+  volume?: number;
+  dividends?: number;
+  stockSplits?: number;
+  sourceUpdatedAt: string;
+}
+
+export interface StockSyncRun {
+  id: string;
+  startedAt: string;
+  completedAt?: string;
+  status: "running" | "success" | "partial" | "failed";
+  sourceVersion: string;
+  errors: string[];
+  profileCount?: number;
+  priceCount?: number;
+}
+
+export interface StockSyncPayload {
+  run: StockSyncRun;
+  profiles: StockProfile[];
+  prices: StockPriceDaily[];
+}
+
+export interface StockSearchResult {
+  items: Array<StockProfile & { latestPrice?: StockPriceDaily }>;
 }
