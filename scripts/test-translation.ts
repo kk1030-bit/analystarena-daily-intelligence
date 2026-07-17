@@ -104,6 +104,37 @@ try {
   calls = 0;
   globalThis.fetch = (async () => {
     calls += 1;
+    return googleResponse("\u4e0d\u5e94\u88ab\u8c03\u7528");
+  }) as typeof fetch;
+  assert.equal(
+    await localizeText("SK\u6d77\u529b\u58eb\u7f8e\u56fd\u5b58\u6258\u51ed\u8bc1\u4e24\u5929\u5185\u66b4\u8dcc21%\uff0c\u56e0\u5e02\u573a\u62c5\u5fe7\u89e6\u9876 - 조선일보"),
+    "SK\u6d77\u529b\u58eb\u7f8e\u56fd\u5b58\u6258\u51ed\u8bc1\u4e24\u5929\u5185\u66b4\u8dcc21%\uff0c\u56e0\u5e02\u573a\u62c5\u5fe7\u89e6\u9876 - \u671d\u9c9c\u65e5\u62a5",
+    "\u5e38\u89c1\u97e9\u6587\u5a92\u4f53\u540d\u5fc5\u987b\u786e\u5b9a\u6027\u8f6c\u4e3a\u7b80\u4f53\u4e2d\u6587",
+  );
+  assert.equal(calls, 0, "\u5df2\u77e5\u5a92\u4f53\u540d\u7684\u672c\u5730\u5316\u4e0d\u5e94\u4f9d\u8d56\u5916\u90e8\u7ffb\u8bd1\u670d\u52a1");
+
+  const unknownForeignPublisher = "\u82af\u7247\u4f9b\u5e94\u94fe\u66f4\u65b0 - 한겨레";
+  globalThis.fetch = (async () => googleResponse("\u82af\u7247\u4f9b\u5e94\u94fe\u66f4\u65b0 - \u97e9\u6c11\u65cf\u65e5\u62a5")) as typeof fetch;
+  assert.equal(
+    await localizeText(unknownForeignPublisher),
+    "\u82af\u7247\u4f9b\u5e94\u94fe\u66f4\u65b0 - \u97e9\u6c11\u65cf\u65e5\u62a5",
+    "\u672a\u6536\u5f55\u7684\u97e9\u6587\u5a92\u4f53\u540d\u5e94\u4ea4\u7ed9\u81ea\u52a8\u7ffb\u8bd1",
+  );
+
+  const untranslatedForeignPublisher = "\u82af\u7247\u4f9b\u5e94\u94fe\u66f4\u65b0 - 머니투데이";
+  globalThis.fetch = (async () => googleResponse(untranslatedForeignPublisher)) as typeof fetch;
+  const foreignNonStrict = await localizeBriefContent(briefWith(untranslatedForeignPublisher));
+  assert.equal(foreignNonStrict.translationEnabled, false, "\u672a\u8bc6\u522b\u7684\u5916\u6587\u5b57\u7b26\u4e0d\u5f97\u88ab\u8bef\u6807\u4e3a\u7ffb\u8bd1\u5b8c\u6210");
+  assert.match(foreignNonStrict.warning ?? "", /\u5f85\u4eba\u5de5\u786e\u8ba4/);
+  await assert.rejects(
+    () => localizeBriefContent(briefWith(untranslatedForeignPublisher), { strict: true }),
+    /headlines\.translation-test\.title/,
+    "\u4e25\u683c\u6a21\u5f0f\u5fc5\u987b\u62a5\u51fa\u6b8b\u7559\u5916\u6587\u7684\u7cbe\u786e\u5b57\u6bb5\u8def\u5f84",
+  );
+
+  calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
     await new Promise((resolve) => setTimeout(resolve, 20));
     return googleResponse("\u6536\u5165\u5c55\u671b\u6539\u5584");
   }) as typeof fetch;
