@@ -15,8 +15,18 @@ import {
   headlineDirectionRationale,
   marketDirectionCounts,
 } from "./market-direction";
+import {
+  affectedScopes,
+  flattenSignals,
+  headlineEvidence,
+  headlineRiskFlags,
+  resolveSignalHeadline,
+  signalStrength,
+  sortedSources,
+  sourceTypeLabel,
+} from "./investor-view";
 import { categoryDisplayNames, extractTermNotes, sourceDisplayName } from "./terms";
-import { formatBeijingMinute, formatTimestampLine, resolveHeadlineTimestamp } from "./time";
+import { formatBeijingMinute, formatTimestampLine, resolveHeadlineTimestamp, timestampLabel } from "./time";
 
 const page = { width: 595.28, height: 841.89, margin: 42 };
 
@@ -64,12 +74,16 @@ function pdfText(value: string, limit = 2_000): string {
     .trim();
 }
 
+function pdfFullText(value: string): string {
+  return pdfText(value, Number.MAX_SAFE_INTEGER);
+}
+
 function fontPath(): string {
   return path.join(process.cwd(), "assets", "fonts", "NotoSansSC-Regular.ttf");
 }
 
-function topFive(brief: DailyBrief): Headline[] {
-  return [...brief.headlines].sort((left, right) => left.rank - right.rank).slice(0, 5);
+function orderedHeadlines(brief: DailyBrief): Headline[] {
+  return [...brief.headlines].sort((left, right) => left.rank - right.rank);
 }
 
 function directionTheme(direction: MarketDirection): DirectionTheme {
@@ -86,35 +100,14 @@ function equityDirectionTheme(direction: EquityImpactDirection): DirectionTheme 
   return directionTheme("neutral");
 }
 
-function returnColor(value?: number): string {
-  if (value === undefined || !Number.isFinite(value) || Math.abs(value) < 0.005) return colors.neutral;
-  return value > 0 ? colors.bullish : colors.bearish;
-}
-
-function boundedTextHeight(
-  doc: PDFKit.PDFDocument,
-  value: string,
-  width: number,
-  fontSize: number,
-  lineGap: number,
-  maxHeight: number,
-): number {
-  const measured = doc.font("NotoSC").fontSize(fontSize).heightOfString(value, { width, lineGap });
-  return Math.min(maxHeight, Math.max(fontSize + 2, Math.ceil(measured) + 1));
-}
-
 function factsFor(headline: Headline): string[] {
-  const facts = headline.keyPoints?.map((point) => pdfText(point, 260)).filter(Boolean) ?? [];
-  return (facts.length ? facts : [pdfText(headline.summary, 340)]).slice(0, 3);
+  const facts = headline.keyPoints?.map((point) => pdfFullText(point)).filter(Boolean) ?? [];
+  return facts.length ? facts : [pdfFullText(headline.summary)];
 }
 
 function visibleEquityImpacts(headline: Headline): EquityImpactAssessment[] {
   return (headline.equityImpacts ?? [])
-    .filter((item) => {
-      const directionConfidence = item.directionConfidence ?? item.mappingConfidence;
-      return item.reviewStatus !== "rejected" && Math.min(item.mappingConfidence, directionConfidence) >= 60;
-    })
-    .slice(0, 3);
+    .filter((item) => item.reviewStatus !== "rejected");
 }
 
 function needsTranslationPreviewNotice(brief: DailyBrief): boolean {
@@ -129,20 +122,6 @@ function shortDomain(url: string): string {
   } catch {
     return "原始链接";
   }
-}
-
-function drawMetricDots(doc: PDFKit.PDFDocument, score: number, x: number, y: number, activeColor = colors.ink): void {
-  const normalized = Math.max(0, Math.min(5, Math.round(score)));
-  for (let index = 0; index < 5; index += 1) {
-    doc.save().circle(x + index * 13 + 4, y + 4, 4).fill(index < normalized ? activeColor : colors.line).restore();
-  }
-}
-
-function drawSectionLabel(doc: PDFKit.PDFDocument, label: string, x: number, y: number): void {
-  doc.fillColor(colors.tertiary).font("NotoSC").fontSize(8.2).text(label, x, y, {
-    characterSpacing: 0.55,
-    lineBreak: false,
-  });
 }
 
 function drawDirectionPill(
@@ -231,7 +210,7 @@ function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headli
 
   doc.fillColor(colors.ink).fontSize(15).text("今日必读", page.margin, cursor, { lineBreak: false });
   doc.fillColor(colors.tertiary).fontSize(8.5).text(
-    `${brief.stats.candidates} 则素材 → ${brief.stats.consolidatedEvents} 个事件 → 前 ${headlines.length} 大重点`,
+    `${brief.stats.candidates} 则素材 → ${brief.stats.consolidatedEvents} 个事件 → ${headlines.length} 项市场头条`,
     page.width - page.margin - 270,
     cursor + 4,
     { width: 270, align: "right", lineBreak: false },
@@ -239,41 +218,42 @@ function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headli
   cursor += 30;
 
   const availableHeight = 781 - cursor;
-  const rowHeight = Math.min(88, Math.floor(availableHeight / Math.max(1, headlines.length)));
+  const rowHeight = Math.min(88, Math.max(58, Math.floor(availableHeight / Math.max(1, headlines.length))));
   headlines.forEach((headline, index) => {
     const direction = headlineDirectionPresentation(headline);
     const theme = directionTheme(direction.direction);
     const timestamp = resolveHeadlineTimestamp(headline);
     const top = cursor + index * rowHeight;
     const cardHeight = rowHeight - 8;
+    const compact = rowHeight < 70;
 
     doc.save().roundedRect(page.margin, top, page.width - page.margin * 2, cardHeight, 9).fillAndStroke(index === 0 ? colors.surfaceStrong : colors.surface, colors.line).restore();
     doc.save().roundedRect(page.margin, top, 6, cardHeight, 3).fill(theme.color).restore();
 
-    doc.fillColor(index === 0 ? colors.ink : colors.secondary).fontSize(17).text(String(index + 1).padStart(2, "0"), page.margin + 17, top + 16, {
+    doc.fillColor(index === 0 ? colors.ink : colors.secondary).fontSize(compact ? 14 : 17).text(String(headline.rank).padStart(2, "0"), page.margin + 17, top + (compact ? 13 : 16), {
       width: 29,
       align: "center",
       lineBreak: false,
     });
     const contentX = page.margin + 62;
-    doc.fillColor(colors.tertiary).fontSize(7.8).text(`${headline.ticker}  /  ${categoryDisplayNames[headline.category]}`, contentX, top + 10, {
+    doc.fillColor(colors.tertiary).fontSize(compact ? 7.1 : 7.8).text(`${headline.ticker}  /  ${categoryDisplayNames[headline.category]}`, contentX, top + (compact ? 7 : 10), {
       width: 245,
       lineBreak: false,
     });
-    doc.fillColor(colors.ink).fontSize(11.5).text(pdfText(headline.title, 170), contentX, top + 25, {
+    doc.fillColor(colors.ink).fontSize(compact ? 9.4 : 11.5).text(pdfText(headline.title, 170), contentX, top + (compact ? 19 : 25), {
       width: 330,
-      height: 29,
+      height: compact ? 15 : 29,
       ellipsis: true,
       lineGap: 1.5,
     });
     const time = timestamp.value ? formatBeijingMinute(timestamp.value) : "时间待确认";
-    doc.fillColor(colors.tertiary).fontSize(7.5).text(`${time}  /  ${headline.sources.length} 个来源`, contentX, top + cardHeight - 17, {
+    doc.fillColor(colors.tertiary).fontSize(compact ? 6.8 : 7.5).text(`${time}  /  ${headline.sources.length} 个来源`, contentX, top + cardHeight - (compact ? 12 : 17), {
       width: 315,
       lineBreak: false,
     });
 
-    drawDirectionPill(doc, direction.direction, `${direction.symbol} ${direction.compactLabel}`, page.width - page.margin - 92, top + 10, 76, { height: 24 });
-    doc.fillColor(colors.tertiary).fontSize(7.4).text(`影响 ${headline.impact}/5`, page.width - page.margin - 92, top + 42, {
+    drawDirectionPill(doc, direction.direction, `${direction.symbol} ${direction.compactLabel}`, page.width - page.margin - 92, top + (compact ? 7 : 10), 76, { height: compact ? 21 : 24 });
+    doc.fillColor(colors.tertiary).fontSize(compact ? 6.8 : 7.4).text(`影响 ${headline.impact}/5`, page.width - page.margin - 92, top + (compact ? 32 : 42), {
       width: 76,
       align: "center",
       lineBreak: false,
@@ -286,283 +266,464 @@ function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headli
   });
 }
 
-function drawDetailHeader(doc: PDFKit.PDFDocument, brief: DailyBrief, index: number, total: number): void {
+const detailContentBottom = page.height - 51;
+
+type EventFlow = {
+  doc: PDFKit.PDFDocument;
+  brief: DailyBrief;
+  headline: Headline;
+  index: number;
+  total: number;
+  cursor: number;
+  pageInEvent: number;
+};
+
+type FlowTextOptions = {
+  x?: number;
+  width?: number;
+  fontSize?: number;
+  lineGap?: number;
+  color?: string;
+  gapAfter?: number;
+  continuationLabel?: string;
+  link?: string;
+};
+
+const relationLabels: Record<EquityImpactAssessment["relation"], string> = {
+  issuer: "新闻主体",
+  supplier: "供应链",
+  customer: "客户",
+  competitor: "竞争者",
+  sector_peer: "同业",
+  macro_exposure: "宏观暴露",
+};
+
+function drawDetailHeader(flow: EventFlow, continuationLabel?: string): void {
+  const { doc, brief, headline, index, total, pageInEvent } = flow;
   doc.save().rect(0, 0, page.width, 96).fill(colors.navy).restore();
   doc.save().rect(0, 0, 7, 96).fill(colors.accent).restore();
-  doc.fillColor(colors.accent).font("NotoSC").fontSize(8.6).text("AnalystArena / 每日市场情报", page.margin, 28, {
+  doc.fillColor(colors.accent).font("NotoSC").fontSize(8.6).text("AnalystArena / 每日市场情报", page.margin, 25, {
     characterSpacing: 0.6,
     lineBreak: false,
   });
-  doc.fillColor(colors.white).fontSize(17).text(`事件 ${String(index).padStart(2, "0")}`, page.margin, 49, { lineBreak: false });
-  doc.fillColor("#AAB7C8").fontSize(8.4).text(`${brief.date}  /  ${index} of ${total}`, page.width - page.margin - 120, 31, {
-    width: 120,
+  doc.fillColor(colors.white).fontSize(16.5).text(
+    `事件 ${String(index).padStart(2, "0")} / 排名 ${String(headline.rank).padStart(2, "0")}`,
+    page.margin,
+    47,
+    { width: 245, lineBreak: false },
+  );
+  doc.fillColor("#AAB7C8").fontSize(8.4).text(`${brief.date}  /  ${index} of ${total}`, page.width - page.margin - 155, 27, {
+    width: 155,
     align: "right",
     lineBreak: false,
   });
-  doc.fillColor("#D2D9E3").fontSize(8).text("前五大市场事件详细解读", page.width - page.margin - 165, 55, {
-    width: 165,
-    align: "right",
-    lineBreak: false,
-  });
-}
-
-function drawDirectionCard(doc: PDFKit.PDFDocument, headline: Headline, y: number): void {
-  const direction = headlineDirectionPresentation(headline);
-  const confidence = headlineDirectionConfidence(headline);
-  const rationale = pdfText(headlineDirectionRationale(headline), 310);
-  const theme = directionTheme(direction.direction);
-  const width = page.width - page.margin * 2;
-
-  doc.save().roundedRect(page.margin, y, width, 82, 10).fillAndStroke(theme.tint, theme.color).restore();
-  doc.save().roundedRect(page.margin, y, 7, 82, 4).fill(theme.color).restore();
-  doc.fillColor(theme.color).fontSize(17).text(`${direction.symbol} ${direction.label}`, page.margin + 20, y + 15, {
-    width: 145,
-    lineBreak: false,
-  });
-  doc.fillColor(theme.color).fontSize(8).text("事件潜在方向", page.margin + 21, y + 47, { width: 105, lineBreak: false });
-  doc.fillColor(colors.secondary).fontSize(9.2).text(rationale, page.margin + 178, y + 14, {
-    width: width - 298,
-    height: 48,
-    lineGap: 2.5,
-    ellipsis: true,
-  });
-  doc.fillColor(colors.secondary).fontSize(8).text(`方向证据 ${confidence}%`, page.width - page.margin - 105, y + 17, {
-    width: 88,
-    align: "right",
-    lineBreak: false,
-  });
-  doc.fillColor(colors.tertiary).fontSize(7.2).text("不是涨跌概率", page.width - page.margin - 105, y + 35, {
-    width: 88,
+  const pageLabel = pageInEvent > 1 ? `事件续页 ${pageInEvent}` : "市场头条完整研究";
+  doc.fillColor("#D2D9E3").fontSize(8).text(continuationLabel ? `${pageLabel} / ${continuationLabel}` : pageLabel, page.width - page.margin - 220, 53, {
+    width: 220,
     align: "right",
     lineBreak: false,
   });
 }
 
-function drawDecisionMetrics(doc: PDFKit.PDFDocument, headline: Headline, x: number, y: number, width: number): void {
-  doc.save().roundedRect(x, y, width, 84, 9).fillAndStroke(colors.surface, colors.line).restore();
-  drawSectionLabel(doc, "判断指标", x + 12, y + 11);
-  doc.fillColor(colors.ink).fontSize(8.6).text("市场影响", x + 12, y + 31, { lineBreak: false });
-  drawMetricDots(doc, headline.impact, x + width - 81, y + 33, colors.ink);
-  doc.fillColor(colors.secondary).fontSize(8.3).text("资料可信度", x + 12, y + 55, { lineBreak: false });
-  doc.fillColor(colors.ink).fontSize(9.5).text(`${headline.confidence}%`, x + width - 49, y + 54, {
-    width: 37,
-    align: "right",
-    lineBreak: false,
-  });
-}
-
-function drawEquityTable(doc: PDFKit.PDFDocument, headline: Headline, y: number): void {
-  const equities = visibleEquityImpacts(headline);
-  const x = page.margin;
-  const width = page.width - page.margin * 2;
-  const columns = { symbol: 62, expected: 105, confidence: 82, actual1d: 66, actual5d: 66 };
-  const actualWidth = columns.actual1d + columns.actual5d;
-  const mechanismWidth = width - columns.symbol - columns.expected - columns.confidence - actualWidth;
-
-  drawSectionLabel(doc, "关联美股", x, y);
-  doc.fillColor(colors.tertiary).fontSize(7.3).text("预期传导与实际行情分开呈现; 实际涨跌不证明新闻因果.", x + 86, y, {
-    width: width - 86,
-    align: "right",
-    lineBreak: false,
-  });
-  const headerY = y + 18;
-  doc.save().roundedRect(x, headerY, width, 22, 5).fill(colors.surfaceStrong).restore();
-  let cursor = x;
-  const headers: Array<[string, number, "left" | "center"]> = [
-    ["股票", columns.symbol, "left"],
-    ["预期传导", columns.expected, "left"],
-    ["证据", columns.confidence, "center"],
-    ["实际 1 日", columns.actual1d, "center"],
-    ["实际 5 日", columns.actual5d, "center"],
-    ["传导逻辑", mechanismWidth, "left"],
-  ];
-  headers.forEach(([label, columnWidth, align]) => {
-    doc.fillColor(colors.secondary).fontSize(7.2).text(label, cursor + 7, headerY + 7, {
-      width: columnWidth - 14,
-      align,
+function addEventPage(flow: EventFlow, continuationLabel?: string): void {
+  flow.doc.addPage();
+  flow.pageInEvent += 1;
+  drawDetailHeader(flow, continuationLabel);
+  flow.cursor = 113;
+  if (continuationLabel) {
+    flow.doc.save().rect(page.margin, flow.cursor + 2, 4, 15).fill(colors.accent).restore();
+    flow.doc.fillColor(colors.secondary).font("NotoSC").fontSize(9).text(`${continuationLabel} / 续`, page.margin + 12, flow.cursor, {
+      width: page.width - page.margin * 2 - 12,
       lineBreak: false,
     });
-    cursor += columnWidth;
-  });
+    flow.cursor += 28;
+  }
+}
 
-  if (!equities.length) {
-    doc.save().roundedRect(x, headerY + 28, width, 32, 5).fillAndStroke(colors.surface, colors.line).restore();
-    doc.fillColor(colors.tertiary).fontSize(8.3).text("暂无达到展示门槛的股票影响判断", x + 12, headerY + 39, {
-      width: width - 24,
+function ensureSpace(flow: EventFlow, height: number, continuationLabel?: string): void {
+  if (flow.cursor + height <= detailContentBottom) return;
+  addEventPage(flow, continuationLabel);
+}
+
+function measuredTextHeight(
+  doc: PDFKit.PDFDocument,
+  value: string,
+  width: number,
+  fontSize: number,
+  lineGap: number,
+): number {
+  doc.font("NotoSC").fontSize(fontSize);
+  return Math.max(fontSize + 2, Math.ceil(doc.heightOfString(value, { width, lineGap })) + 1);
+}
+
+function splitTextForHeight(
+  doc: PDFKit.PDFDocument,
+  value: string,
+  width: number,
+  fontSize: number,
+  lineGap: number,
+  maxHeight: number,
+): [string, string] {
+  if (measuredTextHeight(doc, value, width, fontSize, lineGap) <= maxHeight) return [value, ""];
+
+  let low = 1;
+  let high = value.length;
+  let best = 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = value.slice(0, middle);
+    if (measuredTextHeight(doc, candidate, width, fontSize, lineGap) <= maxHeight) {
+      best = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  const candidate = value.slice(0, best);
+  const searchStart = Math.max(1, best - 80);
+  const tail = candidate.slice(searchStart);
+  const breakMatches = [...tail.matchAll(/[\s,.;!?]/g)];
+  const lastBreak = breakMatches.at(-1)?.index;
+  const cut = lastBreak !== undefined && searchStart + lastBreak > best * 0.7
+    ? searchStart + lastBreak + 1
+    : best;
+  return [value.slice(0, Math.max(1, cut)).trimEnd(), value.slice(Math.max(1, cut)).trimStart()];
+}
+
+function drawFlowText(flow: EventFlow, value: string, options: FlowTextOptions = {}): void {
+  const x = options.x ?? page.margin;
+  const width = options.width ?? page.width - page.margin * 2;
+  const fontSize = options.fontSize ?? 9.3;
+  const lineGap = options.lineGap ?? 2.5;
+  const color = options.color ?? colors.ink;
+  const gapAfter = options.gapAfter ?? 8;
+  let remaining = pdfFullText(value);
+  if (!remaining) return;
+
+  while (remaining) {
+    const minimumHeight = fontSize + lineGap + 4;
+    if (detailContentBottom - flow.cursor < minimumHeight) addEventPage(flow, options.continuationLabel);
+    const availableHeight = detailContentBottom - flow.cursor;
+    const [chunk, rest] = splitTextForHeight(flow.doc, remaining, width, fontSize, lineGap, availableHeight);
+    const chunkHeight = measuredTextHeight(flow.doc, chunk, width, fontSize, lineGap);
+    flow.doc.fillColor(color).font("NotoSC").fontSize(fontSize).text(chunk, x, flow.cursor, {
+      width,
+      lineGap,
+      link: options.link && /^https?:\/\//i.test(options.link) ? options.link : undefined,
+      underline: false,
+    });
+    flow.cursor += chunkHeight;
+    remaining = rest;
+    if (remaining) addEventPage(flow, options.continuationLabel);
+  }
+  flow.cursor += gapAfter;
+}
+
+function drawSectionHeading(flow: EventFlow, label: string): void {
+  // Keep the heading with at least the first content row so section titles never
+  // become stranded at the bottom of a page.
+  ensureSpace(flow, 108, label);
+  flow.doc.moveTo(page.margin, flow.cursor + 4).lineTo(page.width - page.margin, flow.cursor + 4).strokeColor(colors.line).lineWidth(0.6).stroke();
+  flow.doc.fillColor(colors.tertiary).font("NotoSC").fontSize(7.5).text("MARKET HEADLINES", page.margin, flow.cursor + 12, {
+    width: 112,
+    characterSpacing: 0.65,
+    lineBreak: false,
+  });
+  flow.doc.fillColor(colors.ink).fontSize(12.3).text(label, page.margin + 128, flow.cursor + 8, {
+    width: page.width - page.margin * 2 - 128,
+    lineBreak: false,
+  });
+  flow.cursor += 34;
+}
+
+function drawMetricStrip(flow: EventFlow): void {
+  ensureSpace(flow, 69, "判断指标");
+  const { doc, headline } = flow;
+  const direction = headlineDirectionPresentation(headline);
+  const layers = headline.crossSourceCount ?? new Set(headline.sources.map((source) => source.type)).size;
+  const metrics = [
+    ["事件潜在方向", `${direction.symbol} ${direction.label}`],
+    ["市场影响", `${headline.impact}/5`],
+    ["资料可信度", `${headline.confidence}%`],
+    ["时效分数", headline.freshnessScore === undefined ? "-" : String(headline.freshnessScore)],
+    ["来源层级", String(layers)],
+  ];
+  const width = page.width - page.margin * 2;
+  const cellWidth = width / metrics.length;
+  doc.save().roundedRect(page.margin, flow.cursor, width, 57, 8).fillAndStroke(colors.surface, colors.line).restore();
+  metrics.forEach(([label, value], index) => {
+    const x = page.margin + cellWidth * index;
+    if (index > 0) doc.moveTo(x, flow.cursor + 11).lineTo(x, flow.cursor + 46).strokeColor(colors.line).lineWidth(0.45).stroke();
+    doc.fillColor(colors.tertiary).font("NotoSC").fontSize(7.1).text(label, x + 8, flow.cursor + 11, {
+      width: cellWidth - 16,
       align: "center",
       lineBreak: false,
+    });
+    doc.fillColor(index === 0 ? directionTheme(direction.direction).color : colors.ink).fontSize(9.2).text(value, x + 7, flow.cursor + 31, {
+      width: cellWidth - 14,
+      align: "center",
+      lineBreak: false,
+    });
+  });
+  flow.cursor += 69;
+}
+
+function drawEventOverview(flow: EventFlow): void {
+  const { headline } = flow;
+  const timestamp = resolveHeadlineTimestamp(headline);
+  addEventPage(flow);
+  drawFlowText(
+    flow,
+    `排名 ${String(headline.rank).padStart(2, "0")} / ${headline.ticker} / ${categoryDisplayNames[headline.category]} / ${formatTimestampLine(timestamp.value, timestamp.kind)}${timestamp.source ? ` / ${sourceDisplayName(timestamp.source)}` : ""}`,
+    { fontSize: 8.2, lineGap: 2, color: colors.tertiary, gapAfter: 11, continuationLabel: "事件信息" },
+  );
+  drawFlowText(flow, headline.title, {
+    fontSize: 19.5,
+    lineGap: 3.4,
+    color: colors.ink,
+    gapAfter: 15,
+    continuationLabel: "事件标题",
+  });
+  drawMetricStrip(flow);
+
+  const direction = headlineDirectionPresentation(headline);
+  const directionConfidence = headlineDirectionConfidence(headline);
+  drawSectionHeading(flow, "方向判断");
+  drawFlowText(flow, `${direction.symbol} ${direction.label} / 方向证据强度 ${directionConfidence}% / 不是上涨或下跌概率`, {
+    fontSize: 11.2,
+    color: directionTheme(direction.direction).color,
+    gapAfter: 5,
+    continuationLabel: "方向判断",
+  });
+  drawFlowText(flow, headlineDirectionRationale(headline), {
+    fontSize: 9.4,
+    color: colors.secondary,
+    continuationLabel: "方向判断",
+  });
+
+  const evidence = headlineEvidence(headline);
+  drawSectionHeading(flow, "证据状态");
+  drawFlowText(flow, evidence.label, {
+    fontSize: 10.5,
+    color: evidence.level === "official" ? colors.bullish : evidence.level === "social" ? colors.mixed : colors.ink,
+    gapAfter: 4,
+    continuationLabel: "证据状态",
+  });
+  drawFlowText(flow, evidence.detail, { color: colors.secondary, continuationLabel: "证据状态" });
+
+  drawSectionHeading(flow, "事件摘要");
+  drawFlowText(flow, headline.summary, { fontSize: 9.7, lineGap: 3, continuationLabel: "事件摘要" });
+
+  drawSectionHeading(flow, "目前已知事实");
+  factsFor(headline).forEach((fact, factIndex) => {
+    drawFlowText(flow, `${String(factIndex + 1).padStart(2, "0")}  ${fact}`, {
+      fontSize: 9.3,
+      lineGap: 2.7,
+      gapAfter: 7,
+      continuationLabel: "目前已知事实",
+    });
+  });
+
+  drawSectionHeading(flow, "市场如何传导");
+  drawFlowText(flow, headline.marketImpact, { fontSize: 9.5, lineGap: 3, continuationLabel: "市场如何传导" });
+  drawFlowText(flow, `可能受影响的观察范围: ${affectedScopes(headline).join(" / ")}`, {
+    fontSize: 8.7,
+    color: colors.secondary,
+    continuationLabel: "市场如何传导",
+  });
+}
+
+function freshnessLabel(value: EquityImpactAssessment["marketContext"]): string {
+  const freshness = value?.freshness;
+  if (freshness === "fresh") return "资料最新";
+  if (freshness === "stale") return "资料偏旧";
+  if (freshness === "missing") return "资料过期";
+  return "行情待补充";
+}
+
+function drawEquityImpacts(flow: EventFlow): void {
+  const equities = visibleEquityImpacts(flow.headline);
+  drawSectionHeading(flow, `新闻 → 美国股票 (${equities.length})`);
+  drawFlowText(flow, "预期传导与实际行情分开呈现; 实际涨跌不证明由这则新闻造成.", {
+    fontSize: 8.2,
+    color: colors.tertiary,
+    gapAfter: 12,
+    continuationLabel: "关联美股",
+  });
+  if (!equities.length) {
+    drawFlowText(flow, "暂无数据库中可验证的股票影响判断.", {
+      color: colors.tertiary,
+      continuationLabel: "关联美股",
     });
     return;
   }
 
-  equities.forEach((item, index) => {
+  equities.forEach((item, itemIndex) => {
     const direction = equityDirectionPresentation(item.direction);
     const theme = equityDirectionTheme(item.direction);
-    const rowY = headerY + 27 + index * 35;
-    const rowHeight = 30;
-    doc.save().roundedRect(x, rowY, width, rowHeight, 5).fillAndStroke(index % 2 === 0 ? colors.white : colors.surface, colors.line).restore();
-    doc.save().roundedRect(x, rowY, 4, rowHeight, 2).fill(theme.color).restore();
+    ensureSpace(flow, 86, "关联美股");
+    flow.doc.save().rect(page.margin, flow.cursor, 5, 22).fill(theme.color).restore();
+    drawFlowText(flow, `${itemIndex + 1}. ${item.symbol} / ${item.companyName}`, {
+      x: page.margin + 14,
+      width: page.width - page.margin * 2 - 14,
+      fontSize: 12.1,
+      color: colors.ink,
+      gapAfter: 5,
+      continuationLabel: "关联美股",
+    });
+    drawFlowText(
+      flow,
+      `事件推演: ${direction.symbol} ${direction.label} / 关联可信度 ${item.mappingConfidence}% / 方向证据 ${item.directionConfidence ?? "-"}% / 关系: ${relationLabels[item.relation]}`,
+      { fontSize: 8.9, color: theme.color, gapAfter: 5, continuationLabel: "关联美股" },
+    );
+    drawFlowText(flow, `传导逻辑: ${item.mechanism}`, {
+      fontSize: 9.2,
+      color: colors.secondary,
+      continuationLabel: "关联美股",
+    });
 
-    cursor = x;
-    doc.fillColor(colors.ink).fontSize(8.8).text(pdfText(item.symbol, 12), cursor + 9, rowY + 10, {
-      width: columns.symbol - 15,
-      lineBreak: false,
-    });
-    cursor += columns.symbol;
-    doc.fillColor(theme.color).fontSize(7.9).text(`${direction.symbol} ${direction.compactLabel}`, cursor + 7, rowY + 10, {
-      width: columns.expected - 14,
-      lineBreak: false,
-    });
-    cursor += columns.expected;
-    const effectiveConfidence = Math.min(item.mappingConfidence, item.directionConfidence ?? item.mappingConfidence);
-    doc.fillColor(colors.secondary).fontSize(7.8).text(`${effectiveConfidence}%`, cursor + 7, rowY + 10, {
-      width: columns.confidence - 14,
-      align: "center",
-      lineBreak: false,
-    });
-    cursor += columns.confidence;
-    const return1d = item.marketContext?.return1dPct;
-    doc.fillColor(returnColor(return1d)).fontSize(8.2).text(formatReturn(return1d), cursor + 4, rowY + 10, {
-      width: columns.actual1d - 8,
-      align: "center",
-      lineBreak: false,
-    });
-    cursor += columns.actual1d;
-    const return5d = item.marketContext?.return5dPct;
-    doc.fillColor(returnColor(return5d)).fontSize(8.2).text(formatReturn(return5d), cursor + 4, rowY + 10, {
-      width: columns.actual5d - 8,
-      align: "center",
-      lineBreak: false,
-    });
-    cursor += columns.actual5d;
-    doc.fillColor(colors.secondary).fontSize(7.4).text(pdfText(item.mechanism, 95), cursor + 7, rowY + 7, {
-      width: mechanismWidth - 14,
-      height: 18,
-      lineGap: 1,
-      ellipsis: true,
+    const context = item.marketContext;
+    if (context?.return1dPct !== undefined) {
+      const marketLine = [
+        `市场已发生: 截至 ${context.asOf}`,
+        context.lastPrice !== undefined ? `最新价 $${context.lastPrice.toFixed(2)}` : "最新价 -",
+        freshnessLabel(context),
+        `实际 1 日 ${formatReturn(context.return1dPct)}`,
+        `实际 5 日 ${formatReturn(context.return5dPct)}`,
+        context.volumeVs20d !== undefined ? `成交量 / 20 日均量 ${context.volumeVs20d.toFixed(2)}x` : "成交量 / 20 日均量 -",
+      ].join(" / ");
+      drawFlowText(flow, marketLine, {
+        fontSize: 8.6,
+        color: colors.ink,
+        continuationLabel: "关联美股",
+      });
+    } else {
+      drawFlowText(flow, "市场已发生: 暂无事件发生前的可用行情.", {
+        fontSize: 8.6,
+        color: colors.tertiary,
+        continuationLabel: "关联美股",
+      });
+    }
+    drawFlowText(flow, `反向情景: ${item.counterCase}`, {
+      fontSize: 8.9,
+      color: colors.secondary,
+      gapAfter: 12,
+      continuationLabel: "关联美股",
     });
   });
-
-  const asOfDates = [...new Set(equities.map((item) => item.marketContext?.asOf).filter(Boolean))];
-  if (asOfDates.length) {
-    doc.fillColor(colors.tertiary).fontSize(7).text(`实际行情截至 ${asOfDates.join(" / ")}`, x, headerY + 27 + equities.length * 35, {
-      width,
-      align: "right",
-      lineBreak: false,
-    });
-  }
 }
 
-function drawSources(doc: PDFKit.PDFDocument, headline: Headline, y: number): void {
-  const x = page.margin;
-  const width = page.width - page.margin * 2;
-  const sources = headline.sources.slice(0, 3);
-  const termNotes = headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline);
-  drawSectionLabel(doc, "来源与术语", x, y);
-  let cursor = y + 16;
-
-  sources.forEach((source, index) => {
-    const label = pdfText(`${index + 1}. ${sourceDisplayName(source.name)}  /  ${shortDomain(source.url)}`, 105);
-    doc.fillColor(colors.secondary).fontSize(7.7).text(label, x, cursor, {
-      width,
-      height: 13,
-      lineBreak: false,
-      ellipsis: true,
-      link: /^https?:\/\//i.test(source.url) ? source.url : undefined,
-      underline: false,
-    });
-    cursor += 15;
-  });
-
+function drawSources(flow: EventFlow): void {
+  const sources = sortedSources(flow.headline);
+  drawSectionHeading(flow, `证据与原始来源 (${sources.length})`);
   if (!sources.length) {
-    doc.fillColor(colors.tertiary).fontSize(7.7).text("来源待补充", x, cursor, { lineBreak: false });
-    cursor += 15;
+    drawFlowText(flow, "本期尚无可用来源.", { color: colors.tertiary, continuationLabel: "证据与原始来源" });
+    return;
   }
 
-  if (termNotes.length) {
-    const note = pdfText(`术语注释: ${termNotes.slice(0, 4).map((item) => `${item.term} = ${item.note}`).join("; ")}`, 250);
-    doc.fillColor(colors.tertiary).fontSize(7.3).text(note, x, Math.min(cursor + 2, y + 63), {
-      width,
-      height: 13,
-      lineBreak: false,
-      ellipsis: true,
+  sources.forEach((source, sourceIndex) => {
+    ensureSpace(flow, 52, "证据与原始来源");
+    drawFlowText(flow, `${sourceIndex + 1}. ${sourceTypeLabel(source.type)} / ${sourceDisplayName(source.name)}`, {
+      fontSize: 9.7,
+      color: colors.ink,
+      gapAfter: 3,
+      continuationLabel: "证据与原始来源",
     });
+    const sourceTime = source.publishedAt
+      ? `${timestampLabel(source.timestampKind ?? "published")} / ${formatBeijingMinute(source.publishedAt)}`
+      : "原始时间未提供";
+    drawFlowText(flow, `${sourceTime} / ${shortDomain(source.url)}`, {
+      fontSize: 8.3,
+      color: colors.secondary,
+      gapAfter: 4,
+      continuationLabel: "证据与原始来源",
+    });
+    drawFlowText(flow, "打开原始来源", {
+      fontSize: 8.2,
+      color: colors.bullish,
+      gapAfter: 10,
+      continuationLabel: "证据与原始来源",
+      link: source.url,
+    });
+  });
+}
+
+function drawNextSteps(flow: EventFlow): void {
+  const sources = sortedSources(flow.headline);
+  const primarySource = sources[0];
+  const watch = flow.brief.watchlist.find((item) => item.category === flow.headline.category);
+  const risks = headlineRiskFlags(flow.headline);
+  drawSectionHeading(flow, "投资人下一步");
+  drawFlowText(
+    flow,
+    `01  先读最高可信来源: ${primarySource ? `${sourceTypeLabel(primarySource.type)} / ${sourceDisplayName(primarySource.name)}` : "本期尚无可用来源"}`,
+    {
+      fontSize: 9.2,
+      continuationLabel: "投资人下一步",
+      link: primarySource?.url,
+    },
+  );
+  drawFlowText(
+    flow,
+    `02  跟踪下一项确认点: ${watch ? `${watch.event}: ${watch.why}` : "等待公司、监管机构或主流新闻后续更新"}`,
+    { fontSize: 9.2, continuationLabel: "投资人下一步" },
+  );
+  risks.forEach((risk, riskIndex) => {
+    drawFlowText(flow, `${String(riskIndex + 3).padStart(2, "0")}  证据缺口: ${risk}`, {
+      fontSize: 9.2,
+      color: colors.secondary,
+      gapAfter: 6,
+      continuationLabel: "投资人下一步",
+    });
+  });
+}
+
+function drawRelatedSignals(flow: EventFlow): void {
+  const headlines = orderedHeadlines(flow.brief);
+  const relatedSignals = flattenSignals(flow.brief)
+    .filter((entry) => resolveSignalHeadline(entry.topic, headlines)?.id === flow.headline.id);
+  drawSectionHeading(flow, `关联社交信号 (${relatedSignals.length})`);
+  if (!relatedSignals.length) {
+    drawFlowText(flow, "暂无高置信关联. 本期不会为了填满版面而强行匹配社交线索.", {
+      color: colors.tertiary,
+      continuationLabel: "关联社交信号",
+    });
+    return;
   }
+  relatedSignals.forEach((entry, signalIndex) => {
+    drawFlowText(flow, `${signalIndex + 1}. ${entry.platform} / 信号强度 ${signalStrength(entry.topic)} / ${entry.topic.label}`, {
+      fontSize: 9.2,
+      color: colors.secondary,
+      gapAfter: 8,
+      continuationLabel: "关联社交信号",
+      link: entry.topic.url,
+    });
+  });
+}
+
+function drawTermNotes(flow: EventFlow): void {
+  const notes = flow.headline.termNotes?.length ? flow.headline.termNotes : extractTermNotes(flow.headline);
+  if (!notes.length) return;
+  drawSectionHeading(flow, `英文术语说明 (${notes.length})`);
+  notes.forEach((item, index) => {
+    drawFlowText(flow, `${index + 1}. ${item.term} = ${item.note}`, {
+      fontSize: 8.8,
+      color: colors.secondary,
+      gapAfter: 6,
+      continuationLabel: "英文术语说明",
+    });
+  });
 }
 
 function drawHeadlineDetail(doc: PDFKit.PDFDocument, brief: DailyBrief, headline: Headline, index: number, total: number): void {
-  doc.addPage();
-  drawDetailHeader(doc, brief, index, total);
-
-  const timestamp = resolveHeadlineTimestamp(headline);
-  const metaY = 113;
-  doc.fillColor(colors.secondary).fontSize(8.4).text(`${headline.ticker}  /  ${categoryDisplayNames[headline.category]}`, page.margin, metaY, {
-    width: 210,
-    lineBreak: false,
-  });
-  const timestampLine = pdfText(
-    `${formatTimestampLine(timestamp.value, timestamp.kind)}${timestamp.source ? ` / ${sourceDisplayName(timestamp.source)}` : ""}`,
-    150,
-  );
-  doc.fillColor(colors.tertiary).fontSize(7.6).text(timestampLine, page.margin + 205, metaY + 1, {
-    width: page.width - page.margin * 2 - 205,
-    align: "right",
-    lineBreak: false,
-    ellipsis: true,
-  });
-
-  const title = pdfText(headline.title, 220);
-  const titleHeight = boundedTextHeight(doc, title, page.width - page.margin * 2, 20, 3, 52);
-  doc.fillColor(colors.ink).fontSize(20).text(title, page.margin, 137, {
-    width: page.width - page.margin * 2,
-    height: titleHeight,
-    lineGap: 3,
-    ellipsis: true,
-  });
-
-  drawDirectionCard(doc, headline, 206);
-
-  const leftX = page.margin;
-  const leftWidth = 322;
-  const rightX = leftX + leftWidth + 17;
-  const rightWidth = page.width - page.margin - rightX;
-  const mainY = 310;
-  drawSectionLabel(doc, "事件摘要", leftX, mainY);
-  const summary = pdfText(headline.summary, 460);
-  doc.fillColor(colors.secondary).fontSize(9.7).text(summary, leftX, mainY + 17, {
-    width: leftWidth,
-    height: 63,
-    lineGap: 3,
-    ellipsis: true,
-  });
-
-  const facts = factsFor(headline);
-  drawSectionLabel(doc, "关键信息", leftX, mainY + 94);
-  let factY = mainY + 113;
-  facts.forEach((fact, factIndex) => {
-    const factHeight = boundedTextHeight(doc, fact, leftWidth - 20, 8.9, 2, 34);
-    doc.save().circle(leftX + 4, factY + 5, 3).fill(factIndex === 0 ? colors.ink : colors.tertiary).restore();
-    doc.fillColor(colors.ink).fontSize(8.9).text(fact, leftX + 16, factY, {
-      width: leftWidth - 20,
-      height: factHeight,
-      lineGap: 2,
-      ellipsis: true,
-    });
-    factY += 39;
-  });
-
-  drawDecisionMetrics(doc, headline, rightX, mainY, rightWidth);
-  drawSectionLabel(doc, "市场影响", rightX, mainY + 103);
-  doc.save().roundedRect(rightX, mainY + 121, rightWidth, 111, 9).fillAndStroke(colors.surface, colors.line).restore();
-  doc.fillColor(colors.ink).fontSize(8.7).text(pdfText(headline.marketImpact, 390), rightX + 12, mainY + 133, {
-    width: rightWidth - 24,
-    height: 84,
-    lineGap: 2.5,
-    ellipsis: true,
-  });
-
-  drawEquityTable(doc, headline, 556);
-  drawSources(doc, headline, 704);
+  const flow: EventFlow = { doc, brief, headline, index, total, cursor: 0, pageInEvent: 0 };
+  drawEventOverview(flow);
+  drawEquityImpacts(flow);
+  drawSources(flow);
+  drawNextSteps(flow);
+  drawRelatedSignals(flow);
+  drawTermNotes(flow);
 }
 
 function drawFooters(doc: PDFKit.PDFDocument): void {
@@ -599,7 +760,7 @@ export async function generateBriefPdf(brief: DailyBrief): Promise<Buffer> {
     info: {
       Title: `AnalystArena 每日市场情报 ${brief.date}`,
       Author: "AnalystArena",
-      Subject: "每日前五大市场事件与潜在传导",
+      Subject: "每日市场头条完整事件研究与潜在传导",
     },
   });
   doc.registerFont("NotoSC", fontPath());
@@ -612,7 +773,7 @@ export async function generateBriefPdf(brief: DailyBrief): Promise<Buffer> {
     doc.on("error", reject);
   });
 
-  const headlines = topFive(brief);
+  const headlines = orderedHeadlines(brief);
   drawCover(doc, brief, headlines);
   headlines.forEach((headline, index) => drawHeadlineDetail(doc, brief, headline, index + 1, headlines.length));
   drawFooters(doc);

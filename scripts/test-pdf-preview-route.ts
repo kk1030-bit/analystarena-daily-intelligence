@@ -30,6 +30,11 @@ try {
 
   assert.equal(response.status, 200, "部分翻译失败不得阻止预览 PDF");
   assert.match(response.headers.get("Content-Type") ?? "", /^application\/pdf/i);
+  assert.equal(
+    response.headers.get("Content-Disposition"),
+    `attachment; filename="AnalystArena-Market-Headlines-${previewBrief.date.slice(0, 10)}.pdf"`,
+    "预览下载档名必须反映完整市场头条报告",
+  );
   assert.equal(response.headers.get("X-AnalystArena-Translation-Warning"), "1", "未完成翻译的预览必须附带警告标记");
   const pdf = Buffer.from(await response.arrayBuffer());
   assert.equal(pdf.subarray(0, 4).toString("ascii"), "%PDF", "预览接口必须返回有效 PDF");

@@ -27,7 +27,7 @@ export async function POST(request: Request) {
     return new Response(new Uint8Array(pdf), {
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename="AnalystArena-Top5-${brief.date.slice(0, 10)}.pdf"`,
+        "Content-Disposition": `attachment; filename="AnalystArena-Market-Headlines-${brief.date.slice(0, 10)}.pdf"`,
         "Cache-Control": "no-store",
         ...(localized.translationEnabled === false ? { "X-AnalystArena-Translation-Warning": "1" } : {}),
       },

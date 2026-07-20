@@ -655,7 +655,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = url;
-      link.download = `AnalystArena-Top5-${brief.date}.pdf`;
+      link.download = `AnalystArena-Market-Headlines-${brief.date}.pdf`;
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
       setNotice(translationWarning && translationWarning !== "0" && translationWarning.toLowerCase() !== "false"
@@ -686,7 +686,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           <a href="#watchlist"><CalendarDays size={17} />观察清单</a>
           <a href="/archive"><Search size={17} />历史日报</a>
           <a href="/review"><ShieldCheck size={17} />人工审核</a>
-          <button type="button" onClick={() => void exportPdf()}><FileText size={17} />PDF 报告</button>
+          <button type="button" onClick={() => void exportPdf()}><FileText size={17} />市场头条完整研究 PDF</button>
         </nav>
         <div className="sidebar-sources">
           <span>信息来源</span>
@@ -733,7 +733,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
               )}
             </div>
             <span className={`mode-badge mode-${brief.mode}`}>{refreshFallback !== "none" ? fallbackLabels[refreshFallback] : brief.status === "published" ? "已发布" : brief.status === "draft" ? "今日草稿 · 待审核" : brief.mode === "live" ? "实时预览" : "示范模式"}</span>
-            <button className="secondary-button pdf-action" type="button" onClick={() => void exportPdf()} disabled={isExporting} aria-label={isExporting ? "正在制作 PDF" : "下载前五大事件 PDF"}><Download size={16} /><span>{isExporting ? "制作中…" : brief.status === "published" ? "前五大 PDF" : "预览 PDF"}</span></button>
+            <button className="secondary-button pdf-action" type="button" onClick={() => void exportPdf()} disabled={isExporting} aria-label={isExporting ? "正在制作市场头条完整研究 PDF" : "下载市场头条完整研究 PDF"}><Download size={16} /><span>{isExporting ? "制作中…" : brief.status === "published" ? "完整研究 PDF" : "预览完整研究 PDF"}</span></button>
             <button className="primary-button refresh-action" type="button" onClick={() => void refreshBrief("manual")} disabled={isRefreshing} aria-label={isRefreshing ? "正在更新今日简报" : "立即更新今日简报"}>
               <RefreshCw size={16} className={isRefreshing ? "is-spinning" : ""} />
               <span>{isRefreshing ? refreshOrigin === "manual" ? "手动更新中..." : "自动更新中..." : "立即更新"}</span>
