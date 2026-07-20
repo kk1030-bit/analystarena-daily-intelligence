@@ -77,4 +77,46 @@ assert.equal(identifyEquityImpacts(headline("Intelligence agencies publish an an
 assert.equal(identifyEquityImpacts(headline("River delta expands after heavy rainfall"), stocks).some((item) => item.symbol === "DAL"), false);
 assert.equal(identifyEquityImpacts(headline("ARM launches a new data-center chip product"), stocks).some((item) => item.symbol === "ARM"), true);
 
+const mixedNvidia = identifyEquityImpacts(
+  headline("NVIDIA beats revenue estimates but cuts forward guidance", "NVDA", "Official"),
+  stocks,
+).find((item) => item.symbol === "NVDA");
+assert.equal(mixedNvidia?.direction, "mixed");
+assert.ok((mixedNvidia?.directionConfidence ?? 0) >= 60);
+
+const socialDirection = identifyEquityImpacts(
+  headline("NVIDIA demand surges according to an unverified post", "NVDA", "Reddit"),
+  stocks,
+).find((item) => item.symbol === "NVDA");
+assert.ok((socialDirection?.directionConfidence ?? 99) <= 45, "social-only direction evidence must be capped");
+
+const pricedNvda = {
+  ...stocks[0],
+  priceSummary: {
+    asOf: "2026-07-16",
+    lastPrice: 110,
+    previousClose: 100,
+    close5SessionsAgo: 88,
+    latestVolume: 150,
+    averageVolume20d: 100,
+  },
+};
+const pricedImpact = identifyEquityImpacts(
+  headline("NVIDIA raises Blackwell revenue guidance as demand surges", "NVDA"),
+  [pricedNvda],
+)[0];
+assert.equal(pricedImpact?.marketContext?.return1dPct, 10);
+assert.equal(pricedImpact?.marketContext?.return5dPct, 25);
+assert.equal(pricedImpact?.marketContext?.volumeVs20d, 1.5);
+
+const futurePricedNvda = {
+  ...pricedNvda,
+  priceSummary: { ...pricedNvda.priceSummary, asOf: "2026-07-18" },
+};
+assert.equal(
+  identifyEquityImpacts(headline("NVIDIA raises Blackwell revenue guidance as demand surges", "NVDA"), [futurePricedNvda])[0]?.marketContext,
+  undefined,
+  "prices after the event date must not be shown as event-time evidence",
+);
+
 console.log("equity impact tests passed");

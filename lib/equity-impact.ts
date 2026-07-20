@@ -5,17 +5,18 @@ import type {
   EquityRelation,
   Headline,
   StockPriceDaily,
+  StockPriceSummary,
   StockProfile,
 } from "./types";
 
-type StockWithPrice = StockProfile & { latestPrice?: StockPriceDaily };
+type StockWithPrice = StockProfile & { latestPrice?: StockPriceDaily; priceSummary?: StockPriceSummary };
 
-const ENGINE_VERSION = "rules-2026.07.2";
+const ENGINE_VERSION = "rules-2026.07.3";
 const ambiguousSymbols = new Set(["A", "AI", "ALL", "ARE", "ARM", "BA", "C", "CAT", "COP", "COST", "DE", "DIS", "F", "FOR", "GE", "GM", "HD", "ICE", "IT", "MA", "MS", "NOW", "ON", "SO", "T", "U", "V", "X"]);
 const ambiguousCompanyAliases = new Set(["apple", "meta", "amazon", "target", "arm", "delta", "strategy", "苹果", "目标", "战略"]);
 const financialContextPattern = /(股票|股价|公司|财报|营收|利润|指引|收购|并购|产品|订单|监管|召回|首席执行官|推出|芯片|半导体|银行|stock|shares?|company|earnings|revenue|guidance|acquir|merger|product|contract|regulator|recall|CEO|launch|chip|semiconductor|bank|iPhone|AWS)/i;
 const positivePattern = /(上调|增长|超预期|获批|批准|赢得|签署|(?:订单|需求).{0,8}(?:强劲|增加|上升|增长|创纪录)|创纪录|beat(?:s|ing)?|raise[sd]? guidance|approval|approved|wins? contract|record (?:revenue|orders)|demand (?:surge|growth|strong))/i;
-const negativePattern = /(下调|召回|调查|禁令|限制出口|制裁|亏损|不及预期|延迟|裁员|诉讼|(?:订单|需求|销量).{0,8}(?:减少|下降|取消|削减)|(?:减少|取消|削减).{0,8}(?:订单|需求)|fails? to (?:win|secure|land).{0,20}(?:contract|order)|cut(?:s|ting)? guidance|recall|investigation|probe|ban(?:ned)?|export restriction|sanction|miss(?:es|ed)? estimates|delay(?:ed)?|layoffs?|lawsuit)/i;
+const negativePattern = /(下调|召回|调查|禁令|限制出口|制裁|亏损|不及预期|延迟|裁员|诉讼|(?:订单|需求|销量).{0,8}(?:减少|下降|取消|削减)|(?:减少|取消|削减).{0,8}(?:订单|需求)|fails? to (?:win|secure|land).{0,20}(?:contract|order)|(?:cut(?:s|ting)?|lower(?:s|ed)?)(?:\s+\w+){0,2}\s+guidance|recall|investigation|probe|ban(?:ned)?|export restriction|sanction|miss(?:es|ed)? estimates|delay(?:ed)?|layoffs?|lawsuit)/i;
 const negatedPositivePattern = /fails? to (?:win|secure|land).{0,20}(?:contract|order)/i;
 const denialPattern = /(否认|澄清.{0,8}(?:并未|没有)|den(?:y|ies|ied).{0,45}(?:cut|lower|delay|recall|miss))/i;
 
@@ -104,17 +105,30 @@ function normalize(value: string): string {
   return value.toLocaleLowerCase().replace(/[’'"“”(),，。:：]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function inferDirection(text: string, fallback?: Headline["sentiment"]): EquityImpactDirection {
+interface DirectionEvidence {
+  direction: EquityImpactDirection;
+  confidence: number;
+}
+
+function inferDirectionEvidence(text: string, fallback?: Headline["sentiment"]): DirectionEvidence {
   const withoutDeniedClaim = text.replace(new RegExp(denialPattern.source, "gi"), "");
   const withoutNegatedPositive = withoutDeniedClaim.replace(new RegExp(negatedPositivePattern.source, "gi"), "");
   const positive = positivePattern.test(withoutNegatedPositive);
   const negative = negativePattern.test(withoutDeniedClaim);
-  if (positive && negative) return "mixed";
-  if (positive) return "potential_upside";
-  if (negative) return "potential_downside";
-  if (fallback === "positive") return "potential_upside";
-  if (fallback === "negative") return "potential_downside";
-  return "unclear";
+  if (positive && negative) return { direction: "mixed", confidence: 72 };
+  if (positive) return { direction: "potential_upside", confidence: 74 };
+  if (negative) return { direction: "potential_downside", confidence: 74 };
+  if (fallback === "positive") return { direction: "potential_upside", confidence: 52 };
+  if (fallback === "negative") return { direction: "potential_downside", confidence: 52 };
+  return { direction: "unclear", confidence: 55 };
+}
+
+function adjustedDirectionConfidence(headline: Headline, base: number): number {
+  const types = new Set(headline.sources.map((source) => source.type));
+  let confidence = base + (types.has("Official") ? 8 : types.has("News") ? 4 : 0);
+  if ((headline.crossSourceCount ?? types.size) >= 2) confidence += 5;
+  if (isSocialOnly(headline)) confidence = Math.min(confidence, 45);
+  return Math.max(1, Math.min(99, confidence));
 }
 
 function sourceScore(headline: Headline): number {
@@ -132,15 +146,32 @@ function companyName(stock: StockProfile): string {
   return stock.longName || stock.shortName || stock.symbol;
 }
 
-function marketContext(headline: Headline, price?: StockPriceDaily): EquityImpactAssessment["marketContext"] {
-  if (!price) return undefined;
+function percentReturn(current: number | undefined, base: number | undefined): number | undefined {
+  if (current === undefined || base === undefined || !Number.isFinite(current) || !Number.isFinite(base) || base <= 0) return undefined;
+  return Math.round(((current / base) - 1) * 10_000) / 100;
+}
+
+function marketContext(
+  headline: Headline,
+  summary?: StockPriceSummary,
+  fallbackPrice?: StockPriceDaily,
+): EquityImpactAssessment["marketContext"] {
+  const asOf = summary?.asOf ?? fallbackPrice?.tradingDate;
+  if (!asOf) return undefined;
   const eventDate = (headline.publishedAt ?? new Date().toISOString()).slice(0, 10);
-  if (price.tradingDate > eventDate) return undefined;
+  if (asOf > eventDate) return undefined;
   const eventTime = new Date(`${eventDate}T23:59:59Z`).getTime();
-  const ageDays = Math.max(0, Math.floor((eventTime - new Date(`${price.tradingDate}T21:00:00Z`).getTime()) / 86_400_000));
+  const ageDays = Math.max(0, Math.floor((eventTime - new Date(`${asOf}T21:00:00Z`).getTime()) / 86_400_000));
+  const lastPrice = summary?.lastPrice ?? fallbackPrice?.adjustedClose ?? fallbackPrice?.close;
+  const volumeVs20d = summary?.latestVolume !== undefined && summary.averageVolume20d !== undefined && summary.averageVolume20d > 0
+    ? Math.round((summary.latestVolume / summary.averageVolume20d) * 100) / 100
+    : undefined;
   return {
-    asOf: price.tradingDate,
-    lastPrice: price.adjustedClose ?? price.close,
+    asOf,
+    lastPrice,
+    return1dPct: percentReturn(lastPrice, summary?.previousClose),
+    return5dPct: percentReturn(lastPrice, summary?.close5SessionsAgo),
+    volumeVs20d,
     freshness: ageDays <= 4 ? "fresh" : ageDays <= 10 ? "stale" : "missing",
   };
 }
@@ -168,11 +199,14 @@ function directMatch(stock: StockProfile, rawText: string, normalizedText: strin
   }) ? "alias" : undefined;
 }
 
-function assessmentForDirect(stock: StockWithPrice, headline: Headline, match: "symbol" | "alias", direction: EquityImpactDirection): EquityImpactAssessment {
-  let confidence = (match === "symbol" ? 52 : 46) + sourceScore(headline) + Math.min(10, (headline.crossSourceCount ?? 1) * 3);
-  if (direction !== "unclear") confidence += 8;
+function assessmentForDirect(stock: StockWithPrice, headline: Headline, match: "symbol" | "alias", directionEvidence: DirectionEvidence): EquityImpactAssessment {
+  // Entity confidence is independent from the event direction. An explicit
+  // ticker is strongest; a curated company alias remains reliable when backed
+  // by a news or official source.
+  let confidence = (match === "symbol" ? 58 : 51) + sourceScore(headline) + Math.min(10, (headline.crossSourceCount ?? 1) * 3);
   if (isSocialOnly(headline)) confidence = Math.min(confidence, 45);
   confidence = Math.min(96, confidence);
+  const direction = directionEvidence.direction;
   const directionText = direction === "potential_upside" ? "可能形成正面催化" : direction === "potential_downside" ? "可能形成经营或估值压力" : direction === "mixed" ? "同时包含正负因素" : "影响方向仍待确认";
   return {
     symbol: stock.symbol,
@@ -181,6 +215,7 @@ function assessmentForDirect(stock: StockWithPrice, headline: Headline, match: "
     direction,
     relation: "issuer",
     mappingConfidence: confidence,
+    directionConfidence: adjustedDirectionConfidence(headline, directionEvidence.confidence),
     mechanism: `新闻直接涉及 ${companyName(stock)}，事件${directionText}。`,
     assumptions: ["新闻主体与数据库公司实体已正确匹配", "事件描述尚需以公司公告或监管文件继续确认"],
     counterCase: "若后续官方信息否定、缩小或推迟该事件，实际市场影响可能与初步判断不同。",
@@ -189,7 +224,7 @@ function assessmentForDirect(stock: StockWithPrice, headline: Headline, match: "
       statement: match === "symbol" ? `新闻明确出现股票代码 ${stock.symbol}` : `新闻出现公司名称或已审核别名 ${companyName(stock)}`,
       weight: match === "symbol" ? 1 : 0.9,
     }],
-    marketContext: marketContext(headline, stock.latestPrice),
+    marketContext: marketContext(headline, stock.priceSummary, stock.latestPrice),
     engineVersion: ENGINE_VERSION,
     reviewStatus: "auto_pending",
   };
@@ -205,13 +240,14 @@ function assessmentForRule(stock: StockWithPrice, headline: Headline, rule: Expo
     direction: rule.direction,
     relation: rule.relation,
     mappingConfidence: Math.min(88, confidence),
+    directionConfidence: adjustedDirectionConfidence(headline, rule.confidence),
     mechanism: rule.mechanism,
     assumptions: [`${companyName(stock)} 的已审核业务标签包含：${stock.exposureTags.filter((tag) => rule.tags.includes(tag)).join("、")}`, "该传导路径属于情景判断，并非已证实因果"],
     counterCase: rule.counterCase,
     evidence: [{ basis: "event_rule", statement: `事件符合规则 ${rule.id}`, weight: 0.72 }, {
       basis: "curated_exposure", statement: `股票主档含有与事件相符的业务暴露标签`, weight: 0.78,
     }],
-    marketContext: marketContext(headline, stock.latestPrice),
+    marketContext: marketContext(headline, stock.priceSummary, stock.latestPrice),
     engineVersion: ENGINE_VERSION,
     reviewStatus: "auto_pending",
   };
@@ -221,8 +257,9 @@ export function identifyEquityImpacts(headline: Headline, stocks: StockWithPrice
   // ticker is presentation metadata, not evidence. A company must be named in the
   // article fields before it can receive a direct issuer mapping.
   const rawText = [headline.title, headline.summary, ...(headline.keyPoints ?? []), headline.marketImpact].join(" ");
+  const directionText = [headline.title, headline.summary, ...(headline.keyPoints ?? [])].join(" ");
   const normalizedText = normalize(rawText);
-  const directDirection = inferDirection(rawText, headline.sentiment);
+  const directDirection = inferDirectionEvidence(directionText, headline.sentiment);
   const bySymbol = new Map<string, EquityImpactAssessment>();
 
   for (const stock of stocks) {

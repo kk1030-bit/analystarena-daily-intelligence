@@ -259,13 +259,14 @@ async function mapLimited<T, R>(values: T[], limit: number, mapper: (value: T) =
 }
 
 async function localizeHeadline(headline: Headline): Promise<Headline> {
-  const [title, summary, marketImpact, keyPoints] = await Promise.all([
+  const [title, summary, marketImpact, directionRationale, keyPoints] = await Promise.all([
     localizeText(headline.title),
     localizeText(headline.summary),
     localizeText(headline.marketImpact),
+    headline.directionRationale ? localizeText(headline.directionRationale) : Promise.resolve(headline.directionRationale),
     mapLimited(headline.keyPoints ?? [], 3, localizeText),
   ]);
-  const localized = { ...headline, title, summary, marketImpact, keyPoints };
+  const localized = { ...headline, title, summary, marketImpact, directionRationale, keyPoints };
   const termNotes: TermNote[] = extractTermNotes(localized);
   return { ...localized, termNotes };
 }
@@ -286,6 +287,7 @@ function untranslatedCriticalFields(headlines: Headline[]): string[] {
       ["title", headline.title],
       ["summary", headline.summary],
       ["marketImpact", headline.marketImpact],
+      ...(headline.directionRationale ? [["directionRationale", headline.directionRationale] as [string, string]] : []),
       ...(headline.keyPoints ?? []).map((point, index): [string, string] => [`keyPoints[${index}]`, point]),
     ];
     return fields

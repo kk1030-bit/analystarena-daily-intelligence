@@ -74,4 +74,48 @@ await saveStockSync(replayedRunning);
 assert.equal(globalThis.__analystArenaStockRunMemory?.get("replayed-run")?.status, "success");
 assert.equal(globalThis.__analystArenaStockRunMemory?.get("replayed-run")?.priceCount, 1);
 
+const priceHistoryPayload: StockSyncPayload = {
+  run: {
+    id: "price-summary-run",
+    startedAt: "2040-01-22T00:00:00.000Z",
+    completedAt: "2040-01-22T00:00:00.000Z",
+    status: "success",
+    sourceVersion: "test",
+    errors: [],
+    profileCount: 1,
+    priceCount: 21,
+  },
+  profiles: [{
+    symbol: "TSTX",
+    providerSymbol: "TSTX",
+    shortName: "Test Equity",
+    longName: "Test Equity Corporation",
+    aliases: ["Test Equity"],
+    exposureTags: [],
+    active: true,
+    profileFetchOk: true,
+    sourceUpdatedAt: "2040-01-22T00:00:00.000Z",
+  }],
+  prices: Array.from({ length: 21 }, (_, index) => ({
+    symbol: "TSTX",
+    tradingDate: `2040-01-${String(index + 1).padStart(2, "0")}`,
+    close: 101 + index,
+    adjustedClose: 101 + index,
+    volume: index === 20 ? 200 : 100,
+    sourceUpdatedAt: "2040-01-22T00:00:00.000Z",
+  })),
+};
+await saveStockSync(priceHistoryPayload);
+const summarized = (await searchStockProfiles("TSTX", 1)).items[0]?.priceSummary;
+assert.equal(summarized?.asOf, "2040-01-21");
+assert.equal(summarized?.lastPrice, 121);
+assert.equal(summarized?.previousClose, 120);
+assert.equal(summarized?.close5SessionsAgo, 116);
+assert.equal(summarized?.latestVolume, 200);
+assert.equal(summarized?.averageVolume20d, 100);
+
+const boundedSummary = (await searchStockProfiles("TSTX", 1, "2040-01-10")).items[0]?.priceSummary;
+assert.equal(boundedSummary?.asOf, "2040-01-10", "as-of searches must not read future prices");
+assert.equal(boundedSummary?.lastPrice, 110);
+
 console.log("stock memory ordering tests passed");

@@ -11,6 +11,7 @@ import type {
   RedditSearchOptions,
   RedditSearchResult,
   StockPriceDaily,
+  StockPriceSummary,
   StockProfile,
   StockSearchResult,
   StockSyncPayload,
@@ -68,6 +69,16 @@ interface StockProfileRow {
   profile_fetch_ok: boolean;
   source_updated_at: string | Date;
   latest_price?: StockPriceRow | null;
+  price_summary?: StockPriceSummaryRow | null;
+}
+
+interface StockPriceSummaryRow {
+  as_of: string | Date | null;
+  last_price: string | number | null;
+  previous_close: string | number | null;
+  close_5_sessions_ago: string | number | null;
+  latest_volume: string | number | null;
+  average_volume_20d: string | number | null;
 }
 
 interface StockPriceRow {
@@ -369,6 +380,18 @@ function stockRowToPrice(row: StockPriceRow): StockPriceDaily {
   };
 }
 
+function stockRowToPriceSummary(row: StockPriceSummaryRow): StockPriceSummary | undefined {
+  if (!row.as_of) return undefined;
+  return {
+    asOf: dateOnly(row.as_of),
+    lastPrice: optionalNumber(row.last_price),
+    previousClose: optionalNumber(row.previous_close),
+    close5SessionsAgo: optionalNumber(row.close_5_sessions_ago),
+    latestVolume: optionalNumber(row.latest_volume),
+    averageVolume20d: optionalNumber(row.average_volume_20d),
+  };
+}
+
 function loadStockSeed(): void {
   if (globalThis.__analystArenaStockSeedLoaded) return;
   globalThis.__analystArenaStockSeedLoaded = true;
@@ -388,6 +411,27 @@ function latestMemoryPrice(symbol: string, asOfDate?: string): StockPriceDaily |
   return [...stockPriceMemory.values()]
     .filter((price) => price.symbol === symbol && (!asOfDate || price.tradingDate <= asOfDate))
     .sort((left, right) => right.tradingDate.localeCompare(left.tradingDate))[0];
+}
+
+function memoryPriceSummary(symbol: string, asOfDate?: string): StockPriceSummary | undefined {
+  const prices = [...stockPriceMemory.values()]
+    .filter((price) => price.symbol === symbol && (!asOfDate || price.tradingDate <= asOfDate))
+    .sort((left, right) => right.tradingDate.localeCompare(left.tradingDate))
+    .slice(0, 21);
+  const latest = prices[0];
+  if (!latest) return undefined;
+  const closingPrice = (price: StockPriceDaily | undefined) => price?.adjustedClose ?? price?.close;
+  const comparisonVolumes = prices.slice(1, 21).map((price) => price.volume).filter((value): value is number => value !== undefined);
+  return {
+    asOf: latest.tradingDate,
+    lastPrice: closingPrice(latest),
+    previousClose: closingPrice(prices[1]),
+    close5SessionsAgo: closingPrice(prices[5]),
+    latestVolume: latest.volume,
+    averageVolume20d: comparisonVolumes.length
+      ? comparisonVolumes.reduce((sum, value) => sum + value, 0) / comparisonVolumes.length
+      : undefined,
+  };
 }
 
 function encodeRedditCursor(post: RedditPost): string {
@@ -857,13 +901,18 @@ export async function searchStockProfiles(query = "", limit = 30, asOfDate?: str
         return rightExact - leftExact || (right.marketCap ?? 0) - (left.marketCap ?? 0);
       })
       .slice(0, safeLimit)
-      .map((profile) => ({ ...structuredClone(profile), latestPrice: latestMemoryPrice(profile.symbol, asOfDate) }));
+      .map((profile) => ({
+        ...structuredClone(profile),
+        latestPrice: latestMemoryPrice(profile.symbol, asOfDate),
+        priceSummary: memoryPriceSummary(profile.symbol, asOfDate),
+      }));
     return { items };
   }
 
   await ensureSchema();
   const result = await pool().query<StockProfileRow>(`
-    SELECT profile.*, CASE WHEN latest.symbol IS NULL THEN NULL ELSE to_jsonb(latest) END AS latest_price
+    SELECT profile.*, CASE WHEN latest.symbol IS NULL THEN NULL ELSE to_jsonb(latest) END AS latest_price,
+      CASE WHEN summary.as_of IS NULL THEN NULL ELSE to_jsonb(summary) END AS price_summary
     FROM stock_profiles profile
     LEFT JOIN LATERAL (
       SELECT price.symbol, price.trading_date, price.open, price.high, price.low, price.close,
@@ -874,6 +923,24 @@ export async function searchStockProfiles(query = "", limit = 30, asOfDate?: str
       ORDER BY price.trading_date DESC
       LIMIT 1
     ) latest ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        MAX(CASE WHEN recent.ordinal = 1 THEN recent.trading_date END) AS as_of,
+        MAX(CASE WHEN recent.ordinal = 1 THEN recent.price END) AS last_price,
+        MAX(CASE WHEN recent.ordinal = 2 THEN recent.price END) AS previous_close,
+        MAX(CASE WHEN recent.ordinal = 6 THEN recent.price END) AS close_5_sessions_ago,
+        MAX(CASE WHEN recent.ordinal = 1 THEN recent.volume END) AS latest_volume,
+        AVG(recent.volume) FILTER (WHERE recent.ordinal BETWEEN 2 AND 21) AS average_volume_20d
+      FROM (
+        SELECT price.trading_date, COALESCE(price.adjusted_close, price.close) AS price,
+          price.volume, ROW_NUMBER() OVER (ORDER BY price.trading_date DESC) AS ordinal
+        FROM stock_prices_daily price
+        WHERE price.symbol = profile.symbol
+          AND ($3::date IS NULL OR price.trading_date <= $3::date)
+        ORDER BY price.trading_date DESC
+        LIMIT 21
+      ) recent
+    ) summary ON TRUE
     WHERE profile.active = TRUE AND (
       $1 = '' OR lower(profile.symbol) = lower($1)
       OR lower(profile.provider_symbol) = lower($1)
@@ -891,6 +958,7 @@ export async function searchStockProfiles(query = "", limit = 30, asOfDate?: str
     items: result.rows.map((row) => ({
       ...stockRowToProfile(row),
       latestPrice: row.latest_price ? stockRowToPrice(row.latest_price) : undefined,
+      priceSummary: row.price_summary ? stockRowToPriceSummary(row.price_summary) : undefined,
     })),
   };
 }

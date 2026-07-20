@@ -34,6 +34,8 @@ const stressBrief = {
 const pdf = await generateBriefPdf(stressBrief);
 assert.ok(pdf.length > 25_000, "压力测试 PDF 内容异常");
 assert.equal(pdf.subarray(0, 4).toString("ascii"), "%PDF", "输出不是 PDF 文件");
+const countPages = (value: Buffer) => value.toString("latin1").match(/\/Type\s*\/Page\b/g)?.length ?? 0;
+assert.equal(countPages(pdf), 6, "前五事件日报应稳定输出一页摘要与五页详情, 不得产生空白溢出页");
 
 const completePreviewPdf = await generateBriefPdf({
   ...stressBrief,
@@ -55,6 +57,7 @@ const pendingTranslationPreviewPdf = await generateBriefPdf({
 });
 assert.ok(disabledTranslationPreviewPdf.length > completePreviewPdf.length + 100, "翻译未完成的预览 PDF 必须显示独立提示");
 assert.ok(pendingTranslationPreviewPdf.length > completePreviewPdf.length + 100, "含翻译待确认警告的预览 PDF 必须显示独立提示");
+assert.equal(countPages(disabledTranslationPreviewPdf), 6, "翻译提示不得挤出额外空白页");
 
 const completePublishedPdf = await generateBriefPdf({
   ...stressBrief,
