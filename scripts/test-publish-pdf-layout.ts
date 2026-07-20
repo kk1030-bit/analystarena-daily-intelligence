@@ -109,7 +109,7 @@ const firstHeadline: Headline = {
     makeEquityImpact(1),
     makeEquityImpact(2),
     makeEquityImpact(3),
-    makeEquityImpact(4),
+    makeEquityImpact(4, "auto_pending"),
     makeEquityImpact(5, "rejected"),
   ],
   sources,
@@ -147,6 +147,7 @@ const seventhHeadline: Headline = {
     publishedAt: "2099-12-24T09:10:00.000Z",
     timestampKind: "published",
   }],
+  equityImpacts: undefined,
 };
 
 const eighthHeadline: Headline = {
@@ -162,6 +163,7 @@ const eighthHeadline: Headline = {
     publishedAt: "2099-12-24T09:20:00.000Z",
     timestampKind: "published",
   }],
+  equityImpacts: [makeEquityImpact(5, "rejected")],
 };
 
 const stressBrief: DailyBrief = {
@@ -217,6 +219,17 @@ assert.ok(inspection.pageTexts.some((pageText) => compactText(pageText).includes
 assertPdfContains(allText, "SIXTHHEADLINESENTINEL", "第六则市场头条必须输出");
 assertPdfContains(inspection.pageTexts[0], "EIGHTHHEADLINESENTINEL", "封面必须列出第八则市场头条");
 assertPdfContains(allText, "EIGHTHHEADLINESENTINEL", "第八则市场头条详情不得被省略");
+assertPdfContains(inspection.pageTexts[0], "利好 QA1 / 利空 QA2", "封面必须同时显示利好与利空标的摘要");
+assertPdfContains(allText, "潜在利好标的 (1): QA1 / Test Equity 1", "潜在利好标的必须单独列示");
+assertPdfContains(allText, "潜在利空标的 (1): QA2 / Test Equity 2", "潜在利空标的必须单独列示");
+assertPdfContains(allText, "多空并存标的 (1): QA3 / Test Equity 3", "多空并存标的不得归入单一方向");
+assertPdfContains(allText, "方向待确认标的 (1): QA4 / Fourth Equity Company Sentinel", "方向待确认标的必须保留");
+assertPdfContains(allText, "关联 93%, 方向 89%, 人工已批准", "利好标的必须包含两种可信度与审核状态");
+assertPdfContains(allText, "关联 92%, 方向 88%, 人工已批准", "利空标的必须包含两种可信度与审核状态");
+assertPdfContains(allText, "关联 90%, 方向 86%, 待人工复核", "待审核标的必须明确标记");
+assertPdfContains(allText, "股票映射已完成, 暂未找到可安全关联的美国股票", "已完成但无标的的状态必须明确");
+assertPdfContains(allText, "股票映射尚未完成, 不能据此判断利好或利空标的", "尚未补算的股票映射不得误报为零标的");
+assertPdfContains(allText, "相关股票已在人工审核中驳回, 本期不列为利好或利空标的", "全部驳回的股票映射必须明确说明");
 assertPdfContains(allText, "FOURTHKEYPOINTSENTINEL", "第四项已知事实必须输出");
 assertPdfContains(allText, "SUMMARYTAILSENTINEL", "事件摘要尾部不得被裁切");
 assertPdfContains(allText, "MARKETIMPACTTAILSENTINEL", "市场传导尾部不得被裁切");

@@ -110,6 +110,57 @@ function visibleEquityImpacts(headline: Headline): EquityImpactAssessment[] {
     .filter((item) => item.reviewStatus !== "rejected");
 }
 
+type EquityImpactGroups = {
+  upside: EquityImpactAssessment[];
+  downside: EquityImpactAssessment[];
+  mixed: EquityImpactAssessment[];
+  unclear: EquityImpactAssessment[];
+};
+
+function groupEquityImpacts(headline: Headline): EquityImpactGroups {
+  const groups: EquityImpactGroups = { upside: [], downside: [], mixed: [], unclear: [] };
+  visibleEquityImpacts(headline).forEach((item) => {
+    if (item.direction === "potential_upside") groups.upside.push(item);
+    else if (item.direction === "potential_downside") groups.downside.push(item);
+    else if (item.direction === "mixed") groups.mixed.push(item);
+    else groups.unclear.push(item);
+  });
+  return groups;
+}
+
+function equityReviewLabel(item: EquityImpactAssessment): string {
+  if (item.reviewStatus === "approved") return "人工已批准";
+  if (item.reviewStatus === "edited") return "人工已调整";
+  return "待人工复核";
+}
+
+function equityMappingEmptyMessage(headline: Headline): string {
+  if (!Array.isArray(headline.equityImpacts)) return "股票映射尚未完成，不能据此判断利好或利空标的";
+  if (!headline.equityImpacts.length) return "股票映射已完成，暂未找到可安全关联的美国股票";
+  return "相关股票已在人工审核中驳回，本期不列为利好或利空标的";
+}
+
+function compactEquityTargetSummary(headline: Headline): string {
+  const groups = groupEquityImpacts(headline);
+  const segments = [
+    groups.upside.length ? `利好 ${groups.upside.map((item) => item.symbol).join(", ")}` : "",
+    groups.downside.length ? `利空 ${groups.downside.map((item) => item.symbol).join(", ")}` : "",
+    groups.mixed.length ? `多空 ${groups.mixed.map((item) => item.symbol).join(", ")}` : "",
+    groups.unclear.length ? `待确认 ${groups.unclear.map((item) => item.symbol).join(", ")}` : "",
+  ].filter(Boolean);
+  if (segments.length) return segments.join(" / ");
+  if (!Array.isArray(headline.equityImpacts)) return "标的映射待完成";
+  if (!headline.equityImpacts.length) return "暂无数据库可验证标的";
+  return "相关标的已由人工审核驳回";
+}
+
+function equityTargetList(items: EquityImpactAssessment[]): string {
+  return items.map((item) => {
+    const directionConfidence = item.directionConfidence === undefined ? "-" : `${item.directionConfidence}%`;
+    return `${item.symbol} / ${item.companyName} (关联 ${item.mappingConfidence}%, 方向 ${directionConfidence}, ${equityReviewLabel(item)})`;
+  }).join("; ");
+}
+
 function needsTranslationPreviewNotice(brief: DailyBrief): boolean {
   if (brief.status === "published") return false;
   if (brief.translationEnabled === false) return true;
@@ -226,6 +277,7 @@ function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headli
     const top = cursor + index * rowHeight;
     const cardHeight = rowHeight - 8;
     const compact = rowHeight < 70;
+    const targetSummary = compactEquityTargetSummary(headline);
 
     doc.save().roundedRect(page.margin, top, page.width - page.margin * 2, cardHeight, 9).fillAndStroke(index === 0 ? colors.surfaceStrong : colors.surface, colors.line).restore();
     doc.save().roundedRect(page.margin, top, 6, cardHeight, 3).fill(theme.color).restore();
@@ -245,6 +297,12 @@ function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headli
       height: compact ? 15 : 29,
       ellipsis: true,
       lineGap: 1.5,
+    });
+    doc.fillColor(colors.secondary).fontSize(compact ? 6.4 : 6.8).text(pdfText(targetSummary, 150), contentX, top + cardHeight - (compact ? 22 : 25), {
+      width: 315,
+      height: 9,
+      ellipsis: true,
+      lineBreak: false,
     });
     const time = timestamp.value ? formatBeijingMinute(timestamp.value) : "时间待确认";
     doc.fillColor(colors.tertiary).fontSize(compact ? 6.8 : 7.5).text(`${time}  /  ${headline.sources.length} 个来源`, contentX, top + cardHeight - (compact ? 12 : 17), {
@@ -544,24 +602,49 @@ function freshnessLabel(value: EquityImpactAssessment["marketContext"]): string 
 
 function drawEquityImpacts(flow: EventFlow): void {
   const equities = visibleEquityImpacts(flow.headline);
-  drawSectionHeading(flow, `新闻 → 美国股票 (${equities.length})`);
+  const groups = groupEquityImpacts(flow.headline);
+  const noMappingMessage = equityMappingEmptyMessage(flow.headline);
+  drawSectionHeading(flow, "利好 / 利空标的一览");
+  drawFlowText(
+    flow,
+    `潜在利好标的 (${groups.upside.length}): ${groups.upside.length ? equityTargetList(groups.upside) : equities.length ? "本事件暂无数据库中可验证的潜在利好标的" : noMappingMessage}`,
+    { fontSize: 9.1, color: colors.bullish, gapAfter: 7, continuationLabel: "利好 / 利空标的一览" },
+  );
+  drawFlowText(
+    flow,
+    `潜在利空标的 (${groups.downside.length}): ${groups.downside.length ? equityTargetList(groups.downside) : equities.length ? "本事件暂无数据库中可验证的潜在利空标的" : noMappingMessage}`,
+    { fontSize: 9.1, color: colors.bearish, gapAfter: 7, continuationLabel: "利好 / 利空标的一览" },
+  );
+  if (groups.mixed.length) {
+    drawFlowText(flow, `多空并存标的 (${groups.mixed.length}): ${equityTargetList(groups.mixed)}`, {
+      fontSize: 9.1,
+      color: colors.mixed,
+      gapAfter: 7,
+      continuationLabel: "利好 / 利空标的一览",
+    });
+  }
+  if (groups.unclear.length) {
+    drawFlowText(flow, `方向待确认标的 (${groups.unclear.length}): ${equityTargetList(groups.unclear)}`, {
+      fontSize: 9.1,
+      color: colors.neutral,
+      gapAfter: 7,
+      continuationLabel: "利好 / 利空标的一览",
+    });
+  }
+  if (!equities.length) return;
+
+  drawSectionHeading(flow, `关联美股完整研究 (${equities.length})`);
   drawFlowText(flow, "预期传导与实际行情分开呈现; 实际涨跌不证明由这则新闻造成.", {
     fontSize: 8.2,
     color: colors.tertiary,
     gapAfter: 12,
     continuationLabel: "关联美股",
   });
-  if (!equities.length) {
-    drawFlowText(flow, "暂无数据库中可验证的股票影响判断.", {
-      color: colors.tertiary,
-      continuationLabel: "关联美股",
-    });
-    return;
-  }
 
   equities.forEach((item, itemIndex) => {
     const direction = equityDirectionPresentation(item.direction);
     const theme = equityDirectionTheme(item.direction);
+    const directionConfidence = item.directionConfidence === undefined ? "-" : `${item.directionConfidence}%`;
     ensureSpace(flow, 86, "关联美股");
     flow.doc.save().rect(page.margin, flow.cursor, 5, 22).fill(theme.color).restore();
     drawFlowText(flow, `${itemIndex + 1}. ${item.symbol} / ${item.companyName}`, {
@@ -574,7 +657,7 @@ function drawEquityImpacts(flow: EventFlow): void {
     });
     drawFlowText(
       flow,
-      `事件推演: ${direction.symbol} ${direction.label} / 关联可信度 ${item.mappingConfidence}% / 方向证据 ${item.directionConfidence ?? "-"}% / 关系: ${relationLabels[item.relation]}`,
+      `事件推演: ${direction.symbol} ${direction.label} / 关联可信度 ${item.mappingConfidence}% / 方向证据 ${directionConfidence} / 关系: ${relationLabels[item.relation]} / 审核状态: ${equityReviewLabel(item)}`,
       { fontSize: 8.9, color: theme.color, gapAfter: 5, continuationLabel: "关联美股" },
     );
     drawFlowText(flow, `传导逻辑: ${item.mechanism}`, {
