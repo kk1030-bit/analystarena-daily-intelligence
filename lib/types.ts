@@ -10,6 +10,7 @@ export type Category =
 
 export type SourceType = "Official" | "News" | "Reddit" | "X";
 export type Sentiment = "positive" | "neutral" | "negative";
+export type MarketDirection = "bullish" | "bearish" | "mixed" | "neutral";
 export type TimestampKind = "published" | "collected";
 
 export interface SourceLink {
@@ -51,6 +52,7 @@ export interface EquityImpactAssessment {
   direction: EquityImpactDirection;
   relation: EquityRelation;
   mappingConfidence: number;
+  directionConfidence?: number;
   mechanism: string;
   assumptions: string[];
   counterCase: string;
@@ -72,6 +74,9 @@ export interface Headline {
   newsTimeSource?: string;
   timestampKind?: TimestampKind;
   marketImpact: string;
+  marketDirection?: MarketDirection;
+  directionConfidence?: number;
+  directionRationale?: string;
   equityImpacts?: EquityImpactAssessment[];
   category: Category;
   impact: number;
@@ -207,6 +212,21 @@ export interface CollectorStatus {
   ok: boolean;
   count: number;
   note?: string;
+  channel?: string;
+  backend?: string;
+  latencyMs?: number;
+  fallbackUsed?: boolean;
+  lastSuccessAt?: string;
+  attempts?: CollectorAttempt[];
+}
+
+export interface CollectorAttempt {
+  backend: string;
+  ok: boolean;
+  count: number;
+  latencyMs: number;
+  completedAt: string;
+  note?: string;
 }
 
 export interface StockProfile {
@@ -244,6 +264,15 @@ export interface StockPriceDaily {
   sourceUpdatedAt: string;
 }
 
+export interface StockPriceSummary {
+  asOf: string;
+  lastPrice?: number;
+  previousClose?: number;
+  close5SessionsAgo?: number;
+  latestVolume?: number;
+  averageVolume20d?: number;
+}
+
 export interface StockSyncRun {
   id: string;
   startedAt: string;
@@ -262,5 +291,5 @@ export interface StockSyncPayload {
 }
 
 export interface StockSearchResult {
-  items: Array<StockProfile & { latestPrice?: StockPriceDaily }>;
+  items: Array<StockProfile & { latestPrice?: StockPriceDaily; priceSummary?: StockPriceSummary }>;
 }

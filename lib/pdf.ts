@@ -1,22 +1,50 @@
 import path from "node:path";
 import PDFDocument from "pdfkit";
-import type { DailyBrief, EquityImpactDirection, Headline } from "./types";
+import type {
+  DailyBrief,
+  EquityImpactAssessment,
+  EquityImpactDirection,
+  Headline,
+  MarketDirection,
+} from "./types";
+import {
+  equityDirectionPresentation,
+  formatReturn,
+  headlineDirectionConfidence,
+  headlineDirectionPresentation,
+  headlineDirectionRationale,
+  marketDirectionCounts,
+} from "./market-direction";
 import { categoryDisplayNames, extractTermNotes, sourceDisplayName } from "./terms";
-import { formatTimestampLine, resolveHeadlineTimestamp } from "./time";
+import { formatBeijingMinute, formatTimestampLine, resolveHeadlineTimestamp } from "./time";
 
-const page = { width: 595.28, height: 841.89, margin: 44 };
+const page = { width: 595.28, height: 841.89, margin: 42 };
+
+// A restrained dark header carries the product identity while the information area stays
+// bright and economical to print. Direction colors are always paired with arrows and labels.
 const colors = {
-  ink: "#151A1C",
-  muted: "#596362",
-  acid: "#CFFF4F",
-  orange: "#FF6B35",
-  pale: "#F1F3ED",
-  line: "#D4D9D2",
+  navy: "#0A1220",
+  navyRaised: "#111D30",
+  navyLine: "#29364C",
+  ink: "#101828",
+  secondary: "#475467",
+  tertiary: "#667085",
+  surface: "#F7F8FA",
+  surfaceStrong: "#EEF1F5",
+  line: "#D9DEE7",
   white: "#FFFFFF",
-  upside: "#24766C",
-  downside: "#C43D2F",
-  mixed: "#9A6500",
-};
+  accent: "#77E6D1",
+  bullish: "#087A60",
+  bullishTint: "#EAF7F2",
+  bearish: "#C7372F",
+  bearishTint: "#FCEDEB",
+  mixed: "#9A6700",
+  mixedTint: "#FFF5D9",
+  neutral: "#5D6675",
+  neutralTint: "#EEF1F5",
+} as const;
+
+type DirectionTheme = { color: string; tint: string };
 
 function pdfText(value: string, limit = 2_000): string {
   return String(value ?? "")
@@ -41,31 +69,26 @@ function fontPath(): string {
 }
 
 function topFive(brief: DailyBrief): Headline[] {
-  return [...brief.headlines].sort((a, b) => a.rank - b.rank).slice(0, 5);
+  return [...brief.headlines].sort((left, right) => left.rank - right.rank).slice(0, 5);
 }
 
-function factsFor(headline: Headline): string[] {
-  const facts = headline.keyPoints?.map((point) => pdfText(point, 280)).filter(Boolean) ?? [];
-  return facts.length ? facts.slice(0, 4) : [pdfText(headline.summary, 360)];
+function directionTheme(direction: MarketDirection): DirectionTheme {
+  if (direction === "bullish") return { color: colors.bullish, tint: colors.bullishTint };
+  if (direction === "bearish") return { color: colors.bearish, tint: colors.bearishTint };
+  if (direction === "mixed") return { color: colors.mixed, tint: colors.mixedTint };
+  return { color: colors.neutral, tint: colors.neutralTint };
 }
 
-function drawImpact(doc: PDFKit.PDFDocument, score: number, x: number, y: number): void {
-  for (let index = 0; index < 5; index += 1) {
-    doc.rect(x + index * 11, y, 7, 7).fill(index < score ? colors.orange : colors.line);
-  }
+function equityDirectionTheme(direction: EquityImpactDirection): DirectionTheme {
+  if (direction === "potential_upside") return directionTheme("bullish");
+  if (direction === "potential_downside") return directionTheme("bearish");
+  if (direction === "mixed") return directionTheme("mixed");
+  return directionTheme("neutral");
 }
 
-function drawDetailHeader(doc: PDFKit.PDFDocument, date: string): void {
-  doc.fillColor(colors.ink).font("NotoSC").fontSize(8.5).text("AnalystArena / 前五大市场情报", page.margin, 30, { lineBreak: false });
-  doc.fillColor(colors.muted).fontSize(8.5).text(date, page.width - page.margin - 90, 30, { width: 90, align: "right", lineBreak: false });
-  doc.moveTo(page.margin, 48).lineTo(page.width - page.margin, 48).strokeColor(colors.ink).lineWidth(1).stroke();
-  doc.y = 67;
-}
-
-function ensureDetailRoom(doc: PDFKit.PDFDocument, needed: number, date: string): void {
-  if (doc.y + needed <= page.height - 72) return;
-  doc.addPage();
-  drawDetailHeader(doc, date);
+function returnColor(value?: number): string {
+  if (value === undefined || !Number.isFinite(value) || Math.abs(value) < 0.005) return colors.neutral;
+  return value > 0 ? colors.bullish : colors.bearish;
 }
 
 function boundedTextHeight(
@@ -80,11 +103,18 @@ function boundedTextHeight(
   return Math.min(maxHeight, Math.max(fontSize + 2, Math.ceil(measured) + 1));
 }
 
-function equityDirectionColor(direction: EquityImpactDirection): string {
-  if (direction === "potential_upside") return colors.upside;
-  if (direction === "potential_downside") return colors.downside;
-  if (direction === "mixed") return colors.mixed;
-  return colors.muted;
+function factsFor(headline: Headline): string[] {
+  const facts = headline.keyPoints?.map((point) => pdfText(point, 260)).filter(Boolean) ?? [];
+  return (facts.length ? facts : [pdfText(headline.summary, 340)]).slice(0, 3);
+}
+
+function visibleEquityImpacts(headline: Headline): EquityImpactAssessment[] {
+  return (headline.equityImpacts ?? [])
+    .filter((item) => {
+      const directionConfidence = item.directionConfidence ?? item.mappingConfidence;
+      return item.reviewStatus !== "rejected" && Math.min(item.mappingConfidence, directionConfidence) >= 60;
+    })
+    .slice(0, 3);
 }
 
 function needsTranslationPreviewNotice(brief: DailyBrief): boolean {
@@ -93,150 +123,484 @@ function needsTranslationPreviewNotice(brief: DailyBrief): boolean {
   return /(?:翻译|翻譯)[^。；;]{0,24}(?:待人工确认|待人工確認|待确认|待確認|未完成)/.test(brief.warning ?? "");
 }
 
-function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headline[]): void {
-  doc.save().rect(0, 0, page.width, 176).fill(colors.ink).restore();
-  doc.fillColor(colors.acid).font("NotoSC").fontSize(9).text("AnalystArena / 每日市场情报", page.margin, 34);
-  doc.fillColor(colors.white).fontSize(31).text("前五大市场情报", page.margin, 61, { width: 430 });
-  doc.fillColor("#AEB9B5").fontSize(10).text(`${brief.date}  /  ${brief.status === "published" ? "已发布报告" : "预览报告"}`, page.margin, 113);
-  doc.fillColor("#CBD2CF").fontSize(9.5).text("从已验证新闻、官方公告与社交媒体信号中，合并整理出五个与投资人最相关的事件。", page.margin, 139, { width: 470 });
-
-  if (needsTranslationPreviewNotice(brief)) {
-    const noticeTop = 198;
-    const noticeHeight = 48;
-    doc.save().roundedRect(page.margin, noticeTop, page.width - page.margin * 2, noticeHeight, 3).fillAndStroke("#FFF3E7", colors.orange).restore();
-    doc.fillColor(colors.orange).fontSize(8.5).text("翻译待确认", page.margin + 12, noticeTop + 10, { width: 78, lineBreak: false });
-    doc.fillColor(colors.ink).fontSize(9.2).text("部分内容的自动翻译仍待人工确认。本文件仅供预览，不代表已审核发布；请以原始来源与正式日报为准。", page.margin + 98, noticeTop + 8, {
-      width: page.width - page.margin * 2 - 110,
-      height: 32,
-      lineGap: 2,
-    });
-    doc.y = noticeTop + noticeHeight + 18;
-  } else {
-    doc.y = 210;
+function shortDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "原始链接";
   }
-  doc.fillColor(colors.ink).fontSize(10).text("执行摘要", page.margin, doc.y);
-  doc.moveTo(page.margin, doc.y + 17).lineTo(page.width - page.margin, doc.y + 17).strokeColor(colors.ink).lineWidth(1).stroke();
-  doc.y += 34;
-  doc.fillColor(colors.muted).fontSize(10.5).text(
-    pdfText(`本日从 ${brief.stats.candidates} 则采集素材合并为 ${brief.stats.consolidatedEvents} 个事件, 并依市场影响, 时效性, 来源可信度与跨来源验证选出前五大重要新闻.`),
-    page.margin,
-    doc.y,
-    { width: page.width - page.margin * 2, lineGap: 3 },
-  );
-  doc.y += 36;
-
-  headlines.forEach((headline, index) => {
-    const top = doc.y;
-    const rowHeight = 68;
-    doc.save().rect(page.margin, top, page.width - page.margin * 2, rowHeight - 7).fillAndStroke(index === 0 ? "#F7F9EF" : colors.white, colors.line).restore();
-    doc.save().rect(page.margin, top, 48, rowHeight - 7).fill(index === 0 ? colors.ink : colors.pale).restore();
-    doc.fillColor(index === 0 ? colors.acid : colors.ink).fontSize(15).text(String(index + 1).padStart(2, "0"), page.margin + 10, top + 15, { width: 28, align: "center" });
-    const x = page.margin + 62;
-    doc.fillColor(colors.orange).fontSize(8).text(`${headline.ticker} / ${categoryDisplayNames[headline.category]}`, x, top + 10, { width: 260 });
-    doc.fillColor(colors.ink).fontSize(11.5).text(pdfText(headline.title, 180), x, top + 25, { width: 360, height: 31, ellipsis: true, lineGap: 1 });
-    drawImpact(doc, headline.impact, page.width - page.margin - 59, top + 13);
-    doc.y = top + rowHeight;
-  });
-
-  doc.fillColor(colors.muted).fontSize(8.5).text("详细事件信息、关键事实、影响判断与原始来源列于后续页面。", page.margin, doc.y + 10, { width: 400 });
 }
 
-function drawHeadlineDetail(doc: PDFKit.PDFDocument, headline: Headline, date: string): void {
-  const contentWidth = page.width - page.margin * 2;
-  const innerWidth = contentWidth - 34;
-  const title = pdfText(headline.title, 220);
-  const summary = pdfText(headline.summary, 560);
-  const impact = pdfText(headline.marketImpact, 560);
-  const equityRows = (headline.equityImpacts ?? [])
-    .filter((item) => item.reviewStatus !== "rejected" && item.mappingConfidence >= 70)
-    .slice(0, 3)
-    .map((item) => ({
-      direction: item.direction,
-      text: pdfText(`${item.symbol} / ${item.direction === "potential_upside" ? "潜在受益" : item.direction === "potential_downside" ? "潜在承压" : item.direction === "mixed" ? "多空并存" : "方向待确认"} / 映射可信度 ${item.mappingConfidence}%: ${item.mechanism}`, 300),
-    }));
-  const facts = factsFor(headline);
-  const termNotes = headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline);
-  const termLine = pdfText(termNotes.length ? `英文术语: ${termNotes.map((item) => `${item.term}=${item.note}`).join("; ")}` : "", 420);
-  const newsTime = resolveHeadlineTimestamp(headline);
-  const timeLine = pdfText(`${formatTimestampLine(newsTime.value, newsTime.kind)}${newsTime.source ? ` / 时间来源: ${sourceDisplayName(newsTime.source)}` : ""}`, 420);
-  const sourceLine = pdfText(`来源: ${headline.sources.map((source) => sourceDisplayName(source.name)).join(" / ") || "待补充"}`, 420);
-
-  // Every section has an explicit vertical budget. PDFKit otherwise moves overflowing text
-  // to an implicit page, leaving the surrounding card clipped on the previous page.
-  const titleHeight = boundedTextHeight(doc, title, innerWidth, 16, 2, 42);
-  const termHeight = termLine ? boundedTextHeight(doc, termLine, innerWidth, 8.8, 2, 24) : 0;
-  const timeHeight = boundedTextHeight(doc, timeLine, innerWidth - 20, 9.5, 2, 20);
-  const summaryHeight = boundedTextHeight(doc, summary, innerWidth, 10.8, 3, 48);
-  const factHeights = facts.map((fact) => boundedTextHeight(doc, fact, innerWidth - 22, 10.5, 2, 27));
-  const factsHeight = factHeights.reduce((sum, height) => sum + height + 7, 0);
-  const impactHeight = boundedTextHeight(doc, impact, innerWidth - 20, 10.5, 2, 48);
-  const equityHeights = equityRows.map((row) => boundedTextHeight(doc, row.text, innerWidth - 20, 9.4, 2, 27));
-  const equitiesHeight = equityRows.length ? 31 + equityHeights.reduce((sum, height) => sum + height + 7, 0) : 0;
-  const blockHeight = 218 + titleHeight + termHeight + (termLine ? 12 : 0) + timeHeight + summaryHeight + factsHeight + impactHeight + equitiesHeight;
-  ensureDetailRoom(doc, blockHeight + 14, date);
-
-  const top = doc.y;
-  doc.save().rect(page.margin, top, contentWidth, blockHeight).fillAndStroke(colors.white, colors.line).restore();
-  doc.save().rect(page.margin, top, 7, blockHeight).fill(headline.rank === 1 ? colors.orange : colors.ink).restore();
-  let cursor = top + 17;
-  const x = page.margin + 22;
-
-  doc.fillColor(colors.orange).fontSize(8.8).text(`第 ${String(headline.rank).padStart(2, "0")} 名   ${headline.ticker}   ${categoryDisplayNames[headline.category]}`, x, cursor, { width: 310, lineBreak: false });
-  doc.fillColor(colors.muted).fontSize(8.8).text(`信心 ${headline.confidence}%`, page.width - page.margin - 150, cursor, { width: 128, align: "right", lineBreak: false });
-  drawImpact(doc, headline.impact, page.width - page.margin - 78, cursor + 18);
-  cursor += 31;
-
-  doc.fillColor(colors.ink).fontSize(16).text(title, x, cursor, { width: innerWidth, height: titleHeight, lineGap: 2, ellipsis: true });
-  cursor += titleHeight + 14;
-
-  if (termLine) {
-    doc.fillColor(colors.muted).fontSize(8.8).text(termLine, x, cursor, { width: innerWidth, height: termHeight, lineGap: 2, ellipsis: true });
-    cursor += termHeight + 12;
+function drawMetricDots(doc: PDFKit.PDFDocument, score: number, x: number, y: number, activeColor = colors.ink): void {
+  const normalized = Math.max(0, Math.min(5, Math.round(score)));
+  for (let index = 0; index < 5; index += 1) {
+    doc.save().circle(x + index * 13 + 4, y + 4, 4).fill(index < normalized ? activeColor : colors.line).restore();
   }
+}
 
-  doc.save().rect(x, cursor, innerWidth, timeHeight + 20).fill(newsTime.kind === "collected" ? "#FFF0E8" : "#EEF6E8").restore();
-  doc.fillColor(newsTime.kind === "collected" ? colors.orange : colors.upside).fontSize(9.5).text(timeLine, x + 10, cursor + 9, { width: innerWidth - 20, height: timeHeight, lineGap: 2, ellipsis: true });
-  cursor += timeHeight + 31;
-
-  doc.fillColor(colors.orange).fontSize(8.5).text("事件摘要", x, cursor);
-  cursor += 16;
-  doc.fillColor(colors.muted).fontSize(10.8).text(summary, x, cursor, { width: innerWidth, height: summaryHeight, lineGap: 3, ellipsis: true });
-  cursor += summaryHeight + 14;
-
-  doc.fillColor(colors.orange).fontSize(8.5).text("重要信息", x, cursor);
-  cursor += 17;
-  facts.forEach((fact, index) => {
-    doc.save().circle(x + 4, cursor + 5, 3).fill(index === 0 ? colors.orange : colors.ink).restore();
-    doc.fillColor(colors.ink).fontSize(10.5).text(fact, x + 17, cursor, { width: innerWidth - 22, height: factHeights[index], lineGap: 2, ellipsis: true });
-    cursor += factHeights[index] + 7;
+function drawSectionLabel(doc: PDFKit.PDFDocument, label: string, x: number, y: number): void {
+  doc.fillColor(colors.tertiary).font("NotoSC").fontSize(8.2).text(label, x, y, {
+    characterSpacing: 0.55,
+    lineBreak: false,
   });
-  cursor += 5;
+}
 
-  doc.save().rect(x, cursor, innerWidth, impactHeight + 36).fill(colors.pale).restore();
-  doc.fillColor(colors.orange).fontSize(8.5).text("市场影响", x + 10, cursor + 9);
-  doc.fillColor(colors.ink).fontSize(10.5).text(impact, x + 10, cursor + 23, { width: innerWidth - 20, height: impactHeight, lineGap: 2, ellipsis: true });
-  cursor += impactHeight + 47;
+function drawDirectionPill(
+  doc: PDFKit.PDFDocument,
+  direction: MarketDirection,
+  label: string,
+  x: number,
+  y: number,
+  width: number,
+  options: { dark?: boolean; height?: number; align?: "left" | "center" } = {},
+): void {
+  const theme = directionTheme(direction);
+  const darkText = direction === "bullish"
+    ? "#69D6B7"
+    : direction === "bearish"
+      ? "#FF8C84"
+      : direction === "mixed"
+        ? "#FFD166"
+        : "#CAD3DE";
+  const height = options.height ?? 28;
+  const background = options.dark ? colors.navyRaised : theme.tint;
+  const border = options.dark ? darkText : theme.color;
+  doc.save().roundedRect(x, y, width, height, height / 2).fillAndStroke(background, border).restore();
+  doc.fillColor(options.dark ? darkText : theme.color).font("NotoSC").fontSize(8.8).text(label, x + 10, y + (height - 10) / 2, {
+    width: width - 20,
+    align: options.align ?? "center",
+    lineBreak: false,
+  });
+}
 
-  if (equityRows.length) {
-    doc.fillColor(colors.orange).fontSize(8.5).text("关联美股（映射可信度并非上涨概率）", x, cursor);
-    cursor += 17;
-    equityRows.forEach((row, index) => {
-      doc.fillColor(equityDirectionColor(row.direction)).fontSize(9.4).text(row.text, x + 10, cursor, { width: innerWidth - 20, height: equityHeights[index], lineGap: 2, ellipsis: true });
-      cursor += equityHeights[index] + 7;
-    });
-    cursor += 7;
+function drawCoverHeader(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headline[]): void {
+  doc.save().rect(0, 0, page.width, 212).fill(colors.navy).restore();
+  doc.save().rect(0, 0, 7, 212).fill(colors.accent).restore();
+
+  doc.fillColor(colors.accent).font("NotoSC").fontSize(9).text("AnalystArena", page.margin, 31, {
+    characterSpacing: 1.1,
+    lineBreak: false,
+  });
+  doc.fillColor("#AAB7C8").fontSize(8.5).text(brief.status === "published" ? "正式发布" : "审核预览", page.width - page.margin - 90, 32, {
+    width: 90,
+    align: "right",
+    lineBreak: false,
+  });
+
+  doc.fillColor(colors.white).fontSize(30).text("每日市场情报", page.margin, 61, { width: 370, lineBreak: false });
+  doc.fillColor("#C4CEDB").fontSize(10.2).text(
+    `${brief.date}  /  从重要事实到潜在市场传导`,
+    page.margin,
+    106,
+    { width: 420, lineBreak: false },
+  );
+  doc.fillColor("#8390A2").fontSize(8.3).text(`生成时间: ${formatBeijingMinute(brief.generatedAt)} (北京时间)`, page.margin, 128, {
+    width: 420,
+    lineBreak: false,
+  });
+
+  const counts = marketDirectionCounts(headlines);
+  const overview = [
+    { direction: "bullish" as const, label: `↑ 利好  ${counts.bullish}` },
+    { direction: "bearish" as const, label: `↓ 利空  ${counts.bearish}` },
+    { direction: "mixed" as const, label: `↕ 多空  ${counts.mixed}` },
+    { direction: "neutral" as const, label: `- 待确认  ${counts.neutral}` },
+  ];
+  const gap = 8;
+  const width = (page.width - page.margin * 2 - gap * 3) / 4;
+  overview.forEach((item, index) => {
+    drawDirectionPill(doc, item.direction, item.label, page.margin + index * (width + gap), 159, width, { dark: true, height: 31 });
+  });
+}
+
+function drawCover(doc: PDFKit.PDFDocument, brief: DailyBrief, headlines: Headline[]): void {
+  drawCoverHeader(doc, brief, headlines);
+  let cursor = 231;
+
+  if (needsTranslationPreviewNotice(brief)) {
+    doc.save().roundedRect(page.margin, cursor, page.width - page.margin * 2, 43, 8).fillAndStroke(colors.mixedTint, colors.mixed).restore();
+    doc.fillColor(colors.mixed).fontSize(9).text("翻译待确认", page.margin + 13, cursor + 9, { width: 78, lineBreak: false });
+    doc.fillColor(colors.ink).fontSize(8.7).text(
+      "部分自动翻译仍待人工确认. 本文件仅供预览, 请以原始来源与正式发布版本为准.",
+      page.margin + 93,
+      cursor + 8,
+      { width: page.width - page.margin * 2 - 106, height: 28, lineGap: 2 },
+    );
+    cursor += 57;
   }
 
-  doc.fillColor(colors.muted).fontSize(8.5).text(sourceLine, x, cursor, { width: innerWidth, lineBreak: false, ellipsis: true });
-  doc.y = top + blockHeight + 14;
+  doc.fillColor(colors.ink).fontSize(15).text("今日必读", page.margin, cursor, { lineBreak: false });
+  doc.fillColor(colors.tertiary).fontSize(8.5).text(
+    `${brief.stats.candidates} 则素材 → ${brief.stats.consolidatedEvents} 个事件 → 前 ${headlines.length} 大重点`,
+    page.width - page.margin - 270,
+    cursor + 4,
+    { width: 270, align: "right", lineBreak: false },
+  );
+  cursor += 30;
+
+  const availableHeight = 781 - cursor;
+  const rowHeight = Math.min(88, Math.floor(availableHeight / Math.max(1, headlines.length)));
+  headlines.forEach((headline, index) => {
+    const direction = headlineDirectionPresentation(headline);
+    const theme = directionTheme(direction.direction);
+    const timestamp = resolveHeadlineTimestamp(headline);
+    const top = cursor + index * rowHeight;
+    const cardHeight = rowHeight - 8;
+
+    doc.save().roundedRect(page.margin, top, page.width - page.margin * 2, cardHeight, 9).fillAndStroke(index === 0 ? colors.surfaceStrong : colors.surface, colors.line).restore();
+    doc.save().roundedRect(page.margin, top, 6, cardHeight, 3).fill(theme.color).restore();
+
+    doc.fillColor(index === 0 ? colors.ink : colors.secondary).fontSize(17).text(String(index + 1).padStart(2, "0"), page.margin + 17, top + 16, {
+      width: 29,
+      align: "center",
+      lineBreak: false,
+    });
+    const contentX = page.margin + 62;
+    doc.fillColor(colors.tertiary).fontSize(7.8).text(`${headline.ticker}  /  ${categoryDisplayNames[headline.category]}`, contentX, top + 10, {
+      width: 245,
+      lineBreak: false,
+    });
+    doc.fillColor(colors.ink).fontSize(11.5).text(pdfText(headline.title, 170), contentX, top + 25, {
+      width: 330,
+      height: 29,
+      ellipsis: true,
+      lineGap: 1.5,
+    });
+    const time = timestamp.value ? formatBeijingMinute(timestamp.value) : "时间待确认";
+    doc.fillColor(colors.tertiary).fontSize(7.5).text(`${time}  /  ${headline.sources.length} 个来源`, contentX, top + cardHeight - 17, {
+      width: 315,
+      lineBreak: false,
+    });
+
+    drawDirectionPill(doc, direction.direction, `${direction.symbol} ${direction.compactLabel}`, page.width - page.margin - 92, top + 10, 76, { height: 24 });
+    doc.fillColor(colors.tertiary).fontSize(7.4).text(`影响 ${headline.impact}/5`, page.width - page.margin - 92, top + 42, {
+      width: 76,
+      align: "center",
+      lineBreak: false,
+    });
+  });
+
+  doc.fillColor(colors.tertiary).fontSize(7.6).text("方向表示事件的潜在传导, 不代表价格一定上涨或下跌. 详细依据与实际行情见后续页面.", page.margin, 787, {
+    width: page.width - page.margin * 2,
+    lineBreak: false,
+  });
+}
+
+function drawDetailHeader(doc: PDFKit.PDFDocument, brief: DailyBrief, index: number, total: number): void {
+  doc.save().rect(0, 0, page.width, 96).fill(colors.navy).restore();
+  doc.save().rect(0, 0, 7, 96).fill(colors.accent).restore();
+  doc.fillColor(colors.accent).font("NotoSC").fontSize(8.6).text("AnalystArena / 每日市场情报", page.margin, 28, {
+    characterSpacing: 0.6,
+    lineBreak: false,
+  });
+  doc.fillColor(colors.white).fontSize(17).text(`事件 ${String(index).padStart(2, "0")}`, page.margin, 49, { lineBreak: false });
+  doc.fillColor("#AAB7C8").fontSize(8.4).text(`${brief.date}  /  ${index} of ${total}`, page.width - page.margin - 120, 31, {
+    width: 120,
+    align: "right",
+    lineBreak: false,
+  });
+  doc.fillColor("#D2D9E3").fontSize(8).text("前五大市场事件详细解读", page.width - page.margin - 165, 55, {
+    width: 165,
+    align: "right",
+    lineBreak: false,
+  });
+}
+
+function drawDirectionCard(doc: PDFKit.PDFDocument, headline: Headline, y: number): void {
+  const direction = headlineDirectionPresentation(headline);
+  const confidence = headlineDirectionConfidence(headline);
+  const rationale = pdfText(headlineDirectionRationale(headline), 310);
+  const theme = directionTheme(direction.direction);
+  const width = page.width - page.margin * 2;
+
+  doc.save().roundedRect(page.margin, y, width, 82, 10).fillAndStroke(theme.tint, theme.color).restore();
+  doc.save().roundedRect(page.margin, y, 7, 82, 4).fill(theme.color).restore();
+  doc.fillColor(theme.color).fontSize(17).text(`${direction.symbol} ${direction.label}`, page.margin + 20, y + 15, {
+    width: 145,
+    lineBreak: false,
+  });
+  doc.fillColor(theme.color).fontSize(8).text("事件潜在方向", page.margin + 21, y + 47, { width: 105, lineBreak: false });
+  doc.fillColor(colors.secondary).fontSize(9.2).text(rationale, page.margin + 178, y + 14, {
+    width: width - 298,
+    height: 48,
+    lineGap: 2.5,
+    ellipsis: true,
+  });
+  doc.fillColor(colors.secondary).fontSize(8).text(`方向证据 ${confidence}%`, page.width - page.margin - 105, y + 17, {
+    width: 88,
+    align: "right",
+    lineBreak: false,
+  });
+  doc.fillColor(colors.tertiary).fontSize(7.2).text("不是涨跌概率", page.width - page.margin - 105, y + 35, {
+    width: 88,
+    align: "right",
+    lineBreak: false,
+  });
+}
+
+function drawDecisionMetrics(doc: PDFKit.PDFDocument, headline: Headline, x: number, y: number, width: number): void {
+  doc.save().roundedRect(x, y, width, 84, 9).fillAndStroke(colors.surface, colors.line).restore();
+  drawSectionLabel(doc, "判断指标", x + 12, y + 11);
+  doc.fillColor(colors.ink).fontSize(8.6).text("市场影响", x + 12, y + 31, { lineBreak: false });
+  drawMetricDots(doc, headline.impact, x + width - 81, y + 33, colors.ink);
+  doc.fillColor(colors.secondary).fontSize(8.3).text("资料可信度", x + 12, y + 55, { lineBreak: false });
+  doc.fillColor(colors.ink).fontSize(9.5).text(`${headline.confidence}%`, x + width - 49, y + 54, {
+    width: 37,
+    align: "right",
+    lineBreak: false,
+  });
+}
+
+function drawEquityTable(doc: PDFKit.PDFDocument, headline: Headline, y: number): void {
+  const equities = visibleEquityImpacts(headline);
+  const x = page.margin;
+  const width = page.width - page.margin * 2;
+  const columns = { symbol: 62, expected: 105, confidence: 82, actual1d: 66, actual5d: 66 };
+  const actualWidth = columns.actual1d + columns.actual5d;
+  const mechanismWidth = width - columns.symbol - columns.expected - columns.confidence - actualWidth;
+
+  drawSectionLabel(doc, "关联美股", x, y);
+  doc.fillColor(colors.tertiary).fontSize(7.3).text("预期传导与实际行情分开呈现; 实际涨跌不证明新闻因果.", x + 86, y, {
+    width: width - 86,
+    align: "right",
+    lineBreak: false,
+  });
+  const headerY = y + 18;
+  doc.save().roundedRect(x, headerY, width, 22, 5).fill(colors.surfaceStrong).restore();
+  let cursor = x;
+  const headers: Array<[string, number, "left" | "center"]> = [
+    ["股票", columns.symbol, "left"],
+    ["预期传导", columns.expected, "left"],
+    ["证据", columns.confidence, "center"],
+    ["实际 1 日", columns.actual1d, "center"],
+    ["实际 5 日", columns.actual5d, "center"],
+    ["传导逻辑", mechanismWidth, "left"],
+  ];
+  headers.forEach(([label, columnWidth, align]) => {
+    doc.fillColor(colors.secondary).fontSize(7.2).text(label, cursor + 7, headerY + 7, {
+      width: columnWidth - 14,
+      align,
+      lineBreak: false,
+    });
+    cursor += columnWidth;
+  });
+
+  if (!equities.length) {
+    doc.save().roundedRect(x, headerY + 28, width, 32, 5).fillAndStroke(colors.surface, colors.line).restore();
+    doc.fillColor(colors.tertiary).fontSize(8.3).text("暂无达到展示门槛的股票影响判断", x + 12, headerY + 39, {
+      width: width - 24,
+      align: "center",
+      lineBreak: false,
+    });
+    return;
+  }
+
+  equities.forEach((item, index) => {
+    const direction = equityDirectionPresentation(item.direction);
+    const theme = equityDirectionTheme(item.direction);
+    const rowY = headerY + 27 + index * 35;
+    const rowHeight = 30;
+    doc.save().roundedRect(x, rowY, width, rowHeight, 5).fillAndStroke(index % 2 === 0 ? colors.white : colors.surface, colors.line).restore();
+    doc.save().roundedRect(x, rowY, 4, rowHeight, 2).fill(theme.color).restore();
+
+    cursor = x;
+    doc.fillColor(colors.ink).fontSize(8.8).text(pdfText(item.symbol, 12), cursor + 9, rowY + 10, {
+      width: columns.symbol - 15,
+      lineBreak: false,
+    });
+    cursor += columns.symbol;
+    doc.fillColor(theme.color).fontSize(7.9).text(`${direction.symbol} ${direction.compactLabel}`, cursor + 7, rowY + 10, {
+      width: columns.expected - 14,
+      lineBreak: false,
+    });
+    cursor += columns.expected;
+    const effectiveConfidence = Math.min(item.mappingConfidence, item.directionConfidence ?? item.mappingConfidence);
+    doc.fillColor(colors.secondary).fontSize(7.8).text(`${effectiveConfidence}%`, cursor + 7, rowY + 10, {
+      width: columns.confidence - 14,
+      align: "center",
+      lineBreak: false,
+    });
+    cursor += columns.confidence;
+    const return1d = item.marketContext?.return1dPct;
+    doc.fillColor(returnColor(return1d)).fontSize(8.2).text(formatReturn(return1d), cursor + 4, rowY + 10, {
+      width: columns.actual1d - 8,
+      align: "center",
+      lineBreak: false,
+    });
+    cursor += columns.actual1d;
+    const return5d = item.marketContext?.return5dPct;
+    doc.fillColor(returnColor(return5d)).fontSize(8.2).text(formatReturn(return5d), cursor + 4, rowY + 10, {
+      width: columns.actual5d - 8,
+      align: "center",
+      lineBreak: false,
+    });
+    cursor += columns.actual5d;
+    doc.fillColor(colors.secondary).fontSize(7.4).text(pdfText(item.mechanism, 95), cursor + 7, rowY + 7, {
+      width: mechanismWidth - 14,
+      height: 18,
+      lineGap: 1,
+      ellipsis: true,
+    });
+  });
+
+  const asOfDates = [...new Set(equities.map((item) => item.marketContext?.asOf).filter(Boolean))];
+  if (asOfDates.length) {
+    doc.fillColor(colors.tertiary).fontSize(7).text(`实际行情截至 ${asOfDates.join(" / ")}`, x, headerY + 27 + equities.length * 35, {
+      width,
+      align: "right",
+      lineBreak: false,
+    });
+  }
+}
+
+function drawSources(doc: PDFKit.PDFDocument, headline: Headline, y: number): void {
+  const x = page.margin;
+  const width = page.width - page.margin * 2;
+  const sources = headline.sources.slice(0, 3);
+  const termNotes = headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline);
+  drawSectionLabel(doc, "来源与术语", x, y);
+  let cursor = y + 16;
+
+  sources.forEach((source, index) => {
+    const label = pdfText(`${index + 1}. ${sourceDisplayName(source.name)}  /  ${shortDomain(source.url)}`, 105);
+    doc.fillColor(colors.secondary).fontSize(7.7).text(label, x, cursor, {
+      width,
+      height: 13,
+      lineBreak: false,
+      ellipsis: true,
+      link: /^https?:\/\//i.test(source.url) ? source.url : undefined,
+      underline: false,
+    });
+    cursor += 15;
+  });
+
+  if (!sources.length) {
+    doc.fillColor(colors.tertiary).fontSize(7.7).text("来源待补充", x, cursor, { lineBreak: false });
+    cursor += 15;
+  }
+
+  if (termNotes.length) {
+    const note = pdfText(`术语注释: ${termNotes.slice(0, 4).map((item) => `${item.term} = ${item.note}`).join("; ")}`, 250);
+    doc.fillColor(colors.tertiary).fontSize(7.3).text(note, x, Math.min(cursor + 2, y + 63), {
+      width,
+      height: 13,
+      lineBreak: false,
+      ellipsis: true,
+    });
+  }
+}
+
+function drawHeadlineDetail(doc: PDFKit.PDFDocument, brief: DailyBrief, headline: Headline, index: number, total: number): void {
+  doc.addPage();
+  drawDetailHeader(doc, brief, index, total);
+
+  const timestamp = resolveHeadlineTimestamp(headline);
+  const metaY = 113;
+  doc.fillColor(colors.secondary).fontSize(8.4).text(`${headline.ticker}  /  ${categoryDisplayNames[headline.category]}`, page.margin, metaY, {
+    width: 210,
+    lineBreak: false,
+  });
+  const timestampLine = pdfText(
+    `${formatTimestampLine(timestamp.value, timestamp.kind)}${timestamp.source ? ` / ${sourceDisplayName(timestamp.source)}` : ""}`,
+    150,
+  );
+  doc.fillColor(colors.tertiary).fontSize(7.6).text(timestampLine, page.margin + 205, metaY + 1, {
+    width: page.width - page.margin * 2 - 205,
+    align: "right",
+    lineBreak: false,
+    ellipsis: true,
+  });
+
+  const title = pdfText(headline.title, 220);
+  const titleHeight = boundedTextHeight(doc, title, page.width - page.margin * 2, 20, 3, 52);
+  doc.fillColor(colors.ink).fontSize(20).text(title, page.margin, 137, {
+    width: page.width - page.margin * 2,
+    height: titleHeight,
+    lineGap: 3,
+    ellipsis: true,
+  });
+
+  drawDirectionCard(doc, headline, 206);
+
+  const leftX = page.margin;
+  const leftWidth = 322;
+  const rightX = leftX + leftWidth + 17;
+  const rightWidth = page.width - page.margin - rightX;
+  const mainY = 310;
+  drawSectionLabel(doc, "事件摘要", leftX, mainY);
+  const summary = pdfText(headline.summary, 460);
+  doc.fillColor(colors.secondary).fontSize(9.7).text(summary, leftX, mainY + 17, {
+    width: leftWidth,
+    height: 63,
+    lineGap: 3,
+    ellipsis: true,
+  });
+
+  const facts = factsFor(headline);
+  drawSectionLabel(doc, "关键信息", leftX, mainY + 94);
+  let factY = mainY + 113;
+  facts.forEach((fact, factIndex) => {
+    const factHeight = boundedTextHeight(doc, fact, leftWidth - 20, 8.9, 2, 34);
+    doc.save().circle(leftX + 4, factY + 5, 3).fill(factIndex === 0 ? colors.ink : colors.tertiary).restore();
+    doc.fillColor(colors.ink).fontSize(8.9).text(fact, leftX + 16, factY, {
+      width: leftWidth - 20,
+      height: factHeight,
+      lineGap: 2,
+      ellipsis: true,
+    });
+    factY += 39;
+  });
+
+  drawDecisionMetrics(doc, headline, rightX, mainY, rightWidth);
+  drawSectionLabel(doc, "市场影响", rightX, mainY + 103);
+  doc.save().roundedRect(rightX, mainY + 121, rightWidth, 111, 9).fillAndStroke(colors.surface, colors.line).restore();
+  doc.fillColor(colors.ink).fontSize(8.7).text(pdfText(headline.marketImpact, 390), rightX + 12, mainY + 133, {
+    width: rightWidth - 24,
+    height: 84,
+    lineGap: 2.5,
+    ellipsis: true,
+  });
+
+  drawEquityTable(doc, headline, 556);
+  drawSources(doc, headline, 704);
+}
+
+function drawFooters(doc: PDFKit.PDFDocument): void {
+  const range = doc.bufferedPageRange();
+  for (let index = range.start; index < range.start + range.count; index += 1) {
+    doc.switchToPage(index);
+    // Keep the footer inside PDFKit's bottom margin. Text placed below the content
+    // boundary silently creates an extra page even when explicit coordinates are used.
+    const footerLineY = page.height - 36;
+    const footerTextY = page.height - 27;
+    doc.moveTo(page.margin, footerLineY).lineTo(page.width - page.margin, footerLineY).strokeColor(colors.line).lineWidth(0.5).stroke();
+    doc.fillColor(colors.tertiary).font("NotoSC").fontSize(6.9).text(
+      "信息整理与研究工具, 不构成投资建议. 请从原始来源独立查证.",
+      page.margin,
+      footerTextY,
+      { width: 390, lineBreak: false },
+    );
+    doc.fillColor(colors.tertiary).text(`${index + 1} / ${range.count}`, page.width - page.margin - 55, footerTextY, {
+      width: 55,
+      align: "right",
+      lineBreak: false,
+    });
+  }
 }
 
 export async function generateBriefPdf(brief: DailyBrief): Promise<Buffer> {
   const doc = new PDFDocument({
     size: "A4",
-    margins: { top: page.margin, right: page.margin, bottom: page.margin, left: page.margin },
+    // A small PDFKit bottom margin lets us position a controlled footer inside the
+    // physical page without triggering its automatic overflow pagination.
+    margins: { top: page.margin, right: page.margin, bottom: 10, left: page.margin },
     bufferPages: true,
-    info: { Title: `AnalystArena 前五大市场情报 ${brief.date}`, Author: "AnalystArena", Subject: "每日前五大市场事件" },
+    autoFirstPage: true,
+    info: {
+      Title: `AnalystArena 每日市场情报 ${brief.date}`,
+      Author: "AnalystArena",
+      Subject: "每日前五大市场事件与潜在传导",
+    },
   });
   doc.registerFont("NotoSC", fontPath());
   doc.font("NotoSC");
@@ -250,17 +614,8 @@ export async function generateBriefPdf(brief: DailyBrief): Promise<Buffer> {
 
   const headlines = topFive(brief);
   drawCover(doc, brief, headlines);
-  doc.addPage();
-  drawDetailHeader(doc, brief.date);
-  headlines.forEach((headline) => drawHeadlineDetail(doc, headline, brief.date));
-
-  const range = doc.bufferedPageRange();
-  for (let index = range.start; index < range.start + range.count; index += 1) {
-    doc.switchToPage(index);
-    doc.moveTo(page.margin, page.height - 66).lineTo(page.width - page.margin, page.height - 66).strokeColor(colors.line).lineWidth(0.5).stroke();
-    doc.fillColor(colors.muted).fontSize(7.5).text("信息整理与研究工具, 不构成投资建议. 请由原始来源独立查证.", page.margin, page.height - 57, { width: 410, lineBreak: false });
-    doc.text(`${index + 1} / ${range.count}`, page.width - page.margin - 50, page.height - 57, { width: 50, align: "right", lineBreak: false });
-  }
+  headlines.forEach((headline, index) => drawHeadlineDetail(doc, brief, headline, index + 1, headlines.length));
+  drawFooters(doc);
 
   doc.end();
   return complete;

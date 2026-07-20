@@ -3,11 +3,17 @@
 import Link from "next/link";
 import { Check, FileDown, KeyRound, LoaderCircle, LogOut, PencilLine, Plus, Radar, Save, Send } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { BriefRecord, Category, DailyBrief, Headline } from "@/lib/types";
+import type { BriefRecord, Category, DailyBrief, Headline, MarketDirection } from "@/lib/types";
 import { categoryDisplayNames, extractTermNotes } from "@/lib/terms";
 import { fromBeijingDateTimeInput, toBeijingDateTimeInput } from "@/lib/time";
 
 const categories: Category[] = ["Macro", "AI", "Semiconductor", "Crypto", "ETF", "Earnings", "Geopolitics", "Other"];
+const directionOptions: Array<{ value: MarketDirection; label: string }> = [
+  { value: "bullish", label: "潜在利好 ↑" },
+  { value: "bearish", label: "潜在利空 ↓" },
+  { value: "mixed", label: "多空并存 ↕" },
+  { value: "neutral", label: "方向待确认 —" },
+];
 
 function authHeaders(token: string, json = false): HeadersInit {
   return { "x-admin-token": token, ...(json ? { "Content-Type": "application/json" } : {}) };
@@ -197,15 +203,21 @@ export function ReviewConsole() {
                 <label>时间来源<input value={headline.newsTimeSource ?? headline.sources[0]?.name ?? ""} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { newsTimeSource: event.target.value })} /></label>
               </div>
               <label>重要信息（每行一点）<textarea rows={4} value={(headline.keyPoints ?? []).join("\n")} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { keyPoints: event.target.value.split("\n").map((point) => point.trim()).filter(Boolean).slice(0, 4) })} /></label>
+              <div className="review-fields review-direction-fields">
+                <label>事件潜在方向<select value={headline.marketDirection ?? (headline.sentiment === "positive" ? "bullish" : headline.sentiment === "negative" ? "bearish" : "neutral")} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { marketDirection: event.target.value as MarketDirection })}>{directionOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
+                <label>方向证据强度<input type="number" min="1" max="99" value={headline.directionConfidence ?? 52} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { directionConfidence: Number(event.target.value) })} /></label>
+                <label>分类<select value={headline.category} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { category: event.target.value as Category })}>{categories.map((category) => <option key={category} value={category}>{categoryDisplayNames[category]}</option>)}</select></label>
+              </div>
+              <label>方向判断依据<textarea rows={2} value={headline.directionRationale ?? ""} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { directionRationale: event.target.value })} placeholder="说明为何属于利好、利空、多空并存或待确认" /></label>
               <label>市场影响<textarea rows={3} value={headline.marketImpact} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { marketImpact: event.target.value })} /></label>
               {headline.equityImpacts?.length ? <section className="review-equity-impacts">
                 <header><span>新闻关联美股</span><small>请确认传导理由；映射可信度不是上涨概率</small></header>
                 {headline.equityImpacts.map((item) => <div className={`review-equity-row review-equity-${item.reviewStatus}`} key={item.symbol}>
-                  <b>{item.symbol}</b><p><strong>{item.companyName} · {item.direction === "potential_upside" ? "潜在受益" : item.direction === "potential_downside" ? "潜在承压" : item.direction === "mixed" ? "多空并存" : "方向待确认"}</strong><span>{item.mechanism}</span></p><em>{item.mappingConfidence}%</em>
+                  <b>{item.symbol}</b><p><strong>{item.companyName} · {item.direction === "potential_upside" ? "潜在受益 ↑" : item.direction === "potential_downside" ? "潜在承压 ↓" : item.direction === "mixed" ? "多空并存 ↕" : "方向待确认 —"}</strong><span>{item.mechanism}</span></p><em>关联 {item.mappingConfidence}%<br />方向 {item.directionConfidence ?? "—"}%</em>
                   <div><button type="button" disabled={selected?.status === "published"} aria-pressed={item.reviewStatus === "approved"} onClick={() => reviewEquityImpact(headline.id, item.symbol, "approved")}>批准</button><button type="button" disabled={selected?.status === "published"} aria-pressed={item.reviewStatus === "rejected"} onClick={() => reviewEquityImpact(headline.id, item.symbol, "rejected")}>驳回</button></div>
                 </div>)}
               </section> : null}
-              <div className="review-fields"><label>分类<select value={headline.category} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { category: event.target.value as Category })}>{categories.map((category) => <option key={category} value={category}>{categoryDisplayNames[category]}</option>)}</select></label><label>影响<input type="number" min="1" max="5" value={headline.impact} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { impact: Number(event.target.value) })} /></label><label>信心<input type="number" min="1" max="99" value={headline.confidence} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { confidence: Number(event.target.value) })} /></label></div>
+              <div className="review-fields review-score-fields"><label>市场影响<input type="number" min="1" max="5" value={headline.impact} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { impact: Number(event.target.value) })} /></label><label>资料可信度<input type="number" min="1" max="99" value={headline.confidence} disabled={selected?.status === "published"} onChange={(event) => updateHeadline(headline.id, { confidence: Number(event.target.value) })} /></label></div>
             </article>
           ))}
         </section> : <div className="review-empty">从左侧选择草稿，或生成今日草稿开始审核。</div>}

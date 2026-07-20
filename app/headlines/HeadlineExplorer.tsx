@@ -33,11 +33,16 @@ import {
   sortedSources,
   sourceTypeLabel,
 } from "@/lib/investor-view";
+import {
+  equityDirectionPresentation,
+  formatReturn,
+  headlineDirectionConfidence,
+  headlineDirectionPresentation,
+  headlineDirectionRationale,
+} from "@/lib/market-direction";
 import { categoryDisplayNames, sourceDisplayName } from "@/lib/terms";
 import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
-import type { Category, DailyBrief, Headline, Sentiment } from "@/lib/types";
-
-const sentimentLabels: Record<Sentiment, string> = { positive: "偏多", neutral: "中性", negative: "偏空" };
+import type { Category, DailyBrief, Headline } from "@/lib/types";
 
 function replaceEventInUrl(eventId: string) {
   const url = new URL(window.location.href);
@@ -48,13 +53,14 @@ function replaceEventInUrl(eventId: string) {
 function EventRow({ headline, active, onSelect }: { headline: Headline; active: boolean; onSelect: () => void }) {
   const time = resolveHeadlineTimestamp(headline);
   const evidence = headlineEvidence(headline);
+  const direction = headlineDirectionPresentation(headline);
   return (
     <button className={`event-row${active ? " is-active" : ""}`} type="button" aria-pressed={active} onClick={onSelect}>
       <span className="event-rank">{String(headline.rank).padStart(2, "0")}</span>
       <span className="event-row-copy">
-        <small><b>{headline.ticker}</b>{categoryDisplayNames[headline.category]} · {formatBeijingMinute(time.value)}</small>
+        <small><b>{headline.ticker}</b>{categoryDisplayNames[headline.category]} · 影响 {headline.impact}/5</small>
         <strong>{headline.title}</strong>
-        <em className={`evidence-pill evidence-${evidence.level}`}>{evidence.label}</em>
+        <span className="event-row-status"><em className={`direction-badge direction-${direction.direction}`}><b aria-hidden="true">{direction.symbol}</b>{direction.compactLabel}</em><em className={`evidence-pill evidence-${evidence.level}`}>{evidence.label}</em><time dateTime={time.value}>{formatBeijingMinute(time.value)}</time></span>
       </span>
       <ChevronRight size={17} aria-hidden="true" />
     </button>
@@ -82,6 +88,15 @@ export function HeadlineExplorer({ brief, initialEvent, context, contextBatch }:
     setLinkMissing(false);
     setSelectedId(id);
     replaceEventInUrl(id);
+    if (window.matchMedia("(max-width: 980px)").matches) {
+      window.setTimeout(() => {
+        const dossier = document.getElementById("event-dossier");
+        if (!dossier) return;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        dossier.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+        dossier.focus({ preventScroll: true });
+      }, 0);
+    }
   }
 
   function filterCategory(category: Category | "All") {
@@ -124,13 +139,13 @@ export function HeadlineExplorer({ brief, initialEvent, context, contextBatch }:
           <div className="research-toolbar">
             <div><span>筛选事件</span><strong>先看重要性，再看证据是否充分</strong></div>
             <div className="research-filters" aria-label="事件分类">
-              <button type="button" className={activeCategory === "All" ? "is-active" : ""} onClick={() => filterCategory("All")}>全部</button>
-              {categories.map((category) => <button type="button" className={activeCategory === category ? "is-active" : ""} onClick={() => filterCategory(category)} key={category}>{categoryDisplayNames[category]}</button>)}
+              <button type="button" aria-pressed={activeCategory === "All"} className={activeCategory === "All" ? "is-active" : ""} onClick={() => filterCategory("All")}>全部</button>
+              {categories.map((category) => <button type="button" aria-pressed={activeCategory === category} className={activeCategory === category ? "is-active" : ""} onClick={() => filterCategory(category)} key={category}>{categoryDisplayNames[category]}</button>)}
             </div>
           </div>
 
           <section className="research-layout">
-            <aside className="event-index" aria-label="市场事件列表">
+            <aside className="event-index" id="event-index" aria-label="市场事件列表">
               <header><span>影响排序</span><b>{visible.length} 项</b></header>
               <div>
                 {visible.map((headline) => <EventRow headline={headline} active={headline.id === selected?.id} onSelect={() => selectHeadline(headline.id)} key={headline.id} />)}
@@ -155,26 +170,35 @@ function EventDossier({ brief, headline, relatedSignals, context, contextBatch }
   const watch = brief.watchlist.find((item) => item.category === headline.category);
   const layers = headline.crossSourceCount ?? new Set(headline.sources.map((source) => source.type)).size;
   const equityImpacts = (headline.equityImpacts ?? []).filter((item) => item.reviewStatus !== "rejected");
+  const direction = headlineDirectionPresentation(headline);
+  const directionConfidence = headlineDirectionConfidence(headline);
 
   return (
-    <article className="event-dossier" id="event-dossier" key={headline.id}>
+    <article className="event-dossier" id="event-dossier" tabIndex={-1} aria-labelledby={`event-title-${headline.id}`} key={headline.id}>
+      <a className="mobile-back-to-list" href="#event-index">← 返回事件列表</a>
       <header className="dossier-header">
         <div className="dossier-kicker">
           <span>排名 {String(headline.rank).padStart(2, "0")}</span>
           <b>{headline.ticker}</b>
           <span>{categoryDisplayNames[headline.category]}</span>
-          <em className={`sentiment sentiment-${headline.sentiment}`}>{sentimentLabels[headline.sentiment]}</em>
+          <em className={`direction-badge direction-${direction.direction}`}><b aria-hidden="true">{direction.symbol}</b>{direction.label}</em>
         </div>
-        <h2>{headline.title}</h2>
+        <h2 id={`event-title-${headline.id}`}>{headline.title}</h2>
         <p>{headline.summary}</p>
         <div className="dossier-time"><Clock3 size={17} /><span>{timestampLabel(eventTime.kind)}</span><time dateTime={eventTime.value}>{formatBeijingMinute(eventTime.value)}</time><small>北京时间 · {eventTime.source ? sourceDisplayName(eventTime.source) : "来源待确认"}</small></div>
       </header>
 
       <section className="decision-strip" aria-label="事件判断指标">
+        <div className={`decision-direction direction-${direction.direction}`}><span>事件潜在方向</span><strong><b aria-hidden="true">{direction.symbol}</b>{direction.label}</strong></div>
         <div><Gauge size={17} /><span>市场影响</span><strong>{headline.impact}/5</strong></div>
-        <div><ShieldCheck size={17} /><span>系统信心</span><strong>{headline.confidence}%</strong></div>
+        <div><ShieldCheck size={17} /><span>资料可信度</span><strong>{headline.confidence}%</strong></div>
         <div><Activity size={17} /><span>时效分数</span><strong>{headline.freshnessScore ?? "—"}</strong></div>
         <div><Layers3 size={17} /><span>来源层级</span><strong>{layers}</strong></div>
+      </section>
+
+      <section className={`dossier-direction direction-${direction.direction}`} aria-label="方向判断依据">
+        <div><span>方向证据强度</span><strong>{directionConfidence}%</strong><small>不是上涨或下跌概率</small></div>
+        <p>{headlineDirectionRationale(headline)}</p>
       </section>
 
       <div className={`evidence-banner evidence-${evidence.level}`}>
@@ -201,20 +225,34 @@ function EventDossier({ brief, headline, relatedSignals, context, contextBatch }
       </div>
 
       {equityImpacts.length ? <section className="dossier-section equity-impact-dossier">
-        <header><Activity size={18} /><div><span>NEWS → US EQUITIES</span><h3>潜在受益／承压美股</h3></div><small>只显示数据库中可验证的股票</small></header>
+        <header><Activity size={18} /><div><span>新闻 → 美国股票</span><h3>预期传导与实际行情</h3></div><small>只显示数据库中可验证的股票</small></header>
         <div className="equity-impact-grid">
-          {equityImpacts.map((item) => <article className={`equity-impact-card equity-${item.direction}`} key={item.symbol}>
-            <div className="equity-impact-card-head"><b>{item.symbol}</b><span>{item.companyName}</span><em>{item.mappingConfidence}% 映射可信度</em></div>
-            <strong>{item.direction === "potential_upside" ? "潜在受益" : item.direction === "potential_downside" ? "潜在承压" : item.direction === "mixed" ? "多空并存" : "方向待确认"}</strong>
+          {equityImpacts.map((item) => {
+            const itemDirection = equityDirectionPresentation(item.direction);
+            const context = item.marketContext;
+            return <article className={`equity-impact-card equity-${item.direction}`} key={item.symbol}>
+            <div className="equity-impact-card-head"><b>{item.symbol}</b><span>{item.companyName}</span><em>关联可信度 {item.mappingConfidence}% · 方向证据 {item.directionConfidence ?? "—"}%</em></div>
+            <div className="equity-thesis-panel">
+              <small>事件推演</small>
+              <strong><b aria-hidden="true">{itemDirection.symbol}</b>{itemDirection.label}</strong>
+              <span>新闻可能如何传导，不是价格预测</span>
+            </div>
             <p>{item.mechanism}</p>
             <dl>
               <div><dt>关系</dt><dd>{item.relation === "issuer" ? "新闻主体" : item.relation === "supplier" ? "供应链" : item.relation === "customer" ? "客户" : item.relation === "competitor" ? "竞争者" : item.relation === "sector_peer" ? "同业" : "宏观暴露"}</dd></div>
-              <div><dt>行情资料</dt><dd>{item.marketContext?.lastPrice !== undefined ? `${item.marketContext.asOf} · $${item.marketContext.lastPrice.toFixed(2)}` : "暂无事件发生前的可用行情"}</dd></div>
             </dl>
+            {context?.return1dPct !== undefined ? <section className="equity-realized-block" aria-label={`${item.symbol} 实际行情，截至 ${context.asOf}`}>
+              <header><span>市场已发生</span><small>截至 {context.asOf}{context.lastPrice !== undefined ? ` · $${context.lastPrice.toFixed(2)}` : ""}{context.freshness === "stale" ? " · 资料偏旧" : context.freshness === "missing" ? " · 资料过期" : ""}</small></header>
+              <div className="equity-returns">
+                <span className={context.return1dPct > 0 ? "return-up" : context.return1dPct < 0 ? "return-down" : "return-flat"}><small>实际 1 日</small><b>{context.return1dPct > 0 ? "↑" : context.return1dPct < 0 ? "↓" : "—"} {formatReturn(context.return1dPct)}</b></span>
+                <span className={(context.return5dPct ?? 0) > 0 ? "return-up" : (context.return5dPct ?? 0) < 0 ? "return-down" : "return-flat"}><small>实际 5 日</small><b>{(context.return5dPct ?? 0) > 0 ? "↑" : (context.return5dPct ?? 0) < 0 ? "↓" : "—"} {formatReturn(context.return5dPct)}</b></span>
+                {context.volumeVs20d !== undefined && <span><small>成交量／20 日均量</small><b>{context.volumeVs20d.toFixed(2)}×</b></span>}
+              </div>
+            </section> : <section className="equity-realized-block is-unavailable"><header><span>市场已发生</span><small>暂无事件发生前的可用行情</small></header></section>}
             <footer><span>反向情景</span><p>{item.counterCase}</p></footer>
-          </article>)}
+          </article>})}
         </div>
-        <p className="equity-method-note">系统先确认公司代码或已审核业务暴露，再判断可能传导方向；结果不是股价预测，也不会把新闻后的涨跌倒推成因果关系。</p>
+        <p className="equity-method-note">“潜在利好／利空”是新闻传导判断；“实际 1 日／5 日”来自事件发生当日或之前的行情。两者并列展示，但实际涨跌不证明由这则新闻造成。</p>
       </section> : null}
 
       <section className="dossier-section evidence-section">

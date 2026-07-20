@@ -32,8 +32,16 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Category, DailyBrief, Headline, Sentiment, SourceType } from "@/lib/types";
+import type { Category, DailyBrief, Headline, MarketDirection, Sentiment, SourceType } from "@/lib/types";
 import { signalMetricLabel, signalStrength, socialSignalId } from "@/lib/investor-view";
+import {
+  equityDirectionPresentation,
+  formatReturn,
+  headlineDirectionConfidence,
+  headlineDirectionPresentation,
+  headlineDirectionRationale,
+  marketDirectionCounts,
+} from "@/lib/market-direction";
 import { categoryDisplayNames as categoryLabels, extractTermNotes, sourceDisplayName } from "@/lib/terms";
 import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
 
@@ -178,6 +186,109 @@ function SentimentMark({ value }: { value: Sentiment }) {
   );
 }
 
+function userFacingBriefWarning(value?: string): string | null {
+  if (!value) return null;
+  if (/自动翻译.*待人工确认|headlines\.[\w-]+\.|keyPoints\[\d+\]/i.test(value)) {
+    return "少数内容仍在自动翻译，将在下一次更新继续处理；英文原文会保留供核对。";
+  }
+  const cleaned = value.replace(/headlines\.[\w-]+(?:\.[\w]+(?:\[\d+\])?)?/gi, "个别内容").replace(/\s+/g, " ").trim();
+  return cleaned.length > 180 ? `${cleaned.slice(0, 177)}…` : cleaned;
+}
+
+function DirectionBadge({ headline, compact = false }: { headline: Headline; compact?: boolean }) {
+  const direction = headlineDirectionPresentation(headline);
+  return (
+    <span
+      className={`direction-badge direction-${direction.direction}${compact ? " is-compact" : ""}`}
+      aria-label={`事件潜在方向：${direction.label}`}
+    >
+      <b aria-hidden="true">{direction.symbol}</b>{compact ? direction.compactLabel : direction.label}
+    </span>
+  );
+}
+
+function ReturnValue({ value, label }: { value: number | undefined; label: string }) {
+  if (value === undefined || !Number.isFinite(value)) return null;
+  const direction = value > 0 ? "up" : value < 0 ? "down" : "flat";
+  return <span className={`return-value return-${direction}`}><small>{label}</small><b>{value > 0 ? "↑" : value < 0 ? "↓" : "—"} {formatReturn(value)}</b></span>;
+}
+
+const marketTonePresentation: Record<MarketDirection, { symbol: string; label: string; summary: string }> = {
+  bullish: { symbol: "↑", label: "事件结构偏多", summary: "潜在利好事件占上风，但仍需结合实际行情确认。" },
+  bearish: { symbol: "↓", label: "事件结构偏空", summary: "潜在利空事件占上风，优先检查风险暴露与后续确认点。" },
+  mixed: { symbol: "↕", label: "市场分歧升高", summary: "利好与利空同时存在，单一方向判断容易遗漏风险。" },
+  neutral: { symbol: "—", label: "方向尚未形成", summary: "现有证据不足以支持明确方向，继续等待可靠来源。" },
+};
+
+function DirectionOverview({
+  headlines,
+  watchlist,
+  contextBatch,
+}: {
+  headlines: Headline[];
+  watchlist: DailyBrief["watchlist"];
+  contextBatch?: string;
+}) {
+  const topStories = [...headlines].sort((left, right) => left.rank - right.rank).slice(0, 5);
+  const counts = marketDirectionCounts(topStories);
+  const total = counts.bullish + counts.bearish + counts.mixed + counts.neutral;
+  const marketTone: MarketDirection = counts.mixed >= Math.max(counts.bullish, counts.bearish) && counts.mixed > 0
+    ? "mixed"
+    : counts.bullish > counts.bearish
+      ? "bullish"
+      : counts.bearish > counts.bullish
+        ? "bearish"
+        : counts.bullish > 0 || counts.bearish > 0
+          ? "mixed"
+          : "neutral";
+  const tone = marketTonePresentation[marketTone];
+  const lead = topStories[0];
+  const leadDirection = lead ? headlineDirectionPresentation(lead) : undefined;
+  const nextWatch = watchlist[0];
+  const sourceLayers = topStories.reduce((sum, headline) => sum + sourceLayerCount(headline), 0);
+
+  return (
+    <section className={`executive-snapshot direction-${marketTone}`} aria-labelledby="executive-snapshot-title">
+      <header className="snapshot-verdict">
+        <span>今日快速结论</span>
+        <h2 id="executive-snapshot-title"><b aria-hidden="true">{tone.symbol}</b>{tone.label}</h2>
+        <p>{tone.summary}</p>
+        <small>依据前五大事件的潜在传导整理，不是指数涨跌预测。</small>
+      </header>
+
+      {lead ? <a className="snapshot-lead" href={`/headlines?event=${encodeURIComponent(lead.id)}${liveContextSuffix(contextBatch)}`}>
+        <span>第一重要事件</span>
+        <h3>{lead.title}</h3>
+        <p>{lead.marketImpact}</p>
+        <footer>
+          <strong className={`direction-${leadDirection?.direction}`}><b aria-hidden="true">{leadDirection?.symbol}</b>{leadDirection?.label}</strong>
+          <small>影响 {lead.impact}/5 · {sourceLayerCount(lead)} 类来源</small>
+          <ArrowRight size={16} aria-hidden="true" />
+        </footer>
+      </a> : null}
+
+      <article className="snapshot-watch">
+        <span>下一催化剂</span>
+        {nextWatch ? <>
+          <div><time>{nextWatch.time}</time><small>{categoryLabels[nextWatch.category]}</small></div>
+          <h3>{nextWatch.event}</h3>
+          <p>{nextWatch.why}</p>
+        </> : <p>目前没有明确的下一项确认点。</p>}
+      </article>
+
+      <footer className="snapshot-footer">
+        <div className="snapshot-distribution" aria-label={`前五大事件方向分布，共 ${total} 则`}>
+          <span className="direction-bullish"><b>↑ {counts.bullish}</b> 潜在利好</span>
+          <span className="direction-bearish"><b>↓ {counts.bearish}</b> 潜在利空</span>
+          <span className="direction-mixed"><b>↕ {counts.mixed}</b> 多空并存</span>
+          <span className="direction-neutral"><b>— {counts.neutral}</b> 待确认</span>
+        </div>
+        <small>{total} 则核心事件 · {sourceLayers} 个来源层级交叉检查</small>
+      </footer>
+    </section>
+  );
+}
+
 function pulseTime(value?: string) {
   const formatted = formatBeijingMinute(value);
   const match = formatted.match(/(\d{2}:\d{2})$/);
@@ -223,9 +334,10 @@ function MarketPulse({ headlines, contextBatch }: { headlines: Headline[]; conte
         {topStories.map((headline) => {
           const newsTime = resolveHeadlineTimestamp(headline);
           const layers = sourceLayerCount(headline);
+          const direction = headlineDirectionPresentation(headline);
           return (
             <a
-              className={`pulse-event pulse-impact-${headline.impact} pulse-layers-${Math.min(layers, 4)}`}
+              className={`pulse-event pulse-impact-${headline.impact} pulse-layers-${Math.min(layers, 4)} pulse-direction-${direction.direction}`}
               href={`/headlines?event=${encodeURIComponent(headline.id)}${liveContextSuffix(contextBatch)}`}
               key={headline.id}
               role="listitem"
@@ -234,7 +346,7 @@ function MarketPulse({ headlines, contextBatch }: { headlines: Headline[]; conte
               <div className="pulse-meta"><span>排名 {String(headline.rank).padStart(2, "0")}</span><time dateTime={newsTime.value}>{pulseTime(newsTime.value)}</time></div>
               <i className="pulse-node"><span /></i>
               <div className="pulse-copy"><strong>{headline.ticker}</strong><span>{headline.title}</span></div>
-              <small><ImpactDots score={headline.impact} />{layers} 类来源<ChevronRight size={14} aria-hidden="true" /></small>
+              <small><DirectionBadge headline={headline} compact /><span>{layers} 类来源</span><ChevronRight size={14} aria-hidden="true" /></small>
             </a>
           );
         })}
@@ -266,9 +378,13 @@ function WatchPanel({ items }: { items: DailyBrief["watchlist"] }) {
 
 function HeadlineCard({ headline, contextBatch }: { headline: Headline; contextBatch?: string }) {
   const newsTime = resolveHeadlineTimestamp(headline);
-  const visibleEquities = (headline.equityImpacts ?? []).filter((item) => item.reviewStatus !== "rejected" && item.mappingConfidence >= 70).slice(0, 3);
+  const direction = headlineDirectionPresentation(headline);
+  const directionConfidence = headlineDirectionConfidence(headline);
+  const visibleEquities = (headline.equityImpacts ?? []).filter((item) => item.reviewStatus !== "rejected"
+    && item.mappingConfidence >= 70
+    && Math.min(item.mappingConfidence, item.directionConfidence ?? item.mappingConfidence) >= 60).slice(0, 3);
   return (
-    <article className={`headline-card headline-rank-${headline.rank}`} id={`headline-${headline.id}`}>
+    <article className={`headline-card headline-rank-${headline.rank} headline-direction-${direction.direction}`} id={`headline-${headline.id}`}>
       <div className="rank-column">
         <small>排名</small>
         <span>{String(headline.rank).padStart(2, "0")}</span>
@@ -278,9 +394,14 @@ function HeadlineCard({ headline, contextBatch }: { headline: Headline; contextB
         <div className="headline-eyebrow">
           <span className="ticker">{headline.ticker}</span>
           <span>{categoryLabels[headline.category]}</span>
-          <SentimentMark value={headline.sentiment} />
+          <DirectionBadge headline={headline} />
         </div>
         <h3>{headline.title}</h3>
+        <section className={`headline-decision direction-${direction.direction}`} aria-label="事件方向判断">
+          <div><span>事件潜在方向</span><strong><b aria-hidden="true">{direction.symbol}</b>{direction.label}</strong></div>
+          <p>{headlineDirectionRationale(headline)}</p>
+          <small>方向证据强度 {directionConfidence}% · 不是上涨或下跌概率</small>
+        </section>
         {(headline.termNotes?.length || extractTermNotes(headline).length) ? <div className="term-notes" aria-label="英文术语说明">
           <span>英文术语：</span>
           {(headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline)).map((item) => <em key={item.term}><b>{item.term}</b>＝{item.note}</em>)}
@@ -296,16 +417,28 @@ function HeadlineCard({ headline, contextBatch }: { headline: Headline; contextB
           <div><ListChecks size={16} /><span>重要信息</span></div>
           <ul>{headline.keyPoints.map((point, index) => <li key={`${headline.id}-fact-${index}`}>{point}</li>)}</ul>
         </div> : null}
-        <div className="impact-note">
+        <div className={`impact-note impact-direction-${direction.direction}`}>
           <span>市场影响</span>
           <p>{headline.marketImpact}</p>
         </div>
         {visibleEquities.length ? <section className="equity-impact-summary" aria-label="新闻关联美股">
-          <header><TrendingUp size={16} /><div><span>NEWS → STOCKS</span><strong>潜在受益／承压美股</strong></div><small>映射可信度，不是上涨概率</small></header>
+          <header><TrendingUp size={16} /><div><span>新闻 → 美股</span><strong>预期传导与实际行情</strong></div><small>两者不代表因果关系</small></header>
           <div>
-            {visibleEquities.map((item) => <a href={`/headlines?event=${encodeURIComponent(headline.id)}${liveContextSuffix(contextBatch)}`} className={`equity-chip equity-${item.direction}`} title={item.mechanism} key={item.symbol}>
-              <b>{item.symbol}</b><span>{item.direction === "potential_upside" ? "潜在受益" : item.direction === "potential_downside" ? "潜在承压" : item.direction === "mixed" ? "多空并存" : "方向待确认"}</span><em>{item.mappingConfidence}%</em>
-            </a>)}
+            {visibleEquities.map((item) => {
+              const itemDirection = equityDirectionPresentation(item.direction);
+              return <a href={`/headlines?event=${encodeURIComponent(headline.id)}${liveContextSuffix(contextBatch)}`} className={`equity-chip equity-${item.direction}`} key={item.symbol}>
+                <span className="equity-chip-heading">
+                  <b>{item.symbol}</b>
+                  <span className="equity-thesis"><small>事件推演</small><strong><i aria-hidden="true">{itemDirection.symbol}</i>{itemDirection.label}</strong></span>
+                </span>
+                <em>关联可信度 {item.mappingConfidence}% · 方向证据 {item.directionConfidence ?? "—"}%</em>
+                {item.marketContext?.return1dPct !== undefined ? <span className="equity-chip-market">
+                  <small><b>市场已发生</b> · 截至 {item.marketContext.asOf}</small>
+                  <ReturnValue value={item.marketContext.return1dPct} label="1日" />
+                  <ReturnValue value={item.marketContext.return5dPct} label="5日" />
+                </span> : <small className="equity-chip-no-market">暂无事件发生前的可用行情</small>}
+              </a>;
+            })}
           </div>
         </section> : null}
         <footer className="headline-footer">
@@ -378,13 +511,17 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   const nextRefreshAtRef = useRef(0);
   const activeRequestRef = useRef<AbortController | null>(null);
 
-  const categories = useMemo(() => {
-    return Array.from(new Set(brief.headlines.map((headline) => headline.category)));
+  const dailyHeadlines = useMemo(() => {
+    return [...brief.headlines].sort((left, right) => left.rank - right.rank).slice(0, 5);
   }, [brief.headlines]);
 
+  const categories = useMemo(() => {
+    return Array.from(new Set(dailyHeadlines.map((headline) => headline.category)));
+  }, [dailyHeadlines]);
+
   const visibleHeadlines = activeCategory === "All"
-    ? brief.headlines
-    : brief.headlines.filter((headline) => headline.category === activeCategory);
+    ? dailyHeadlines
+    : dailyHeadlines.filter((headline) => headline.category === activeCategory);
 
   const [year, month, day] = brief.date.split("-").map(Number);
   const weekday = ["日", "一", "二", "三", "四", "五", "六"][new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
@@ -402,6 +539,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   const generatedLabel = `${generated.year}-${generated.month}-${generated.day} ${generated.hour}:${generated.minute} BJT`;
   const countdownLabel = formatCountdown(secondsUntilRefresh);
   const lastSuccessfulLabel = pulseTime(lastSuccessfulAt);
+  const fallbackCollectors = brief.collectorStatuses?.filter((status) => status.fallbackUsed).length ?? 0;
 
   const refreshBrief = useCallback(async (origin: RefreshOrigin = "manual") => {
     if (requestInFlightRef.current) return;
@@ -436,18 +574,18 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
       setContextBatch(response.headers.get("X-AnalystArena-Batch") ?? undefined);
       setLastSuccessfulAt(nextBrief.generatedAt);
       setRefreshFallback(fallback);
+      const warning = userFacingBriefWarning(nextBrief.warning);
 
       if (fallback !== "none") {
-        setActiveCategory((current) => origin === "manual" || current === "All" || !nextBrief.headlines.some((headline) => headline.category === current) ? "All" : current);
+        setActiveCategory((current) => origin === "manual" || current === "All" || !nextBrief.headlines.slice(0, 5).some((headline) => headline.category === current) ? "All" : current);
         const source = fallbackLabels[fallback];
-        const warning = nextBrief.warning ? ` ${nextBrief.warning}` : "";
-        setNotice(`${origin === "manual" ? "手动采集暂未取得新快照" : "自动采集暂未取得新快照"}，已显示${source}（内容时间：${formatBeijingMinute(nextBrief.generatedAt)}）。${warning}`);
+        setNotice(`${origin === "manual" ? "手动采集暂未取得新快照" : "自动采集暂未取得新快照"}，已显示${source}（内容时间：${formatBeijingMinute(nextBrief.generatedAt)}）。${warning ? ` ${warning}` : ""}`);
       } else if (origin === "manual") {
         setActiveCategory("All");
-        setNotice(nextBrief.warning || `手动更新完成：${nextBrief.stats.candidates} 则素材已进入分析流程。`);
+        setNotice(warning || `手动更新完成：${nextBrief.stats.consolidatedEvents} 个事件已完成合并与排序。`);
       } else {
-        setActiveCategory((current) => current === "All" || nextBrief.headlines.some((headline) => headline.category === current) ? current : "All");
-        setNotice(nextBrief.warning ? `自动更新完成，但服务端提示：${nextBrief.warning}` : null);
+        setActiveCategory((current) => current === "All" || nextBrief.headlines.slice(0, 5).some((headline) => headline.category === current) ? current : "All");
+        setNotice(warning ? `自动更新完成。${warning}` : null);
       }
     } catch (error) {
       const timedOut = error instanceof DOMException && error.name === "AbortError";
@@ -557,7 +695,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           <div><CircleDot /> Reddit 社区 / X 平台信号</div>
         </div>
         <div className="system-card">
-          <div><Activity size={15} /><span>采集状态</span><b>{brief.stats.sourcesOnline} 个来源在线</b></div>
+          <div><Activity size={15} /><span>采集状态</span><b>{fallbackCollectors ? `${fallbackCollectors} 个来源使用备用线路` : `${brief.stats.sourcesOnline} 个来源在线`}</b></div>
           <div><Bot size={15} /><span>分析引擎</span><b>{brief.aiEnabled ? "AI 智能分析" : "规则分析"}</b></div>
           <div><Globe2 size={15} /><span>自动翻译</span><b>{brief.translationEnabled ? "简体中文" : "待更新"}</b></div>
           <p><i /> {brief.status === "published" ? "已发布版本" : "草稿／预览版本"}</p>
@@ -595,10 +733,10 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
               )}
             </div>
             <span className={`mode-badge mode-${brief.mode}`}>{refreshFallback !== "none" ? fallbackLabels[refreshFallback] : brief.status === "published" ? "已发布" : brief.status === "draft" ? "今日草稿 · 待审核" : brief.mode === "live" ? "实时预览" : "示范模式"}</span>
-            <button className="secondary-button" type="button" onClick={() => void exportPdf()} disabled={isExporting}><Download size={16} />{isExporting ? "制作中…" : brief.status === "published" ? "前五大 PDF" : "预览 PDF"}</button>
-            <button className="primary-button" type="button" onClick={() => void refreshBrief("manual")} disabled={isRefreshing}>
+            <button className="secondary-button pdf-action" type="button" onClick={() => void exportPdf()} disabled={isExporting} aria-label={isExporting ? "正在制作 PDF" : "下载前五大事件 PDF"}><Download size={16} /><span>{isExporting ? "制作中…" : brief.status === "published" ? "前五大 PDF" : "预览 PDF"}</span></button>
+            <button className="primary-button refresh-action" type="button" onClick={() => void refreshBrief("manual")} disabled={isRefreshing} aria-label={isRefreshing ? "正在更新今日简报" : "立即更新今日简报"}>
               <RefreshCw size={16} className={isRefreshing ? "is-spinning" : ""} />
-              {isRefreshing ? refreshOrigin === "manual" ? "手动更新中..." : "自动更新中..." : "立即更新"}
+              <span>{isRefreshing ? refreshOrigin === "manual" ? "手动更新中..." : "自动更新中..." : "立即更新"}</span>
             </button>
           </div>
         </header>
@@ -612,27 +750,22 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
             </div>
             <div className="masthead-note">
               <span>今日决策入口</span>
-              <p>先看市场冲击带，再进入前五大事件。每则结论都保留时间、重要信息和原始来源。</p>
+              <p>先看今日快速结论，再进入前五大事件。每则结论都保留时间、重要信息和原始来源。</p>
               <div className="briefing-signal"><CheckCircle2 size={16} />官方与新闻负责验证，社交讨论负责发现信号</div>
               <dl className="intelligence-status">
-                <div><dt><Gauge size={15} />核心事件</dt><dd>{brief.stats.topStories} 则</dd></div>
-                <div><dt><Layers3 size={15} />合并素材</dt><dd>{brief.stats.consolidatedEvents} 组</dd></div>
+                <div><dt><Gauge size={15} />核心事件</dt><dd>{dailyHeadlines.length} 则</dd></div>
+                <div><dt><Layers3 size={15} />事件合并</dt><dd>{brief.stats.consolidatedEvents} 组</dd></div>
                 <div><dt><Timer size={15} />更新时间</dt><dd>{generated.hour}:{generated.minute}</dd></div>
               </dl>
               <small className="print-disclaimer">本报告为信息整理与研究工具，不构成投资建议。请由原始来源完成独立查证。</small>
             </div>
           </section>
 
+          <DirectionOverview headlines={dailyHeadlines} watchlist={brief.watchlist} contextBatch={contextBatch} />
+
           {notice && <div className="notice-bar" role="status" aria-live="polite"><Sparkles size={15} /><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="关闭通知">×</button></div>}
 
-          <MarketPulse headlines={brief.headlines} contextBatch={contextBatch} />
-
-          <section className="stat-grid" aria-label="本日分析摘要">
-            <div><span>进入分析</span><strong>{brief.stats.candidates}</strong><small>候选素材</small></div>
-            <div><span>完成合并</span><strong>{brief.stats.consolidatedEvents}</strong><small>独立市场事件</small></div>
-            <div><span>今日必读</span><strong>{brief.stats.topStories}</strong><small>影响排序头条</small></div>
-            <div className="stat-accent"><span>验证网络</span><strong>{brief.stats.sourcesOnline}</strong><small>在线信息来源</small></div>
-          </section>
+          <MarketPulse headlines={dailyHeadlines} contextBatch={contextBatch} />
 
           <div className="section-heading" id="headlines">
             <div><span>按市场影响排序</span><h2>今日五大重要事件</h2></div>
@@ -659,7 +792,10 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
                   {brief.marketHeat.map((item) => (
                     <div className="heat-row" key={item.category}>
                       <div><strong>{categoryLabels[item.category]}</strong><span>{item.note}</span></div>
-                      <ImpactDots score={item.score} />
+                      <div className={`heat-direction heat-direction-${item.direction}`}>
+                        <span>{item.direction === "up" ? "↑ 利好事件较多" : item.direction === "down" ? "↓ 利空事件较多" : "— 多空平衡"}</span>
+                        <b>{item.score}/5</b>
+                      </div>
                     </div>
                   ))}
                 </div>

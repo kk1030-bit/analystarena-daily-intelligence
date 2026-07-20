@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { chromium as playwrightChromium, type Browser, type Page } from "playwright-core";
 import serverlessChromium from "@sparticuz/chromium";
 import type { CollectorStatus, RawStory } from "../types";
+import { collectFirstAvailable, safeCollectorNote } from "./router";
 
 const redditCommunities = ["stocks", "investing", "SecurityAnalysis", "MachineLearning"];
 const xQueries = ["Nvidia", "OpenAI", "FOMC", "TSMC", "semiconductor", "AI capex"];
@@ -50,20 +51,16 @@ async function launchBrowser(): Promise<Browser> {
   });
 }
 
-async function collectReddit(page: Page): Promise<RawStory[]> {
+async function collectReddit(page: Page, host: "www.reddit.com" | "old.reddit.com"): Promise<RawStory[]> {
   const stories: RawStory[] = [];
   const isRender = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID);
   const communitiesForRun = isRender ? redditCommunities.slice(0, 1) : redditCommunities;
   for (const community of communitiesForRun) {
     let rows: Array<{ title: string; url: string; comments: string; score: string; publishedAt: string }> = [];
-    const candidates = isRender
-      ? [`https://www.reddit.com/r/${community}/hot/`]
-      : [`https://www.reddit.com/r/${community}/hot/`, `https://old.reddit.com/r/${community}/hot/`];
-    for (const candidate of candidates) {
-      try {
-        await page.goto(candidate, { waitUntil: "commit", timeout: isRender ? 7_000 : 10_000 });
-        await page.waitForLoadState("domcontentloaded", { timeout: isRender ? 2_000 : 5_000 }).catch(() => undefined);
-        rows = await page.locator("body").evaluate((body) => {
+    try {
+      await page.goto(`https://${host}/r/${community}/hot/`, { waitUntil: "commit", timeout: isRender ? 7_000 : 10_000 });
+      await page.waitForLoadState("domcontentloaded", { timeout: isRender ? 2_000 : 5_000 }).catch(() => undefined);
+      rows = await page.locator("body").evaluate((body) => {
           const modern = Array.from(body.querySelectorAll("shreddit-post")).slice(0, 8).map((node) => {
             const element = node as HTMLElement;
             const title = element.getAttribute("post-title") ?? element.querySelector("h3")?.textContent?.trim() ?? "";
@@ -90,11 +87,10 @@ async function collectReddit(page: Page): Promise<RawStory[]> {
               publishedAt: time?.dateTime ?? "",
             };
           });
-        });
-        if (rows.length) break;
-      } catch {
-        // Try the alternate Reddit surface before giving up on this community.
-      }
+      });
+    } catch {
+      // Continue with the remaining communities; the route-level fallback will
+      // try another Reddit surface when this backend yields no usable rows.
     }
 
     for (const row of rows) {
@@ -183,34 +179,23 @@ export async function collectBrowserStories(): Promise<{ stories: RawStory[]; st
     const page = await context.newPage();
     page.setDefaultTimeout(10_000);
 
-    try {
-      const reddit = await collectReddit(page);
-      stories.push(...reddit);
-      statuses.push({
-        name: "Reddit Playwright",
-        ok: reddit.length > 0,
-        count: reddit.length,
-        note: reddit.length ? undefined : "浏览器来源未返回内容，已由 Reddit RSS 备用源接手",
-      });
-    } catch (error) {
-      statuses.push({ name: "Reddit Playwright", ok: false, count: 0, note: error instanceof Error ? error.message : "采集器运行失败" });
-    }
+    const reddit = await collectFirstAvailable("Reddit", [
+      { name: "Playwright · Reddit 主站", collect: () => collectReddit(page, "www.reddit.com") },
+      { name: "Playwright · Reddit 旧版", collect: () => collectReddit(page, "old.reddit.com") },
+    ]);
+    stories.push(...reddit.items);
+    statuses.push(reddit.status);
 
-    try {
-      const x = await collectX(page);
-      stories.push(...x);
-      statuses.push({
-        name: "X Playwright",
-        ok: x.length > 0,
-        count: x.length,
-        note: !process.env.X_AUTH_TOKEN ? "未设置 X 登录凭证（X_AUTH_TOKEN），已跳过需要登录的搜索" : x.length ? undefined : "X 搜索未返回可用帖子",
-      });
-    } catch (error) {
-      statuses.push({ name: "X Playwright", ok: false, count: 0, note: error instanceof Error ? error.message : "采集器运行失败" });
-    }
+    const x = await collectFirstAvailable("X", [{
+      name: "Playwright · X 登录态",
+      collect: () => process.env.X_AUTH_TOKEN
+        ? collectX(page)
+        : Promise.reject(new Error("未配置 X 登录凭证，已跳过需要登录的搜索")),
+    }]);
+    stories.push(...x.items);
+    statuses.push(x.status);
   } catch (error) {
-    const note = error instanceof Error ? error.message : "browser launch failed";
-    statuses.push({ name: "Browser runtime", ok: false, count: 0, note });
+    statuses.push({ name: "Browser runtime", channel: "Browser", backend: "Playwright", ok: false, count: 0, note: safeCollectorNote(error) });
   } finally {
     await browser?.close().catch(() => undefined);
   }
