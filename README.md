@@ -1,5 +1,7 @@
 # AnalystArena Daily Intelligence
 
+> 本週開發主線：[7/21–7/26 可稽核投資晨報迭代任務](docs/tasks/2026-07-21-07-26-auditable-daily-brief.md) · [GitHub Issue #12](https://github.com/kk1030-bit/analystarena-daily-intelligence/issues/12)
+
 把官方公告、新闻、Reddit 与 X 的公开信号整理成“可审核、可发布、可保存 PDF”的每日投资情报。
 
 ## 在线入口
