@@ -17,7 +17,14 @@ export interface SourceLink {
   name: string;
   type: SourceType;
   url: string;
+  sourceDocumentId?: string;
+  nativeId?: string;
+  feedNamespace?: string;
+  canonicalUrl?: string;
+  originalTitle?: string;
+  contentHash?: string;
   publishedAt?: string;
+  collectedAt?: string;
   timestampKind?: TimestampKind;
 }
 
@@ -132,6 +139,7 @@ export interface DailyBrief {
   status?: BriefStatus;
   publishedAt?: string;
   storageMode?: "postgres" | "memory";
+  snapshot?: BriefSnapshotMetadata;
   collectorStatuses?: CollectorStatus[];
   warning?: string;
   stats: {
@@ -151,15 +159,118 @@ export interface DailyBrief {
 
 export interface RawStory {
   id: string;
+  sourceDocumentId?: string;
+  nativeId?: string;
+  feedNamespace?: string;
+  canonicalUrl?: string;
   title: string;
+  originalTitle?: string;
   description: string;
+  originalDescription?: string;
   url: string;
   publishedAt: string;
+  updatedAt?: string;
   source: string;
   sourceType: SourceType;
   engagement?: number;
   collectedAt?: string;
+  firstCollectedAt?: string;
+  lastCollectedAt?: string;
+  contentHash?: string;
   timestampKind?: TimestampKind;
+}
+
+export type BriefSnapshotStream =
+  | "shared"
+  | "manual"
+  | "privileged"
+  | "cron"
+  | "generate"
+  | "review"
+  | "publish"
+  | "legacy"
+  | "unspecified";
+
+export interface BriefSnapshotMetadata {
+  id: string;
+  runId: string;
+  stream: BriefSnapshotStream;
+  batchKey: string;
+  sequenceNumber: number;
+  previousSnapshotId?: string;
+  payloadHash: string;
+  persistedAt: string;
+}
+
+export interface CollectionRunRecord {
+  id: string;
+  stream: BriefSnapshotStream;
+  batchKey: string;
+  status: "running" | "success" | "failed";
+  briefDate: string;
+  inputHash?: string;
+  startedAt: string;
+  completedAt?: string;
+  errorCode?: string;
+  errorDetail?: string;
+}
+
+export interface EventRecord {
+  id: string;
+  stableKey: string;
+  canonicalTitle: string;
+  category: Category;
+  ticker: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  identityQuality: "source_alias" | "semantic_high" | "new" | "legacy_unmatched";
+}
+
+export interface EventVersionRecord {
+  id: string;
+  eventId: string;
+  versionNumber: number;
+  previousVersionId?: string;
+  contentHash: string;
+  evidenceHash: string;
+  stateHash: string;
+  presentationHash: string;
+  observedAt: string;
+  runId: string;
+  headline: Headline;
+  createdAt: string;
+}
+
+export type EventMatchMethod = "existing_id" | "source_alias" | "semantic_high" | "new" | "legacy";
+
+export interface BriefSnapshotEventRecord {
+  snapshotId: string;
+  eventId: string;
+  eventVersionId: string;
+  rank: number;
+  rankingScore?: number;
+  freshnessScore?: number;
+  impact: number;
+  confidence: number;
+  mentions: number;
+  crossSourceCount?: number;
+  matchMethod: EventMatchMethod;
+  matchConfidence: number;
+}
+
+export interface BriefSnapshotRecord {
+  id: string;
+  runId: string;
+  stream: BriefSnapshotStream;
+  batchKey: string;
+  sequenceNumber: number;
+  date: string;
+  generatedAt: string;
+  previousSnapshotId?: string;
+  payloadHash: string;
+  brief: DailyBrief;
+  createdAt: string;
+  events: BriefSnapshotEventRecord[];
 }
 
 export interface RedditPost {

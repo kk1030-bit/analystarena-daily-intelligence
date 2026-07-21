@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isAdminRequest } from "@/lib/auth";
-import { getBrief, updateDraft } from "@/lib/db";
+import { getBrief, StaleBriefRevisionError, updateDraft } from "@/lib/db";
 import { attachEquityImpacts } from "@/lib/equity-impact";
 import { localizeBriefContent } from "@/lib/translation";
 import type { DailyBrief } from "@/lib/types";
@@ -28,8 +28,15 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (!body.brief?.headlines?.length) return NextResponse.json({ error: "日报内容不完整" }, { status: 400 });
     const localized = await localizeBriefContent(body.brief, { strict: true });
     const headlines = await attachEquityImpacts(localized.headlines);
-    return NextResponse.json(await updateDraft(id, { ...localized, headlines }));
+    return NextResponse.json(await updateDraft(id, { ...localized, headlines }, {
+      stream: "review",
+      batchKey: `review:${id}:${Date.now()}`,
+      expectedSnapshotId: body.brief.snapshot?.id,
+    }));
   } catch (error) {
+    if (error instanceof StaleBriefRevisionError) {
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
+    }
     return NextResponse.json({ error: error instanceof Error ? error.message : "更新失败" }, { status: 400 });
   }
 }

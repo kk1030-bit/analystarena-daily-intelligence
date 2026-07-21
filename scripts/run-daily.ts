@@ -11,7 +11,10 @@ const response = await fetch(endpoint, {
     Authorization: `Bearer ${secret}`,
     "Content-Type": "application/json",
   },
-  body: JSON.stringify(collected),
+  body: JSON.stringify({
+    ...collected,
+    batchKey: `github-actions:${process.env.GITHUB_RUN_ID ?? "local"}:${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`,
+  }),
   signal: AbortSignal.timeout(240_000),
 });
 const body = await response.text();

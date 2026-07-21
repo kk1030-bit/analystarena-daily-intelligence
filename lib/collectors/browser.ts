@@ -2,16 +2,11 @@ import { existsSync } from "node:fs";
 import { chromium as playwrightChromium, type Browser, type Page } from "playwright-core";
 import serverlessChromium from "@sparticuz/chromium";
 import type { CollectorStatus, RawStory } from "../types";
+import { ensureRawStoryIdentity } from "../source-identity";
 import { collectFirstAvailable, safeCollectorNote } from "./router";
 
 const redditCommunities = ["stocks", "investing", "SecurityAnalysis", "MachineLearning"];
 const xQueries = ["Nvidia", "OpenAI", "FOMC", "TSMC", "semiconductor", "AI capex"];
-
-function idFor(value: string): string {
-  let hash = 0;
-  for (const character of value) hash = (hash * 31 + character.charCodeAt(0)) | 0;
-  return Math.abs(hash).toString(36);
-}
 
 function numberFromLabel(value: string): number {
   const match = value.replace(/,/g, "").match(/([\d.]+)\s*([KMB]?)/i);
@@ -56,7 +51,7 @@ async function collectReddit(page: Page, host: "www.reddit.com" | "old.reddit.co
   const isRender = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID);
   const communitiesForRun = isRender ? redditCommunities.slice(0, 1) : redditCommunities;
   for (const community of communitiesForRun) {
-    let rows: Array<{ title: string; url: string; comments: string; score: string; publishedAt: string }> = [];
+    let rows: Array<{ title: string; url: string; nativeId: string; comments: string; score: string; publishedAt: string }> = [];
     try {
       await page.goto(`https://${host}/r/${community}/hot/`, { waitUntil: "commit", timeout: isRender ? 7_000 : 10_000 });
       await page.waitForLoadState("domcontentloaded", { timeout: isRender ? 2_000 : 5_000 }).catch(() => undefined);
@@ -64,10 +59,14 @@ async function collectReddit(page: Page, host: "www.reddit.com" | "old.reddit.co
           const modern = Array.from(body.querySelectorAll("shreddit-post")).slice(0, 8).map((node) => {
             const element = node as HTMLElement;
             const title = element.getAttribute("post-title") ?? element.querySelector("h3")?.textContent?.trim() ?? "";
-            const href = element.getAttribute("content-href") ?? element.querySelector<HTMLAnchorElement>("a[slot='full-post-link']")?.href ?? "";
+            const href = element.getAttribute("permalink")
+              ?? element.querySelector<HTMLAnchorElement>("a[slot='full-post-link']")?.href
+              ?? element.getAttribute("content-href")
+              ?? "";
             return {
               title,
               url: href.startsWith("http") ? href : `${location.origin}${href}`,
+              nativeId: (element.getAttribute("post-id") ?? element.id ?? "").replace(/^t3_/i, ""),
               comments: element.getAttribute("comment-count") ?? "",
               score: element.getAttribute("score") ?? "",
               publishedAt: element.getAttribute("created-timestamp") ?? "",
@@ -81,7 +80,8 @@ async function collectReddit(page: Page, host: "www.reddit.com" | "old.reddit.co
             const time = node.querySelector<HTMLTimeElement>("time");
             return {
               title: title?.textContent?.trim() ?? "",
-              url: title?.href ?? "",
+              url: comments?.href ?? title?.href ?? "",
+              nativeId: (node.getAttribute("data-fullname") ?? "").replace(/^t3_/i, ""),
               comments: comments?.textContent ?? "",
               score: score?.getAttribute("title") ?? score?.textContent ?? "",
               publishedAt: time?.dateTime ?? "",
@@ -97,9 +97,11 @@ async function collectReddit(page: Page, host: "www.reddit.com" | "old.reddit.co
       if (!row.title || !row.url) continue;
       const engagement = numberFromLabel(row.score) + numberFromLabel(row.comments) * 2;
       const timestamp = preciseTimestamp(row.publishedAt);
-      stories.push({
-        id: idFor(`reddit:${community}:${row.title}`),
+      stories.push(ensureRawStoryIdentity({
+        id: row.url,
+        nativeId: row.nativeId || undefined,
         title: row.title,
+        originalTitle: row.title,
         description: `Reddit r/${community} 热门讨论，互动指标 ${engagement}。`,
         url: row.url,
         publishedAt: timestamp.publishedAt,
@@ -108,7 +110,7 @@ async function collectReddit(page: Page, host: "www.reddit.com" | "old.reddit.co
         engagement,
         collectedAt: timestamp.collectedAt,
         timestampKind: timestamp.timestampKind,
-      });
+      }));
     }
   }
   return stories;
@@ -145,9 +147,10 @@ async function collectX(page: Page): Promise<RawStory[]> {
       for (const tweet of tweets) {
         if (!tweet.text || !tweet.link) continue;
         const timestamp = preciseTimestamp(tweet.publishedAt);
-        stories.push({
-          id: idFor(`x:${tweet.link}`),
+        stories.push(ensureRawStoryIdentity({
+          id: tweet.link,
           title: tweet.text.slice(0, 180),
+          originalTitle: tweet.text.slice(0, 180),
           description: `X 实时搜索“${query}”所抓取的公开帖子。`,
           url: tweet.link,
           publishedAt: timestamp.publishedAt,
@@ -156,7 +159,7 @@ async function collectX(page: Page): Promise<RawStory[]> {
           engagement: numberFromLabel(tweet.metricText),
           collectedAt: timestamp.collectedAt,
           timestampKind: timestamp.timestampKind,
-        });
+        }));
       }
     } catch {
       // Continue with remaining tracked queries when an individual search is blocked.

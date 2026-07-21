@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isAdminRequest } from "@/lib/auth";
-import { getBrief, publishBrief } from "@/lib/db";
+import { getBrief, publishBrief, StaleBriefRevisionError } from "@/lib/db";
 import { attachEquityImpacts } from "@/lib/equity-impact";
 import { generateBriefPdf } from "@/lib/pdf";
 import { localizeBriefContent } from "@/lib/translation";
@@ -48,9 +48,15 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const localized = await localizeBriefContent(preparedDraft, { strict: true });
     const prepared = { ...localized, id, status: "published" as const, publishedAt: new Date().toISOString() };
     const pdf = await generateBriefPdf(prepared);
-    const published = await publishBrief(id, prepared, pdf);
+    const published = await publishBrief(id, prepared, pdf, {
+      stream: "publish",
+      batchKey: `publish:${id}:${Date.now()}`,
+    });
     return NextResponse.json({ ...published, pdfUrl: `/api/briefs/${id}/pdf` });
   } catch (error) {
+    if (error instanceof StaleBriefRevisionError) {
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
+    }
     return NextResponse.json({ error: error instanceof Error ? error.message : "发布失败" }, { status: 500 });
   }
 }

@@ -64,6 +64,9 @@ export async function POST(request: Request) {
       const result = await buildFreshLiveBrief({
         useAi: body.useAi !== false,
         useBrowserCollectors: body.useBrowserCollectors === true,
+      }, {
+        stream: "privileged",
+        batchKey: `privileged:${sharedBatchKey}:${Date.now()}`,
       });
       return NextResponse.json(result.brief, {
         headers: liveHeaders(result, undefined, "privileged"),

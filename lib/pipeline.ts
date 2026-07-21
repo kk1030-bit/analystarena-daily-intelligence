@@ -1,8 +1,9 @@
 import { XMLParser } from "fast-xml-parser";
 import OpenAI from "openai";
 import { collectBrowserStories } from "./collectors/browser";
-import { saveRedditStories } from "./db";
+import { saveRedditStories, saveSourceStories } from "./db";
 import { attachEquityImpacts } from "./equity-impact";
+import { canonicalizeSourceUrl, ensureRawStoryIdentity } from "./source-identity";
 import { localizeBriefContent } from "./translation";
 import { categoryDisplayNames } from "./terms";
 import { formatTimestampLine } from "./time";
@@ -105,12 +106,6 @@ function atomLink(entry: Record<string, unknown>): string {
   return textValue(alternate?.["@_href"] ?? entry.link);
 }
 
-function storyId(title: string, source: string): string {
-  let hash = 0;
-  for (const character of `${source}:${title}`) hash = (hash * 31 + character.charCodeAt(0)) | 0;
-  return Math.abs(hash).toString(36);
-}
-
 function storyTimestamp(value: string, collectedAt: string): { value: string; kind: "published" | "collected" } {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
@@ -138,12 +133,14 @@ async function fetchFeed(feed: FeedDefinition): Promise<RawStory[]> {
         description: textValue(item.description ?? item["content:encoded"]),
         url: textValue(item.link),
         publishedAt: textValue(item.pubDate ?? item.date),
+        nativeId: textValue(item.guid),
       }))
     : asArray(atom?.entry).map((entry) => ({
         title: textValue(entry.title),
         description: textValue(entry.summary ?? entry.content),
         url: atomLink(entry),
         publishedAt: textValue(entry.updated ?? entry.published),
+        nativeId: textValue(entry.id),
       }));
 
   return items
@@ -152,17 +149,21 @@ async function fetchFeed(feed: FeedDefinition): Promise<RawStory[]> {
     .map((item) => {
       const collectedAt = new Date().toISOString();
       const timestamp = storyTimestamp(item.publishedAt, collectedAt);
-      return {
-        id: storyId(item.title, feed.name),
+      return ensureRawStoryIdentity({
+        id: item.nativeId || item.url,
+        nativeId: item.nativeId || undefined,
+        feedNamespace: feed.url,
         title: stripHtml(item.title),
+        originalTitle: stripHtml(item.title),
         description: stripHtml(item.description),
+        originalDescription: stripHtml(item.description),
         url: item.url,
         publishedAt: timestamp.value,
         source: feed.name,
         sourceType: feed.type,
         collectedAt,
         timestampKind: timestamp.kind,
-      };
+      });
     });
 }
 
@@ -189,13 +190,41 @@ function shouldMerge(left: RawStory, right: RawStory): boolean {
 }
 
 function clusterStories(stories: RawStory[]): RawStory[][] {
-  const groups: RawStory[][] = [];
-  for (const story of [...stories].sort((a, b) => +new Date(b.publishedAt) - +new Date(a.publishedAt))) {
-    const existing = groups.find((group) => group.some((member) => shouldMerge(member, story)));
-    if (existing) existing.push(story);
-    else groups.push([story]);
+  const ordered = [...stories].sort((left, right) =>
+    (left.sourceDocumentId ?? left.id).localeCompare(right.sourceDocumentId ?? right.id));
+  const parent = ordered.map((_, index) => index);
+  const find = (index: number): number => {
+    let root = index;
+    while (parent[root] !== root) root = parent[root];
+    while (parent[index] !== index) {
+      const next = parent[index];
+      parent[index] = root;
+      index = next;
+    }
+    return root;
+  };
+  const union = (left: number, right: number) => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot === rightRoot) return;
+    parent[Math.max(leftRoot, rightRoot)] = Math.min(leftRoot, rightRoot);
+  };
+  for (let left = 0; left < ordered.length; left += 1) {
+    for (let right = left + 1; right < ordered.length; right += 1) {
+      if (shouldMerge(ordered[left], ordered[right])) union(left, right);
+    }
   }
-  return groups;
+  const grouped = new Map<number, RawStory[]>();
+  ordered.forEach((story, index) => {
+    const root = find(index);
+    grouped.set(root, [...(grouped.get(root) ?? []), story]);
+  });
+  return [...grouped.values()].sort((left, right) => {
+    const leftTime = Math.max(...left.map((story) => Date.parse(story.publishedAt)));
+    const rightTime = Math.max(...right.map((story) => Date.parse(story.publishedAt)));
+    return rightTime - leftTime
+      || (left[0].sourceDocumentId ?? left[0].id).localeCompare(right[0].sourceDocumentId ?? right[0].id);
+  });
 }
 
 function categoryFor(text: string): Category {
@@ -272,16 +301,24 @@ function isRelevantStory(story: RawStory): boolean {
 }
 
 function deduplicateStories(stories: RawStory[]): RawStory[] {
-  const seenUrls = new Set<string>();
-  const seenKeys = new Set<string>();
-  return stories.filter((story) => {
-    const url = story.url.replace(/[?#].*$/, "").toLowerCase();
-    const key = `${story.sourceType}:${[...tokens(story.title)].slice(0, 8).sort().join("|")}`;
-    if (seenUrls.has(url) || seenKeys.has(key)) return false;
-    seenUrls.add(url);
-    seenKeys.add(key);
-    return isRelevantStory(story);
-  });
+  const documents = new Map<string, RawStory>();
+  for (const story of stories.filter(isRelevantStory)) {
+    const key = story.sourceDocumentId ?? story.canonicalUrl ?? canonicalizeSourceUrl(story.url);
+    const current = documents.get(key);
+    if (!current) {
+      documents.set(key, story);
+      continue;
+    }
+    const storyCollectedAt = Date.parse(story.lastCollectedAt ?? story.collectedAt ?? story.publishedAt);
+    const currentCollectedAt = Date.parse(current.lastCollectedAt ?? current.collectedAt ?? current.publishedAt);
+    if (storyCollectedAt > currentCollectedAt
+      || (storyCollectedAt === currentCollectedAt && (story.engagement ?? 0) > (current.engagement ?? 0))) {
+      documents.set(key, story);
+    }
+  }
+  return [...documents.values()].sort((left, right) =>
+    Date.parse(right.publishedAt) - Date.parse(left.publishedAt)
+    || (left.sourceDocumentId ?? left.id).localeCompare(right.sourceDocumentId ?? right.id));
 }
 
 function headlineFromGroup(group: RawStory[]): Headline {
@@ -335,8 +372,19 @@ function headlineFromGroup(group: RawStory[]): Headline {
     sources: [...group]
       .sort((a, b) => sourceWeight(b.sourceType) - sourceWeight(a.sourceType))
       .filter((story, index, all) => all.findIndex((candidate) => candidate.source === story.source && candidate.url === story.url) === index)
-      .slice(0, 6)
-      .map((story) => ({ name: story.source, type: story.sourceType, url: story.url, publishedAt: story.publishedAt, timestampKind: story.timestampKind ?? "published" })),
+      .map((story) => ({
+        name: story.source,
+        type: story.sourceType,
+        url: story.url,
+        sourceDocumentId: story.sourceDocumentId,
+        nativeId: story.nativeId,
+        canonicalUrl: story.canonicalUrl,
+        originalTitle: story.originalTitle ?? story.title,
+        contentHash: story.contentHash,
+        publishedAt: story.publishedAt,
+        collectedAt: story.collectedAt,
+        timestampKind: story.timestampKind ?? "published",
+      })),
   };
 }
 
@@ -453,7 +501,9 @@ async function enrichAndMergeWithAi(candidates: Headline[]): Promise<Headline[]>
   const merged = parsed.items.flatMap((item, itemIndex) => {
     const bases = item.sourceIds.map((id) => byId.get(id)).filter((value): value is Headline => Boolean(value));
     if (!bases.length) return [];
-    const sources = bases.flatMap((base) => base.sources).filter((source, index, all) => all.findIndex((candidate) => candidate.url === source.url) === index).slice(0, 6);
+    const sources = bases.flatMap((base) => base.sources).filter((source, index, all) =>
+      all.findIndex((candidate) => (candidate.sourceDocumentId ?? candidate.canonicalUrl ?? candidate.url)
+        === (source.sourceDocumentId ?? source.canonicalUrl ?? source.url)) === index);
     const rankingScore = Math.max(...bases.map((base) => base.rankingScore ?? 0));
     const timeBase = [...bases].sort((a, b) => {
       const timestampDifference = Number(b.timestampKind !== "collected") - Number(a.timestampKind !== "collected");
@@ -596,8 +646,11 @@ export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}):
     collectorStatuses.push({ name: "Playwright", ok: false, count: 0, note: "ENABLE_BROWSER_COLLECTORS 未启用" });
   }
 
-  const collectedStories = [...browserStories, ...feedStories];
-  await saveRedditStories(collectedStories.filter((story) => story.sourceType === "Reddit"));
+  const collectedStories = [...browserStories, ...feedStories].map(ensureRawStoryIdentity);
+  await Promise.all([
+    saveSourceStories(collectedStories),
+    saveRedditStories(collectedStories.filter((story) => story.sourceType === "Reddit")),
+  ]);
   const stories = deduplicateStories(collectedStories);
   if (stories.length < 5) throw new Error("可用来源不足，无法生成可靠日报");
   const groups = clusterStories(stories);
