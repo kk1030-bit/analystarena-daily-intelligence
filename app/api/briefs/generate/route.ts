@@ -17,7 +17,10 @@ export async function POST(request: Request) {
       useBrowserCollectors: process.env.NODE_ENV !== "production" && body.useBrowserCollectors !== false,
       strictTranslation: false,
     });
-    const record = await saveDraft({ ...brief, status: "draft", storageMode: storageMode() });
+    const record = await saveDraft(
+      { ...brief, status: "draft", storageMode: storageMode() },
+      { stream: "generate", batchKey: `generate:${brief.generatedAt}` },
+    );
     return NextResponse.json(record, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "生成草稿失败" }, { status: 500 });

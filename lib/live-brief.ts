@@ -1,4 +1,11 @@
-import { getBriefByDate, getLatestPublished, saveDraft, storageMode } from "./db";
+import {
+  getBriefByDate,
+  getLatestPublished,
+  persistBriefObservation,
+  saveDraft,
+  storageMode,
+  type PersistBriefOptions,
+} from "./db";
 import { buildLiveBrief, type BuildBriefOptions } from "./pipeline";
 import { beijingDateKey } from "./time";
 import type { DailyBrief } from "./types";
@@ -122,28 +129,25 @@ async function getPersistentFallback(): Promise<LiveBriefResult | null> {
 
 export async function buildFreshLiveBrief(
   options: BuildBriefOptions = { useAi: false, useBrowserCollectors: false },
+  persistence: PersistBriefOptions = { stream: "unspecified" },
 ): Promise<LiveBriefResult> {
   try {
     let brief = await buildLiveBrief({ ...options, strictTranslation: false });
-    if (storageMode() === "postgres") {
-      try {
-        const existing = await getBriefByDate(brief.date);
-        if (!existing) {
-          const saved = await saveDraft(brief);
-          brief = saved.brief;
-        } else if (existing.status === "published") {
-          brief = {
-            ...brief,
-            warning: mergeWarnings(brief.warning, "今日正式日报已发布，本次实时结果仅作为页面预览，不会覆盖已发布版本。"),
-          };
-        }
-      } catch (error) {
-        console.error("Unable to persist live brief draft", error);
+    try {
+      const existing = await getBriefByDate(brief.date);
+      if (!existing || existing.status === "draft") {
+        const saved = await saveDraft(brief, persistence);
+        brief = saved.brief;
+      } else {
+        const snapshot = await persistBriefObservation(brief, persistence);
         brief = {
-          ...brief,
-          warning: mergeWarnings(brief.warning, "本次实时结果暂未写入数据库，页面仍可继续查看。"),
+          ...snapshot.brief,
+          warning: mergeWarnings(snapshot.brief.warning, "今日正式日报已经发布；本次市场刷新已另存为不可变快照，不会改写已发布内容。"),
         };
       }
+    } catch (error) {
+      console.error("Unable to persist live brief snapshot", error);
+      throw error;
     }
     return { brief, fallback: "none" };
   } catch (error) {
@@ -166,7 +170,10 @@ function getCachedResult(
 
   // Exact batch keys prevent an expired cache slot from returning old content
   // under a new batch label. The map only retains addressable public contexts.
-  const request = buildFreshLiveBrief({ useAi: false, useBrowserCollectors: false });
+  const request = buildFreshLiveBrief(
+    { useAi: false, useBrowserCollectors: false },
+    { stream: kind, batchKey: `${kind}:${batchKey}` },
+  );
   const cacheEntry: LiveBriefCacheEntry = { promise: request, expiresAt: Number.POSITIVE_INFINITY };
   liveCache.set(requestKey, cacheEntry);
 

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { generateBriefPdf } from "@/lib/pdf";
 import type { DailyBrief } from "@/lib/types";
 import { localizeBriefContent } from "@/lib/translation";
+import { attachEquityImpacts } from "@/lib/equity-impact";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,11 +24,14 @@ export async function POST(request: Request) {
     // Preview exports should remain available while background translation is still
     // completing. The publish endpoint keeps its own strict translation gate.
     const localized = await localizeBriefContent(brief, { strict: false });
-    const pdf = await generateBriefPdf(localized);
+    // Match the market-headline pages: hydrate the canonical stock mappings at the
+    // PDF boundary so a raw or older brief cannot silently lose bullish/bearish targets.
+    const headlines = await attachEquityImpacts(localized.headlines);
+    const pdf = await generateBriefPdf({ ...localized, headlines });
     return new Response(new Uint8Array(pdf), {
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename="AnalystArena-Top5-${brief.date.slice(0, 10)}.pdf"`,
+        "Content-Disposition": `attachment; filename="AnalystArena-Market-Headlines-${brief.date.slice(0, 10)}.pdf"`,
         "Cache-Control": "no-store",
         ...(localized.translationEnabled === false ? { "X-AnalystArena-Translation-Warning": "1" } : {}),
       },

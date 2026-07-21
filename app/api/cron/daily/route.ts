@@ -3,6 +3,7 @@ import { isCronRequest } from "@/lib/auth";
 import { saveDraft, storageMode } from "@/lib/db";
 import { buildLiveBrief } from "@/lib/pipeline";
 import { safeCollectorNote } from "@/lib/collectors/router";
+import { ensureRawStoryIdentity } from "@/lib/source-identity";
 import type { CollectorStatus, RawStory } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -15,21 +16,29 @@ function safeRemoteStories(value: unknown): RawStory[] {
     if (!story || typeof story !== "object") return [];
     const item = story as Partial<RawStory>;
     if ((item.sourceType !== "Reddit" && item.sourceType !== "X") || typeof item.title !== "string" || typeof item.url !== "string" || !/^https?:\/\//.test(item.url)) return [];
-    const collectedAt = new Date().toISOString();
+    const ingestedAt = new Date().toISOString();
+    const suppliedCollectedAt = new Date(String(item.collectedAt ?? ""));
+    const collectedAt = Number.isNaN(suppliedCollectedAt.valueOf()) ? ingestedAt : suppliedCollectedAt.toISOString();
     const publishedAt = new Date(String(item.publishedAt ?? ""));
     const hasPublishedAt = !Number.isNaN(publishedAt.valueOf());
-    return [{
-      id: String(item.id ?? crypto.randomUUID()).slice(0, 120),
+    return [ensureRawStoryIdentity({
+      id: String(item.id ?? item.url).slice(0, 1_500),
+      nativeId: typeof item.nativeId === "string" ? item.nativeId.slice(0, 300) : undefined,
+      feedNamespace: typeof item.feedNamespace === "string" ? item.feedNamespace.slice(0, 500) : undefined,
       title: item.title.slice(0, 240),
+      originalTitle: String(item.originalTitle ?? item.title).slice(0, 240),
       description: String(item.description ?? "").slice(0, 900),
+      originalDescription: String(item.originalDescription ?? item.description ?? "").slice(0, 900),
       url: item.url.slice(0, 1_500),
       publishedAt: hasPublishedAt ? publishedAt.toISOString() : collectedAt,
       source: String(item.source ?? item.sourceType).slice(0, 100),
       sourceType: item.sourceType,
       engagement: Math.max(0, Math.min(10_000_000, Number(item.engagement) || 0)),
       collectedAt,
+      firstCollectedAt: typeof item.firstCollectedAt === "string" ? item.firstCollectedAt : collectedAt,
+      lastCollectedAt: typeof item.lastCollectedAt === "string" ? item.lastCollectedAt : collectedAt,
       timestampKind: item.timestampKind === "collected" || !hasPublishedAt ? "collected" : "published",
-    }];
+    })];
   });
 }
 
@@ -71,7 +80,7 @@ export async function POST(request: Request) {
   if (!process.env.CRON_SECRET) return NextResponse.json({ error: "排程密钥（CRON_SECRET）尚未设置" }, { status: 503 });
   if (!isCronRequest(request)) return NextResponse.json({ error: "未授权" }, { status: 401 });
   try {
-    const body = await request.json().catch(() => ({})) as { stories?: unknown; statuses?: unknown };
+    const body = await request.json().catch(() => ({})) as { stories?: unknown; statuses?: unknown; batchKey?: unknown };
     const seedStories = safeRemoteStories(body.stories);
     const brief = await buildLiveBrief({
       useAi: true,
@@ -80,7 +89,13 @@ export async function POST(request: Request) {
       seedStories,
       seedCollectorStatuses: safeStatuses(body.statuses),
     });
-    const record = await saveDraft({ ...brief, status: "draft", storageMode: storageMode() });
+    const batchKey = typeof body.batchKey === "string" && body.batchKey.trim()
+      ? body.batchKey.slice(0, 180)
+      : `cron:${brief.generatedAt}`;
+    const record = await saveDraft(
+      { ...brief, status: "draft", storageMode: storageMode() },
+      { stream: "cron", batchKey },
+    );
     return NextResponse.json({ ok: true, id: record.id, date: record.date, status: record.status, storageMode: storageMode() });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "排程生成失败" }, { status: 500 });
