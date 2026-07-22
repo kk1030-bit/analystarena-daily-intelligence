@@ -993,7 +993,13 @@ export async function saveSourceStories(stories: RawStory[]): Promise<SaveSource
         const materialHash = evidenceVersionMaterialHash(evidence);
         const priorHash = priorEvidence ? evidenceVersionMaterialHash(priorEvidence) : undefined;
         return priorHash === materialHash
-          ? structuredClone(priorEvidence!)
+          ? {
+              ...structuredClone(priorEvidence!),
+              // The immutable evidence version describes the quote/locator
+              // material. `capturedAt` belongs to this collection observation,
+              // so a recapture must not inherit the version's first-seen time.
+              capturedAt: evidence.capturedAt,
+            }
           : { ...evidence, versionId: randomUUID() };
       });
       const normalizedStory: RawStory = {
@@ -1346,7 +1352,11 @@ export async function saveSourceStories(stories: RawStory[]): Promise<SaveSource
           captureScope: prior.capture_scope,
           extractionMethod: prior.extraction_method,
           extractorVersion: prior.extractor_version,
-          capturedAt: iso(prior.captured_at),
+          // `evidence_versions.captured_at` is when this immutable material
+          // version was first recorded. A returned story is a projection of
+          // the current source observation and must carry that observation's
+          // capture time even when the version id is reused.
+          capturedAt: evidence.capturedAt,
         }) : { ...evidence, versionId: evidenceVersionId });
       }
       const canonicalOriginalPublishedAt = dbOptionalIso(provenance.original_published_at);
@@ -3179,6 +3189,15 @@ export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<E
       }
     }
 
+    // Evidence versions are immutable quote/locator revisions and may be
+    // reused by later source observations. Their database `captured_at` is the
+    // first observation that created the version; the evidence projected into
+    // this snapshot must instead be bound to this snapshot's exact source
+    // observation time.
+    const observationCapturedAtBySourceOrdinal = new Map(sourceRows.rows.map((row) => [
+      row.source_ordinal,
+      dbOptionalIso(row.observation_collected_at)!,
+    ]));
     const evidenceRows = await pool().query<{
       id: string;
       evidence_item_id: string;
@@ -3279,7 +3298,7 @@ export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<E
         captureScope: row.capture_scope,
         extractionMethod: row.extraction_method,
         extractorVersion: row.extractor_version,
-        capturedAt: dbOptionalIso(row.captured_at),
+        capturedAt: observationCapturedAtBySourceOrdinal.get(row.source_ordinal) ?? null,
       };
       if (canonicalEvidenceJson(projected) !== canonicalEvidenceJson(authority)) {
         issues.push(authorityIssue(headline.id, "EVIDENCE_AUTHORITY_MISMATCH", `证据 ${evidence.id} 的原文、哈希或定位与数据库不一致`));
@@ -3446,7 +3465,7 @@ export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<E
           captureScope: evidence.capture_scope,
           extractionMethod: evidence.extraction_method,
           extractorVersion: evidence.extractor_version,
-          capturedAt: dbOptionalIso(evidence.captured_at),
+          capturedAt: observationCapturedAtBySourceOrdinal.get(evidence.source_ordinal) ?? null,
         };
         if (canonicalEvidenceJson(projectedCitationEvidence) !== canonicalEvidenceJson(authorityCitationEvidence)) {
           issues.push(authorityIssue(headline.id, "CITATION_EVIDENCE_AUTHORITY_MISMATCH", `声明 ${claim.claimKey} 的引用证据正文或定位与数据库不一致`));

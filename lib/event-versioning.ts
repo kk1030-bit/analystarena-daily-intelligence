@@ -333,26 +333,37 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
     || claimKey === "direction_rationale"
     || /^important_information:\d+$/.test(claimKey);
   const sources = [...previous.sources, ...incoming.sources].reduce<SourceLink[]>((result, source) => {
-    const identity = source.sourceDocumentId
-      || source.canonicalUrl
-      || canonicalizeSourceUrl(source.url)
-      || source.url;
+    const documentId = source.sourceDocumentId?.trim() || undefined;
+    const canonicalUrl = canonicalizeSourceUrl(source.canonicalUrl || source.url);
     const existingIndex = result.findIndex((candidate) => {
-      const candidateIdentity = candidate.sourceDocumentId
-        || candidate.canonicalUrl
-        || canonicalizeSourceUrl(candidate.url)
-        || candidate.url;
-      return candidateIdentity === identity;
+      const candidateDocumentId = candidate.sourceDocumentId?.trim() || undefined;
+      const candidateCanonicalUrl = canonicalizeSourceUrl(candidate.canonicalUrl || candidate.url);
+      // Source identities can migrate from a legacy URL-derived document id
+      // to a native/feed id. Treat either matching alias as the same source so
+      // the current version replaces the legacy projection in its old slot.
+      return Boolean(documentId && candidateDocumentId && documentId === candidateDocumentId)
+        || canonicalUrl === candidateCanonicalUrl;
     });
     if (existingIndex === -1) result.push(structuredClone(source));
     else {
       const retained = result[existingIndex];
       const next = structuredClone(source);
+      const retainedHasObservationAuthority = Boolean(
+        retained.sourceDocumentId && retained.sourceDocumentVersionId && retained.sourceObservationId,
+      );
+      const nextHasObservationAuthority = Boolean(
+        next.sourceDocumentId && next.sourceDocumentVersionId && next.sourceObservationId,
+      );
+      // Never let an unversioned legacy alias overwrite a source already
+      // bound to an immutable version and collection observation. When both
+      // are equally authoritative, the later (incoming) observation wins.
+      const preferred = retainedHasObservationAuthority && !nextHasObservationAuthority ? retained : next;
+      const fallback = preferred === retained ? next : retained;
       result[existingIndex] = {
-        ...retained,
-        ...next,
-        evidence: next.evidence ?? retained.evidence,
-        capture: next.capture ?? retained.capture,
+        ...fallback,
+        ...preferred,
+        evidence: preferred.evidence ?? fallback.evidence,
+        capture: preferred.capture ?? fallback.capture,
       };
     }
     return result;

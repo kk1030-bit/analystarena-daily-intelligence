@@ -874,6 +874,7 @@ export type HeadlineEvidenceIssueCode =
   | "SOURCE_EVIDENCE_INVALID"
   | "SOURCE_EVIDENCE_SOURCE_DOCUMENT_MISMATCH"
   | "SOURCE_EVIDENCE_SOURCE_VERSION_MISMATCH"
+  | "SOURCE_EVIDENCE_OBSERVATION_TIME_MISMATCH"
   | "CLAIM_INVALID"
   | "CLAIM_ID_MISMATCH"
   | "CLAIM_STATEMENT_HASH_MISMATCH"
@@ -959,6 +960,18 @@ export function validateHeadlineEvidence(headline: Headline): HeadlineEvidenceVa
           "Evidence sourceDocumentVersionId does not match its parent source",
           { sourceIndex, evidenceIndex },
         ));
+      }
+      if (source.capture?.collectedAt !== undefined) {
+        const observationCapturedAt = parseStrictSourceTimestamp(source.capture.collectedAt);
+        const evidenceCapturedAt = parseStrictSourceTimestamp(evidence.capturedAt);
+        if (!observationCapturedAt || evidenceCapturedAt !== observationCapturedAt) {
+          issues.push(issue(
+            headline,
+            "SOURCE_EVIDENCE_OBSERVATION_TIME_MISMATCH",
+            "Evidence capturedAt does not match its parent source observation",
+            { sourceIndex, evidenceIndex },
+          ));
+        }
       }
       byId.set(evidence.id, [...(byId.get(evidence.id) ?? []), evidence]);
     });

@@ -143,6 +143,7 @@ export interface SourceEvidence {
   captureScope: SourceCaptureScope;
   extractionMethod: string;
   extractorVersion: string;
+  /** Capture time of the source observation projecting this evidence. */
   capturedAt: string;
 }
 

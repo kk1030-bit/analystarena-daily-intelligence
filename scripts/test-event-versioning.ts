@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { demoBrief } from "../lib/demo-data";
-import { createStableEventIdentity } from "../lib/event-versioning";
+import { createStableEventIdentity, mergeRetainedEvidence } from "../lib/event-versioning";
 import { ensureRawStoryIdentity } from "../lib/source-identity";
 import type { DailyBrief, Headline, RawStory, SourceLink } from "../lib/types";
 
@@ -101,6 +101,48 @@ function headline(overrides: Partial<Headline> = {}): Headline {
     ...overrides,
   };
 }
+
+// A legacy URL-derived source id and the current native/feed-derived id can
+// identify the same canonical document. Alias intersection must replace the
+// legacy projection in place while retaining genuinely different URLs.
+const legacyWire: SourceLink = {
+  ...structuredClone(wire),
+  sourceDocumentId: "sd_legacy_url_identity",
+  sourceDocumentVersionId: undefined,
+  sourceObservationId: undefined,
+};
+const currentWire: SourceLink = {
+  ...structuredClone(wire),
+  sourceDocumentId: "sd_current_feed_identity",
+  sourceDocumentVersionId: "00000000-0000-4000-8000-000000000001",
+  sourceObservationId: "obs_current_feed_identity",
+};
+const aliasMerged = mergeRetainedEvidence(
+  headline({ sources: [legacyWire, currentWire, secondWire] }),
+  headline({ sources: [{ ...currentWire, url: `${wire.url}&utm_campaign=recapture` }] }),
+);
+assert.deepEqual(
+  aliasMerged.sources.map((item) => item.sourceDocumentId),
+  [currentWire.sourceDocumentId, secondWire.sourceDocumentId],
+  "matching document-id or canonical-URL aliases must merge in the previous source slot",
+);
+assert.equal(aliasMerged.sources[0].url, `${wire.url}&utm_campaign=recapture`);
+assert.notEqual(
+  aliasMerged.sources[0].canonicalUrl,
+  aliasMerged.sources[1].canonicalUrl,
+  "different canonical URLs must remain separate sources",
+);
+const reverseAliasMerged = mergeRetainedEvidence(
+  headline({ sources: [currentWire, legacyWire, secondWire] }),
+  headline({ sources: [] }),
+);
+assert.deepEqual(
+  reverseAliasMerged.sources.map((item) => item.sourceDocumentId),
+  [currentWire.sourceDocumentId, secondWire.sourceDocumentId],
+  "an unversioned legacy alias must not overwrite an already observation-bound source",
+);
+assert.equal(reverseAliasMerged.sources[0].sourceDocumentVersionId, currentWire.sourceDocumentVersionId);
+assert.equal(reverseAliasMerged.sources[0].sourceObservationId, currentWire.sourceObservationId);
 
 function brief(generatedAt: string, item: Headline): DailyBrief {
   return {

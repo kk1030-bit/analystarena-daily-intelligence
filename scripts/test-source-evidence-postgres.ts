@@ -3,10 +3,12 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { demoBrief } from "../lib/demo-data";
 import {
+  assertEvidenceBoundToSourceCapture,
   createEvidenceCitation,
   createHeadlineClaim,
   evidenceLocatorHash,
   sha256ExactUtf8,
+  validateHeadlineEvidence,
 } from "../lib/source-evidence";
 import { parseFeedDocument, type FeedDefinition } from "../lib/pipeline";
 import type { DailyBrief, Headline, HeadlineClaim, RawStory, SourceLink } from "../lib/types";
@@ -465,6 +467,93 @@ assert.deepEqual(
   "a reused event version must retain its authoritative source order",
 );
 assert.deepEqual(await db.verifyBriefEvidenceAuthority(reorderedSave.brief), []);
+
+// A later observation of identical source bytes must reuse the immutable
+// source/evidence versions while projecting the new observation time into the
+// story, snapshot and citations. The evidence version row keeps its original
+// first-seen captured_at and must not be rewritten.
+const recapturedAt = `${date}T04:20:00.000Z`;
+const evidenceVersionCountBeforeRecapture = Number((await raw.query(
+  `SELECT COUNT(*) AS count FROM evidence_versions WHERE source_document_id = $1`,
+  [thirdStory.sourceDocumentId],
+)).rows[0].count);
+const recapturedStory = (await db.saveSourceStories([
+  story("Revenue rose 12 percent.", recapturedAt),
+])).stories[0];
+assert.equal(recapturedStory.sourceDocumentVersionId, thirdStory.sourceDocumentVersionId);
+assert.notEqual(recapturedStory.sourceObservationId, thirdStory.sourceObservationId);
+assert.deepEqual(
+  recapturedStory.evidence?.map((item) => item.versionId),
+  thirdStory.evidence?.map((item) => item.versionId),
+);
+assert.ok(recapturedStory.evidence?.every((item) => item.capturedAt === recapturedAt));
+assert.doesNotThrow(() => assertEvidenceBoundToSourceCapture(recapturedStory, recapturedStory.capture!));
+assert.equal(Number((await raw.query(
+  `SELECT COUNT(*) AS count FROM evidence_versions WHERE source_document_id = $1`,
+  [thirdStory.sourceDocumentId],
+)).rows[0].count), evidenceVersionCountBeforeRecapture);
+const recapturedBodyEvidence = recapturedStory.evidence?.find((item) => item.anchorKey === "feed:description");
+assert.ok(recapturedBodyEvidence);
+const immutableEvidenceCapture = await raw.query<{ captured_at: Date }>(
+  `SELECT captured_at FROM evidence_versions WHERE id = $1`,
+  [recapturedBodyEvidence.versionId],
+);
+assert.equal(immutableEvidenceCapture.rows[0].captured_at.toISOString(), `${date}T03:20:00.000Z`);
+
+const recapturedSource: SourceLink = {
+  ...structuredClone(source),
+  sourceObservationId: recapturedStory.sourceObservationId,
+  collectedAt: recapturedStory.collectedAt,
+  capture: recapturedStory.capture,
+  evidence: recapturedStory.evidence,
+};
+const recapturedCitations = [createEvidenceCitation(recapturedBodyEvidence)];
+const recapturedClaims = definitions.map(([claimKey, type, statement], ordinal) => createHeadlineClaim({
+  claimKey,
+  type,
+  ordinal,
+  statement,
+  originalStatement: statement,
+  language: "en",
+  verificationStatus: type === "market_impact" || type === "direction_rationale" ? "partially_supported" : "supported",
+  citations: recapturedCitations,
+  generator: "deterministic",
+  generatorVersion: "postgres-test/v1",
+}));
+const recapturedHeadline: Headline = {
+  ...structuredClone(headline),
+  sources: initialSourceOrder.map((item) => item.sourceDocumentId === recapturedSource.sourceDocumentId
+    ? recapturedSource
+    : structuredClone(item)),
+  claims: recapturedClaims,
+};
+assert.equal(validateHeadlineEvidence(recapturedHeadline).valid, true);
+const eventVersionCountBeforeRecapture = (await db.listEventVersions(eventId)).length;
+const recapturedSave = await db.saveDraft({
+  ...structuredClone(brief),
+  generatedAt: `${date}T04:30:00.000Z`,
+  headlines: [recapturedHeadline],
+}, {
+  stream: "manual",
+  batchKey: "postgres-source-observation-recapture",
+});
+assert.equal(
+  (await db.listEventVersions(eventId)).length,
+  eventVersionCountBeforeRecapture,
+  "a new observation time alone must not manufacture an event version",
+);
+assert.ok(recapturedSave.brief.headlines[0].sources
+  .find((item) => item.sourceDocumentId === recapturedSource.sourceDocumentId)
+  ?.evidence?.every((item) => item.capturedAt === recapturedAt));
+assert.deepEqual(await db.verifyBriefEvidenceAuthority(recapturedSave.brief), []);
+
+const staleObservationProjection = structuredClone(recapturedSave.brief);
+const staleSource = staleObservationProjection.headlines[0].sources
+  .find((item) => item.sourceDocumentId === recapturedSource.sourceDocumentId)!;
+staleSource.evidence!.forEach((item) => { item.capturedAt = `${date}T03:20:00.000Z`; });
+assert.ok((await db.verifyBriefEvidenceAuthority(staleObservationProjection)).some((issue) =>
+  issue.code === "EVIDENCE_AUTHORITY_MISMATCH"));
+
 const forgedEventState = structuredClone(saved.brief);
 forgedEventState.headlines[0].marketDirection = forgedEventState.headlines[0].marketDirection === "bullish" ? "bearish" : "bullish";
 assert.ok((await db.verifyBriefEvidenceAuthority(forgedEventState)).some((issue) =>
