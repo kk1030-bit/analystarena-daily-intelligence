@@ -266,7 +266,26 @@ async function localizeHeadline(headline: Headline): Promise<Headline> {
     headline.directionRationale ? localizeText(headline.directionRationale) : Promise.resolve(headline.directionRationale),
     mapLimited(headline.keyPoints ?? [], 3, localizeText),
   ]);
-  const localized = { ...headline, title, summary, marketImpact, directionRationale, keyPoints };
+  const claims = headline.claims?.map((claim) => {
+    let statement = claim.statement;
+    if (claim.claimKey === "title") statement = title;
+    else if (claim.claimKey === "summary") statement = summary;
+    else if (claim.claimKey === "market_impact") statement = marketImpact;
+    else if (claim.claimKey === "direction_rationale" && directionRationale) statement = directionRationale;
+    else {
+      const pointIndex = claim.claimKey.match(/^important_information:(\d+)$/)?.[1];
+      if (pointIndex !== undefined && keyPoints[Number(pointIndex)] !== undefined) statement = keyPoints[Number(pointIndex)];
+    }
+    return {
+      ...claim,
+      statement,
+      originalStatement: claim.originalStatement ?? claim.statement,
+      language: "zh-CN",
+      // statementHash remains the hash of originalStatement. Translation is
+      // presentation and must not change evidence identity.
+    };
+  });
+  const localized = { ...headline, title, summary, marketImpact, directionRationale, keyPoints, claims };
   const termNotes: TermNote[] = extractTermNotes(localized);
   return { ...localized, termNotes };
 }

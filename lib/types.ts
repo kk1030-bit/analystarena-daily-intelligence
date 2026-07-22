@@ -12,12 +12,169 @@ export type SourceType = "Official" | "News" | "Reddit" | "X";
 export type Sentiment = "positive" | "neutral" | "negative";
 export type MarketDirection = "bullish" | "bearish" | "mixed" | "neutral";
 export type TimestampKind = "published" | "collected";
+export type SourceRole = "primary" | "corroborating" | "context" | "contradicting" | "social_signal";
+
+export type SourceCaptureScope =
+  | "rss_entry"
+  | "atom_entry"
+  | "detail_page"
+  | "reddit_post"
+  | "x_post"
+  | "pdf"
+  | "legacy_metadata";
+
+export type EvidenceLocatorStatus = "exact" | "derived" | "unavailable";
+export type EvidenceDirectness = "direct" | "indirect" | "derived" | "unavailable";
+export type EvidenceSupportRelation = "supports" | "contradicts" | "context";
+export type ClaimVerificationStatus =
+  | "supported"
+  | "partially_supported"
+  | "pending_confirmation"
+  | "legacy_unverified";
+export type ClaimType =
+  | "title"
+  | "summary"
+  | "important_information"
+  | "market_impact"
+  | "direction_rationale"
+  | "equity_impact";
+
+export interface FeedFieldLocator {
+  kind: "feed_field";
+  feedUrl: string;
+  entryId?: string;
+  field: "title" | "description" | "summary" | "content";
+  fieldPath: string;
+}
+
+export interface HtmlTextQuoteLocator {
+  kind: "html_text_quote";
+  pageUrl: string;
+  selector?: string;
+  contentRootSelector?: string;
+  textQuote: {
+    exact: string;
+    prefix?: string;
+    suffix?: string;
+  };
+  blockIndex?: number;
+  blockIndexBasis?: "normalized_content_blocks";
+}
+
+export interface RedditPostFieldLocator {
+  kind: "reddit_post_field";
+  postId: string;
+  field: "title" | "body";
+}
+
+export interface XPostFieldLocator {
+  kind: "x_post_field";
+  statusId: string;
+  field: "text";
+}
+
+export interface PdfTextLocator {
+  kind: "pdf_text";
+  pdfUrl: string;
+  pageNumber: number;
+  startOffset?: number;
+  endOffset?: number;
+}
+
+export interface UnavailableEvidenceLocator {
+  kind: "unavailable";
+  reasonCode:
+    | "body_not_collected"
+    | "source_not_resolved"
+    | "content_not_extracted"
+    | "legacy_metadata_only"
+    | "unsupported_content_type"
+    | "collection_failed";
+  detail?: string;
+}
+
+export type EvidenceLocator =
+  | FeedFieldLocator
+  | HtmlTextQuoteLocator
+  | RedditPostFieldLocator
+  | XPostFieldLocator
+  | PdfTextLocator
+  | UnavailableEvidenceLocator;
+
+export interface SourceCapture {
+  rawUrl: string;
+  canonicalUrl?: string;
+  finalUrl?: string;
+  feedUrl?: string;
+  mimeType?: string;
+  httpStatus?: number;
+  originalPublishedAt?: string | null;
+  publishedAtRaw?: string;
+  publishedAtField?: string;
+  sourceUpdatedAt?: string;
+  collectedAt: string;
+  scope: SourceCaptureScope;
+  capturedContentHash: string;
+  /** Exact UTF-8 capture material whose bytes produce capturedContentHash. */
+  capturedArtifact?: string;
+  capturedArtifactEncoding?: "utf8";
+  capturedArtifactSizeBytes?: number;
+  capturedTextHash?: string;
+  extractionMethod: string;
+  extractorVersion: string;
+  backfillQuality?: "native" | "exact_legacy_metadata" | "unverified_legacy";
+}
+
+/** Exact source text plus a truthful, machine-readable locator. */
+export interface SourceEvidence {
+  id: string;
+  versionId?: string;
+  sourceDocumentId: string;
+  sourceDocumentVersionId?: string;
+  anchorKey: string;
+  quoteOriginal?: string;
+  quoteHash?: string;
+  quoteLanguage?: string;
+  quoteZhCn?: string;
+  locator: EvidenceLocator;
+  locatorHash: string;
+  locatorStatus: EvidenceLocatorStatus;
+  directness: EvidenceDirectness;
+  captureScope: SourceCaptureScope;
+  extractionMethod: string;
+  extractorVersion: string;
+  capturedAt: string;
+}
+
+export interface EvidenceCitation extends SourceEvidence {
+  relation: EvidenceSupportRelation;
+  confidence: number;
+  order: number;
+}
+
+export interface HeadlineClaim {
+  id: string;
+  claimKey: string;
+  type: ClaimType;
+  ordinal: number;
+  statement: string;
+  originalStatement?: string;
+  statementHash: string;
+  language: string;
+  verificationStatus: ClaimVerificationStatus;
+  citations: EvidenceCitation[];
+  generator: "collector" | "deterministic" | "ai" | "review" | "legacy";
+  generatorVersion: string;
+}
 
 export interface SourceLink {
   name: string;
   type: SourceType;
+  role?: SourceRole;
   url: string;
   sourceDocumentId?: string;
+  sourceDocumentVersionId?: string;
+  sourceObservationId?: string;
   nativeId?: string;
   feedNamespace?: string;
   canonicalUrl?: string;
@@ -26,6 +183,12 @@ export interface SourceLink {
   publishedAt?: string;
   collectedAt?: string;
   timestampKind?: TimestampKind;
+  originalPublishedAt?: string | null;
+  publishedAtRaw?: string;
+  publishedAtField?: string;
+  sourceUpdatedAt?: string;
+  capture?: SourceCapture;
+  evidence?: SourceEvidence[];
 }
 
 export interface TermNote {
@@ -94,6 +257,7 @@ export interface Headline {
   crossSourceCount?: number;
   sentiment: Sentiment;
   sources: SourceLink[];
+  claims?: HeadlineClaim[];
 }
 
 export interface MarketHeat {
@@ -169,6 +333,10 @@ export interface RawStory {
   originalDescription?: string;
   url: string;
   publishedAt: string;
+  originalPublishedAt?: string | null;
+  publishedAtRaw?: string;
+  publishedAtField?: string;
+  sourceUpdatedAt?: string;
   updatedAt?: string;
   source: string;
   sourceType: SourceType;
@@ -178,6 +346,10 @@ export interface RawStory {
   lastCollectedAt?: string;
   contentHash?: string;
   timestampKind?: TimestampKind;
+  sourceDocumentVersionId?: string;
+  sourceObservationId?: string;
+  capture?: SourceCapture;
+  evidence?: SourceEvidence[];
 }
 
 export type BriefSnapshotStream =
@@ -200,6 +372,12 @@ export interface BriefSnapshotMetadata {
   previousSnapshotId?: string;
   payloadHash: string;
   persistedAt: string;
+  /**
+   * Frozen snapshot-to-event projection used by the publication authority
+   * gate. These values describe ranking/matching in this exact snapshot and
+   * therefore do not belong to the reusable event version itself.
+   */
+  events: BriefSnapshotEventProjection[];
 }
 
 export interface CollectionRunRecord {
@@ -257,6 +435,8 @@ export interface BriefSnapshotEventRecord {
   matchMethod: EventMatchMethod;
   matchConfidence: number;
 }
+
+export type BriefSnapshotEventProjection = Omit<BriefSnapshotEventRecord, "snapshotId">;
 
 export interface BriefSnapshotRecord {
   id: string;

@@ -11,8 +11,22 @@ import {
   mergeRetainedEvidence,
 } from "./event-versioning";
 import { ensureRawStoryIdentity } from "./source-identity";
+import {
+  assertPublishedAtRawConsistency,
+  parseStrictSourceTimestamp,
+  requireStrictSourceTimestamp,
+} from "./source-time";
+import {
+  assertEvidenceBoundToSourceCapture,
+  canonicalEvidenceJson,
+  evidenceVersionMaterialHash,
+  normalizeSourceEvidence,
+  sha256ExactUtf8,
+  validateHeadlineEvidence,
+} from "./source-evidence";
 import type {
   BriefSnapshotEventRecord,
+  BriefSnapshotEventProjection,
   BriefSnapshotRecord,
   BriefSnapshotStream,
   BriefRecord,
@@ -24,6 +38,9 @@ import type {
   EventVersionRecord,
   Headline,
   RawStory,
+  SourceCapture,
+  SourceEvidence,
+  SourceLink,
   RedditPost,
   RedditSearchOptions,
   RedditSearchResult,
@@ -35,6 +52,11 @@ import type {
   StockSyncRun,
   TimestampKind,
 } from "./types";
+
+export interface SaveSourceStoriesResult {
+  count: number;
+  stories: RawStory[];
+}
 
 interface DatabaseRow {
   id: string;
@@ -151,8 +173,15 @@ interface EventVersionRow {
   presentation_hash: string;
   observed_at: string | Date;
   run_id: string;
-  payload: { headline?: Headline } | string;
+  payload: EventVersionPayload | string;
   created_at: string | Date;
+}
+
+interface EventVersionPayload {
+  evidence?: unknown;
+  state?: unknown;
+  presentation?: unknown;
+  headline?: Headline;
 }
 
 interface BriefSnapshotEventRow {
@@ -510,10 +539,15 @@ function rowToEvent(row: EventDatabaseRow): EventRecord {
   };
 }
 
-function payloadHeadline(payload: EventDatabaseRow["version_payload"] | EventVersionRow["payload"]): Headline | undefined {
+function parseEventVersionPayload(
+  payload: EventDatabaseRow["version_payload"] | EventVersionRow["payload"],
+): EventVersionPayload | undefined {
   if (!payload) return undefined;
-  const parsed = typeof payload === "string" ? JSON.parse(payload) as { headline?: Headline } : payload;
-  return parsed.headline;
+  return typeof payload === "string" ? JSON.parse(payload) as EventVersionPayload : payload;
+}
+
+function payloadHeadline(payload: EventDatabaseRow["version_payload"] | EventVersionRow["payload"]): Headline | undefined {
+  return parseEventVersionPayload(payload)?.headline;
 }
 
 function rowToEventVersion(row: EventVersionRow): EventVersionRecord {
@@ -730,27 +764,258 @@ function laterIso(left: string, right: string): string {
   return Date.parse(left) >= Date.parse(right) ? left : right;
 }
 
-export async function saveSourceStories(stories: RawStory[]): Promise<number> {
-  if (!stories.length) return 0;
-  const identified = stories.map(ensureRawStoryIdentity);
-  const unique = [...new Map(identified.map((story) => [story.sourceDocumentId!, story])).values()];
+function strictOptionalSourceTimestamp(value: string | null | undefined, fieldName: string): string | null {
+  if (value === null || value === undefined) return null;
+  const parsed = parseStrictSourceTimestamp(value);
+  if (!parsed) {
+    throw new TypeError(`Invalid ${fieldName}; an explicit timezone and valid calendar timestamp are required: ${value}`);
+  }
+  return parsed;
+}
+
+function snapshotEventProjection(
+  event: BriefSnapshotEventRecord,
+): BriefSnapshotEventProjection {
+  return {
+    eventId: event.eventId,
+    eventVersionId: event.eventVersionId,
+    rank: event.rank,
+    rankingScore: event.rankingScore,
+    freshnessScore: event.freshnessScore,
+    impact: event.impact,
+    confidence: event.confidence,
+    mentions: event.mentions,
+    crossSourceCount: event.crossSourceCount,
+    matchMethod: event.matchMethod,
+    matchConfidence: event.matchConfidence,
+  };
+}
+
+function sourceCaptureForStory(story: RawStory) {
+  const collectedAt = requireStrictSourceTimestamp(
+    story.lastCollectedAt ?? story.collectedAt ?? "",
+    "source collection timestamp",
+  );
+  return story.capture ?? {
+    rawUrl: story.url,
+    canonicalUrl: story.canonicalUrl,
+    originalPublishedAt: story.timestampKind === "collected"
+      ? null
+      : requireStrictSourceTimestamp(story.publishedAt, "source publication timestamp"),
+    publishedAtRaw: story.publishedAtRaw,
+    publishedAtField: story.publishedAtField,
+    sourceUpdatedAt: story.sourceUpdatedAt,
+    collectedAt,
+    scope: "legacy_metadata" as const,
+    capturedContentHash: story.contentHash!,
+    extractionMethod: "legacy-title-description",
+    extractorVersion: "legacy-metadata/v1",
+    backfillQuality: "unverified_legacy" as const,
+  };
+}
+
+function assertSourceCaptureArtifact(capture: ReturnType<typeof sourceCaptureForStory>): void {
+  const quality = capture.backfillQuality ?? "native";
+  if (quality === "native" && capture.capturedArtifact === undefined) {
+    throw new Error("Native source capture must preserve the exact UTF-8 artifact");
+  }
+  if (capture.capturedArtifact === undefined) return;
+  if (capture.capturedArtifactEncoding !== "utf8") {
+    throw new Error("Captured source artifact must declare UTF-8 encoding");
+  }
+  const actualSize = Buffer.byteLength(capture.capturedArtifact, "utf8");
+  if (capture.capturedArtifactSizeBytes !== actualSize) {
+    throw new Error(`Captured source artifact byte size mismatch: expected ${capture.capturedArtifactSizeBytes}, got ${actualSize}`);
+  }
+  const actualHash = sha256ExactUtf8(capture.capturedArtifact);
+  if (capture.capturedContentHash !== actualHash) {
+    throw new Error(`Captured source artifact hash mismatch: expected ${capture.capturedContentHash}, got ${actualHash}`);
+  }
+}
+
+function strictSourceTimes(story: RawStory, capture: ReturnType<typeof sourceCaptureForStory>) {
+  const timestampKind = story.timestampKind ?? "published";
+  const firstCollectedAt = requireStrictSourceTimestamp(
+    story.firstCollectedAt ?? story.collectedAt ?? "",
+    "first source collection timestamp",
+  );
+  const lastCollectedAt = requireStrictSourceTimestamp(
+    story.lastCollectedAt ?? story.collectedAt ?? "",
+    "last source collection timestamp",
+  );
+  const publishedAt = requireStrictSourceTimestamp(story.publishedAt, "source display timestamp");
+  const originalPublishedAt = story.originalPublishedAt !== undefined
+    ? strictOptionalSourceTimestamp(story.originalPublishedAt, "original source publication timestamp")
+    : timestampKind === "collected" ? null : publishedAt;
+  if ((capture.backfillQuality ?? "native") === "native" && capture.originalPublishedAt === undefined) {
+    throw new Error("Native source capture must explicitly preserve originalPublishedAt, including null when unavailable");
+  }
+  const captureOriginalPublishedAt = capture.originalPublishedAt !== undefined
+    ? strictOptionalSourceTimestamp(capture.originalPublishedAt, "capture original publication timestamp")
+    : originalPublishedAt;
+  const captureCollectedAt = requireStrictSourceTimestamp(capture.collectedAt, "capture collection timestamp");
+  const storyPublishedAtRaw = story.publishedAtRaw?.trim() || null;
+  const capturePublishedAtRaw = capture.publishedAtRaw?.trim() || null;
+
+  if (storyPublishedAtRaw !== null && capturePublishedAtRaw !== null
+    && storyPublishedAtRaw !== capturePublishedAtRaw) {
+    throw new Error("Source and capture publishedAtRaw values must be identical");
+  }
+  const publishedAtRaw = capturePublishedAtRaw ?? storyPublishedAtRaw;
+  assertPublishedAtRawConsistency(publishedAtRaw, originalPublishedAt, timestampKind);
+
+  if (firstCollectedAt > lastCollectedAt) {
+    throw new Error("First source collection timestamp cannot be later than the last collection timestamp");
+  }
+  if (captureCollectedAt !== lastCollectedAt) {
+    throw new Error("Source and capture collection timestamps must identify the same observation");
+  }
+  if (captureOriginalPublishedAt !== originalPublishedAt) {
+    throw new Error("Source and capture original publication timestamps must be identical");
+  }
+  if (timestampKind === "published") {
+    if (!originalPublishedAt || publishedAt !== originalPublishedAt) {
+      throw new Error("Published source time requires a matching non-null original publication timestamp");
+    }
+  } else if (originalPublishedAt !== null || publishedAt !== lastCollectedAt) {
+    throw new Error("Collected source time requires a null original publication timestamp and display time equal to collection time");
+  }
+
+  return {
+    timestampKind,
+    firstCollectedAt,
+    lastCollectedAt,
+    publishedAt,
+    originalPublishedAt,
+    captureOriginalPublishedAt,
+    captureCollectedAt,
+  };
+}
+
+function sourceObservationIdentity(
+  story: RawStory,
+  sourceDocumentVersionId: string,
+  collectedAt: string,
+): string {
+  const capture = sourceCaptureForStory(story);
+  return `obs_${sha256ExactUtf8(canonicalEvidenceJson([
+    "source-collection-observation",
+    1,
+    story.sourceDocumentId,
+    sourceDocumentVersionId,
+    story.source,
+    story.sourceType,
+    collectedAt,
+    capture.rawUrl,
+    capture.finalUrl ?? null,
+    capture.feedUrl ?? null,
+    capture.mimeType ?? null,
+    capture.httpStatus ?? null,
+    capture.scope,
+    capture.capturedContentHash,
+  ]))}`;
+}
+
+function observationTime(story: RawStory): number {
+  const parsed = Date.parse(story.lastCollectedAt ?? story.collectedAt ?? story.publishedAt);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export async function saveSourceStories(stories: RawStory[]): Promise<SaveSourceStoriesResult> {
+  if (!stories.length) return { count: 0, stories: [] };
+  const identified = stories.map((input) => {
+    const story = ensureRawStoryIdentity(input);
+    if (input.sourceDocumentId !== undefined && input.sourceDocumentId !== story.sourceDocumentId) {
+      throw new TypeError("Provided sourceDocumentId does not match the canonical source identity");
+    }
+    for (const evidence of input.evidence ?? []) {
+      if (evidence.sourceDocumentId !== story.sourceDocumentId) {
+        throw new TypeError(`Evidence ${evidence.anchorKey} does not match the canonical source identity`);
+      }
+    }
+    if (input.capture?.canonicalUrl !== undefined
+      && input.capture.canonicalUrl !== story.capture?.canonicalUrl) {
+      throw new TypeError("Provided capture canonicalUrl does not match the canonical source identity");
+    }
+    return story;
+  });
+  // Validate the whole batch before either the in-memory store or PostgreSQL
+  // can observe a partial write.
+  for (const story of identified) {
+    const capture = sourceCaptureForStory(story);
+    assertSourceCaptureArtifact(capture);
+    strictSourceTimes(story, capture);
+    assertEvidenceBoundToSourceCapture(story, capture);
+  }
+  const observations = identified
+    .map((story, index) => ({ story, index }))
+    .sort((left, right) => (left.story.sourceDocumentId ?? "").localeCompare(right.story.sourceDocumentId ?? "")
+      || observationTime(left.story) - observationTime(right.story)
+      || left.index - right.index);
+  const resolved = new Array<RawStory>(identified.length);
 
   if (storageMode() === "memory") {
-    for (const story of unique) {
+    for (const observation of observations) {
+      const story = observation.story;
+      const capture = sourceCaptureForStory(story);
+      assertSourceCaptureArtifact(capture);
+      const sourceTimes = strictSourceTimes(story, capture);
       const documentId = story.sourceDocumentId!;
       const existing = sourceDocumentMemory.get(documentId);
       const firstCollectedAt = existing?.story.firstCollectedAt
-        ? earlierIso(existing.story.firstCollectedAt, story.firstCollectedAt ?? story.collectedAt ?? existing.story.firstCollectedAt)
-        : story.firstCollectedAt ?? story.collectedAt;
+        ? earlierIso(
+            requireStrictSourceTimestamp(existing.story.firstCollectedAt, "stored first source collection timestamp"),
+            sourceTimes.firstCollectedAt,
+          )
+        : sourceTimes.firstCollectedAt;
       const lastCollectedAt = existing?.story.lastCollectedAt
-        ? laterIso(existing.story.lastCollectedAt, story.lastCollectedAt ?? story.collectedAt ?? existing.story.lastCollectedAt)
-        : story.lastCollectedAt ?? story.collectedAt;
-      const normalizedStory = { ...structuredClone(story), firstCollectedAt, lastCollectedAt };
-      const previousVersion = existing?.versions.at(-1);
+        ? laterIso(
+            requireStrictSourceTimestamp(existing.story.lastCollectedAt, "stored last source collection timestamp"),
+            sourceTimes.lastCollectedAt,
+          )
+        : sourceTimes.lastCollectedAt;
       const versions = existing?.versions ?? [];
+      const previousVersion = versions.at(-1);
+      const sourceVersionId = previousVersion && previousVersion.contentHash === story.contentHash
+        ? previousVersion.id
+        : randomUUID();
+      const observationCollectedAt = sourceTimes.lastCollectedAt;
+      const sourceObservationId = sourceObservationIdentity(story, sourceVersionId, observationCollectedAt);
+      const normalizedEvidence = (story.evidence ?? []).map((rawEvidence) => {
+        const evidence = normalizeSourceEvidence({
+          ...rawEvidence,
+          sourceDocumentId: documentId,
+          sourceDocumentVersionId: sourceVersionId,
+        });
+        const priorEvidence = [...versions].reverse()
+          .flatMap((version) => [...(version.story.evidence ?? [])].reverse())
+          .find((candidate) => candidate.id === evidence.id);
+        const materialHash = evidenceVersionMaterialHash(evidence);
+        const priorHash = priorEvidence ? evidenceVersionMaterialHash(priorEvidence) : undefined;
+        return priorHash === materialHash
+          ? structuredClone(priorEvidence!)
+          : { ...evidence, versionId: randomUUID() };
+      });
+      const normalizedStory: RawStory = {
+        ...structuredClone(story),
+        firstCollectedAt,
+        lastCollectedAt,
+        collectedAt: sourceTimes.lastCollectedAt,
+        publishedAt: sourceTimes.publishedAt,
+        originalPublishedAt: sourceTimes.originalPublishedAt,
+        timestampKind: sourceTimes.timestampKind,
+        capture: {
+          ...structuredClone(capture),
+          originalPublishedAt: sourceTimes.captureOriginalPublishedAt,
+          collectedAt: sourceTimes.captureCollectedAt,
+        },
+        sourceDocumentVersionId: sourceVersionId,
+        sourceObservationId,
+        evidence: normalizedEvidence,
+      };
       if (!previousVersion || previousVersion.contentHash !== normalizedStory.contentHash) {
         versions.push({
-          id: randomUUID(),
+          id: sourceVersionId,
           versionNumber: (previousVersion?.versionNumber ?? 0) + 1,
           previousVersionId: previousVersion?.id,
           contentHash: normalizedStory.contentHash!,
@@ -759,8 +1024,9 @@ export async function saveSourceStories(stories: RawStory[]): Promise<number> {
         });
       }
       sourceDocumentMemory.set(documentId, { story: normalizedStory, versions });
+      resolved[observation.index] = normalizedStory;
     }
-    return unique.length;
+    return { count: resolved.length, stories: resolved };
   }
 
   await ensureSchema();
@@ -768,29 +1034,75 @@ export async function saveSourceStories(stories: RawStory[]): Promise<number> {
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext('analystarena_source_documents'))");
-    for (const story of unique) {
-      const firstCollectedAt = validIsoOrNow(story.firstCollectedAt ?? story.collectedAt);
-      const lastCollectedAt = validIsoOrNow(story.lastCollectedAt ?? story.collectedAt);
+    for (const observation of observations) {
+      const story = observation.story;
+      const capture = sourceCaptureForStory(story);
+      assertSourceCaptureArtifact(capture);
+      const sourceTimes = strictSourceTimes(story, capture);
+      const {
+        firstCollectedAt,
+        lastCollectedAt,
+        captureCollectedAt,
+        publishedAt,
+        originalPublishedAt,
+        captureOriginalPublishedAt,
+      } = sourceTimes;
+      const sourceUpdatedAt = strictOptionalSourceTimestamp(story.sourceUpdatedAt, "source update timestamp");
+      const captureSourceUpdatedAt = capture.sourceUpdatedAt !== undefined
+        ? strictOptionalSourceTimestamp(capture.sourceUpdatedAt, "capture source update timestamp")
+        : sourceUpdatedAt;
       await client.query(`
         INSERT INTO source_documents (
           id, native_id, canonical_url, source_name, source_type,
-          published_at, timestamp_kind, first_collected_at, last_collected_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          published_at, timestamp_kind, first_collected_at, last_collected_at,
+          original_published_at, published_at_raw, published_at_field, source_updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         ON CONFLICT (id) DO UPDATE SET
           native_id = COALESCE(EXCLUDED.native_id, source_documents.native_id),
           canonical_url = EXCLUDED.canonical_url,
           source_name = EXCLUDED.source_name,
           source_type = EXCLUDED.source_type,
           published_at = CASE
-            WHEN source_documents.timestamp_kind = 'collected' AND EXCLUDED.timestamp_kind = 'published'
+            WHEN source_documents.timestamp_kind = 'published'
+              AND source_documents.original_published_at IS NOT NULL
+              THEN source_documents.published_at
+            WHEN EXCLUDED.timestamp_kind = 'published'
               THEN EXCLUDED.published_at
-            ELSE source_documents.published_at
+            ELSE GREATEST(source_documents.last_collected_at, EXCLUDED.last_collected_at)
           END,
           timestamp_kind = CASE
-            WHEN source_documents.timestamp_kind = 'published' OR EXCLUDED.timestamp_kind = 'published'
+            WHEN (
+              source_documents.timestamp_kind = 'published'
+              AND source_documents.original_published_at IS NOT NULL
+            ) OR EXCLUDED.timestamp_kind = 'published'
               THEN 'published'
             ELSE 'collected'
           END,
+          original_published_at = CASE
+            WHEN source_documents.timestamp_kind = 'published'
+              AND source_documents.original_published_at IS NOT NULL
+              THEN source_documents.original_published_at
+            WHEN EXCLUDED.timestamp_kind = 'published'
+              THEN EXCLUDED.original_published_at
+            ELSE NULL
+          END,
+          published_at_raw = CASE
+            WHEN source_documents.timestamp_kind = 'published'
+              AND source_documents.original_published_at IS NOT NULL
+              THEN source_documents.published_at_raw
+            WHEN EXCLUDED.timestamp_kind = 'published'
+              THEN EXCLUDED.published_at_raw
+            ELSE NULL
+          END,
+          published_at_field = CASE
+            WHEN source_documents.timestamp_kind = 'published'
+              AND source_documents.original_published_at IS NOT NULL
+              THEN source_documents.published_at_field
+            WHEN EXCLUDED.timestamp_kind = 'published'
+              THEN EXCLUDED.published_at_field
+            ELSE NULL
+          END,
+          source_updated_at = GREATEST(source_documents.source_updated_at, EXCLUDED.source_updated_at),
           first_collected_at = LEAST(source_documents.first_collected_at, EXCLUDED.first_collected_at),
           last_collected_at = GREATEST(source_documents.last_collected_at, EXCLUDED.last_collected_at),
           updated_at = NOW()
@@ -800,10 +1112,14 @@ export async function saveSourceStories(stories: RawStory[]): Promise<number> {
         story.canonicalUrl,
         story.source,
         story.sourceType,
-        story.publishedAt,
-        story.timestampKind ?? "published",
+        publishedAt,
+        sourceTimes.timestampKind,
         firstCollectedAt,
         lastCollectedAt,
+        originalPublishedAt,
+        story.publishedAtRaw ?? null,
+        story.publishedAtField ?? null,
+        sourceUpdatedAt,
       ]);
       const previous = await client.query<{
         id: string;
@@ -818,6 +1134,8 @@ export async function saveSourceStories(stories: RawStory[]): Promise<number> {
         FOR UPDATE
       `, [story.sourceDocumentId]);
       const latest = previous.rows[0];
+      const sourceVersionId = latest?.content_hash === story.contentHash ? latest.id : randomUUID();
+      const storyForVersion: RawStory = { ...story, sourceDocumentVersionId: sourceVersionId };
       if (!latest || latest.content_hash !== story.contentHash) {
         await client.query(`
           INSERT INTO source_document_versions (
@@ -825,18 +1143,261 @@ export async function saveSourceStories(stories: RawStory[]): Promise<number> {
             content_hash, payload, collected_at
           ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
         `, [
-          randomUUID(),
+          sourceVersionId,
           story.sourceDocumentId,
           (latest?.version_number ?? 0) + 1,
           latest?.id ?? null,
           story.contentHash,
-          JSON.stringify(story),
+          JSON.stringify(storyForVersion),
           lastCollectedAt,
         ]);
       }
+      await client.query(`
+        INSERT INTO source_version_provenance (
+          source_document_version_id, source_document_id, native_id, source_name, source_type,
+          timestamp_kind, canonical_url, raw_url, final_url, feed_url, mime_type, http_status,
+          original_published_at, published_at_raw, published_at_field, source_updated_at,
+          collected_at, capture_scope, captured_content_hash,
+          captured_artifact, captured_artifact_encoding, captured_artifact_size_bytes,
+          captured_text_hash, extraction_method, extractor_version, backfill_quality
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+          $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+        ) ON CONFLICT (source_document_version_id) DO NOTHING
+      `, [
+        sourceVersionId,
+        story.sourceDocumentId,
+        story.nativeId ?? null,
+        story.source,
+        story.sourceType,
+        sourceTimes.timestampKind,
+        story.canonicalUrl,
+        capture.rawUrl ?? story.url,
+        capture.finalUrl ?? null,
+        capture.feedUrl ?? null,
+        capture.mimeType ?? null,
+        capture.httpStatus ?? null,
+        captureOriginalPublishedAt,
+        capture.publishedAtRaw ?? story.publishedAtRaw ?? null,
+        capture.publishedAtField ?? story.publishedAtField ?? null,
+        captureSourceUpdatedAt,
+        captureCollectedAt,
+        capture.scope,
+        capture.capturedContentHash,
+        capture.capturedArtifact ?? null,
+        capture.capturedArtifactEncoding ?? null,
+        capture.capturedArtifactSizeBytes ?? null,
+        capture.capturedTextHash ?? null,
+        capture.extractionMethod,
+        capture.extractorVersion,
+        capture.backfillQuality ?? "native",
+      ]);
+      const provenanceResult = await client.query<{
+        native_id: string | null;
+        timestamp_kind: TimestampKind;
+        canonical_url: string;
+        original_published_at: string | Date | null;
+        published_at_raw: string | null;
+        published_at_field: string | null;
+        source_updated_at: string | Date | null;
+        captured_content_hash: string;
+        captured_artifact: string | null;
+        captured_artifact_encoding: "utf8" | null;
+        captured_artifact_size_bytes: number | null;
+        captured_text_hash: string | null;
+        extraction_method: string;
+        extractor_version: string;
+        backfill_quality: SourceCapture["backfillQuality"];
+      }>(`
+        SELECT native_id, timestamp_kind, canonical_url,
+               original_published_at, published_at_raw, published_at_field,
+               source_updated_at, captured_content_hash, captured_artifact,
+               captured_artifact_encoding, captured_artifact_size_bytes,
+               captured_text_hash, extraction_method, extractor_version, backfill_quality
+        FROM source_version_provenance
+        WHERE source_document_id = $1 AND source_document_version_id = $2
+      `, [story.sourceDocumentId, sourceVersionId]);
+      const provenance = provenanceResult.rows[0];
+      if (!provenance) throw new Error(`Source version ${sourceVersionId} has no immutable provenance`);
+      const sourceObservationId = sourceObservationIdentity(story, sourceVersionId, lastCollectedAt);
+      await client.query(`
+        INSERT INTO source_collection_observations (
+          id, source_document_id, source_document_version_id,
+          source_name, source_type, collected_at, raw_url, final_url,
+          feed_url, mime_type, http_status, capture_scope, captured_content_hash
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (id) DO NOTHING
+      `, [
+        sourceObservationId,
+        story.sourceDocumentId,
+        sourceVersionId,
+        story.source,
+        story.sourceType,
+        lastCollectedAt,
+        capture.rawUrl ?? story.url,
+        capture.finalUrl ?? null,
+        capture.feedUrl ?? null,
+        capture.mimeType ?? null,
+        capture.httpStatus ?? null,
+        capture.scope,
+        capture.capturedContentHash,
+      ]);
+
+      const normalizedEvidence = [];
+      for (const rawEvidence of story.evidence ?? []) {
+        const evidence = normalizeSourceEvidence({
+          ...rawEvidence,
+          sourceDocumentId: story.sourceDocumentId!,
+          sourceDocumentVersionId: sourceVersionId,
+        });
+        await client.query(`
+          INSERT INTO evidence_items (id, source_document_id, anchor_key)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (source_document_id, anchor_key) DO NOTHING
+        `, [evidence.id, story.sourceDocumentId, evidence.anchorKey]);
+        const previousEvidence = await client.query<{
+          id: string;
+          version_number: number;
+          material_hash: string;
+          source_document_version_id: string;
+          quote_original: string | null;
+          quote_original_hash: string | null;
+          quote_language: string | null;
+          quote_zh_cn: string | null;
+          locator: SourceEvidence["locator"];
+          locator_hash: string;
+          locator_status: SourceEvidence["locatorStatus"];
+          directness: SourceEvidence["directness"];
+          capture_scope: SourceEvidence["captureScope"];
+          extraction_method: string;
+          extractor_version: string;
+          captured_at: string | Date;
+        }>(`
+          SELECT id, version_number, material_hash, source_document_version_id,
+                 quote_original, quote_original_hash, quote_language, quote_zh_cn,
+                 locator, locator_hash, locator_status, directness, capture_scope,
+                 extraction_method, extractor_version, captured_at
+          FROM evidence_versions
+          WHERE evidence_item_id = $1
+          ORDER BY version_number DESC
+          LIMIT 1
+          FOR UPDATE
+        `, [evidence.id]);
+        const prior = previousEvidence.rows[0];
+        const materialHash = evidenceVersionMaterialHash(evidence);
+        const evidenceVersionId = prior?.material_hash === materialHash
+          && prior.source_document_version_id === sourceVersionId ? prior.id : randomUUID();
+        if (evidenceVersionId !== prior?.id) {
+          const unavailableReason = evidence.locator.kind === "unavailable"
+            ? [evidence.locator.reasonCode, evidence.locator.detail].filter(Boolean).join(": ")
+            : null;
+          await client.query(`
+            INSERT INTO evidence_versions (
+              id, evidence_item_id, source_document_id, source_document_version_id,
+              version_number, previous_version_id, material_hash,
+              quote_original, quote_original_hash, quote_language, quote_zh_cn,
+              locator, locator_hash, locator_kind, locator_status, availability_status,
+              directness, capture_scope, extraction_method, extractor_version,
+              captured_at, unavailable_reason
+            ) VALUES (
+              $1, $2, $3, $4, $5, $6, $7,
+              $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16,
+              $17, $18, $19, $20, $21, $22
+            )
+          `, [
+            evidenceVersionId,
+            evidence.id,
+            story.sourceDocumentId,
+            sourceVersionId,
+            (prior?.version_number ?? 0) + 1,
+            prior?.id ?? null,
+            materialHash,
+            evidence.quoteOriginal ?? null,
+            evidence.quoteHash ?? null,
+            evidence.quoteLanguage ?? null,
+            evidence.quoteZhCn ?? null,
+            JSON.stringify(evidence.locator),
+            evidence.locatorHash,
+            evidence.locator.kind,
+            evidence.locatorStatus,
+            evidence.locatorStatus === "unavailable" ? "unavailable" : "available",
+            evidence.directness,
+            evidence.captureScope,
+            evidence.extractionMethod,
+            evidence.extractorVersion,
+            evidence.capturedAt,
+            unavailableReason,
+          ]);
+        }
+        normalizedEvidence.push(prior?.id === evidenceVersionId ? normalizeSourceEvidence({
+          id: evidence.id,
+          versionId: prior.id,
+          sourceDocumentId: story.sourceDocumentId!,
+          sourceDocumentVersionId: prior.source_document_version_id,
+          anchorKey: evidence.anchorKey,
+          ...(prior.quote_original === null ? {} : { quoteOriginal: prior.quote_original }),
+          ...(prior.quote_original_hash === null ? {} : { quoteHash: prior.quote_original_hash }),
+          ...(prior.quote_language === null ? {} : { quoteLanguage: prior.quote_language }),
+          ...(prior.quote_zh_cn === null ? {} : { quoteZhCn: prior.quote_zh_cn }),
+          locator: prior.locator,
+          locatorHash: prior.locator_hash,
+          locatorStatus: prior.locator_status,
+          directness: prior.directness,
+          captureScope: prior.capture_scope,
+          extractionMethod: prior.extraction_method,
+          extractorVersion: prior.extractor_version,
+          capturedAt: iso(prior.captured_at),
+        }) : { ...evidence, versionId: evidenceVersionId });
+      }
+      const canonicalOriginalPublishedAt = dbOptionalIso(provenance.original_published_at);
+      const canonicalCapture: SourceCapture = {
+        rawUrl: capture.rawUrl ?? story.url,
+        canonicalUrl: provenance.canonical_url,
+        ...(capture.finalUrl ? { finalUrl: capture.finalUrl } : {}),
+        ...(capture.feedUrl ? { feedUrl: capture.feedUrl } : {}),
+        ...(capture.mimeType ? { mimeType: capture.mimeType } : {}),
+        ...(capture.httpStatus === undefined ? {} : { httpStatus: capture.httpStatus }),
+        originalPublishedAt: canonicalOriginalPublishedAt,
+        ...(provenance.published_at_raw ? { publishedAtRaw: provenance.published_at_raw } : {}),
+        ...(provenance.published_at_field ? { publishedAtField: provenance.published_at_field } : {}),
+        ...(provenance.source_updated_at ? { sourceUpdatedAt: iso(provenance.source_updated_at) } : {}),
+        collectedAt: lastCollectedAt,
+        scope: capture.scope,
+        capturedContentHash: provenance.captured_content_hash,
+        ...(provenance.captured_artifact === null ? {} : { capturedArtifact: provenance.captured_artifact }),
+        ...(provenance.captured_artifact_encoding === null ? {} : {
+          capturedArtifactEncoding: provenance.captured_artifact_encoding,
+        }),
+        ...(provenance.captured_artifact_size_bytes === null ? {} : {
+          capturedArtifactSizeBytes: provenance.captured_artifact_size_bytes,
+        }),
+        ...(provenance.captured_text_hash === null ? {} : { capturedTextHash: provenance.captured_text_hash }),
+        extractionMethod: provenance.extraction_method,
+        extractorVersion: provenance.extractor_version,
+        backfillQuality: provenance.backfill_quality,
+      };
+      assertSourceCaptureArtifact(canonicalCapture);
+      resolved[observation.index] = {
+        ...storyForVersion,
+        url: capture.rawUrl ?? story.url,
+        nativeId: provenance.native_id ?? undefined,
+        canonicalUrl: provenance.canonical_url,
+        contentHash: provenance.captured_content_hash,
+        publishedAt: canonicalOriginalPublishedAt ?? lastCollectedAt,
+        originalPublishedAt: canonicalOriginalPublishedAt,
+        publishedAtRaw: provenance.published_at_raw ?? undefined,
+        publishedAtField: provenance.published_at_field ?? undefined,
+        sourceUpdatedAt: provenance.source_updated_at ? iso(provenance.source_updated_at) : undefined,
+        collectedAt: lastCollectedAt,
+        lastCollectedAt,
+        timestampKind: provenance.timestamp_kind,
+        capture: canonicalCapture,
+        sourceObservationId,
+        evidence: normalizedEvidence,
+      };
     }
     await client.query("COMMIT");
-    return unique.length;
+    return { count: resolved.length, stories: resolved };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;
@@ -1203,13 +1764,13 @@ async function persistBriefObservationMemory(
         snapshotId: "",
         eventId: entry.id,
         eventVersionId: version.id,
-        rank: incoming.rank,
-        rankingScore: incoming.rankingScore,
-        freshnessScore: incoming.freshnessScore,
-        impact: incoming.impact,
-        confidence: incoming.confidence,
-        mentions: incoming.mentions,
-        crossSourceCount: incoming.crossSourceCount,
+        rank: stableHeadline.rank,
+        rankingScore: stableHeadline.rankingScore,
+        freshnessScore: stableHeadline.freshnessScore,
+        impact: stableHeadline.impact,
+        confidence: stableHeadline.confidence,
+        mentions: stableHeadline.mentions,
+        crossSourceCount: stableHeadline.crossSourceCount,
         matchMethod,
         matchConfidence,
       });
@@ -1234,6 +1795,7 @@ async function persistBriefObservationMemory(
         previousSnapshotId: previous?.id,
         payloadHash,
         persistedAt,
+        events: observations.map(snapshotEventProjection),
       },
     };
     const snapshot: BriefSnapshotRecord = {
@@ -1371,6 +1933,135 @@ async function loadDailyRecordForWrite(
         FROM daily_briefs WHERE id = $1 ${lock ? "FOR UPDATE" : ""}
       `, [write.id]);
   return result.rows[0] ? rowToRecord(result.rows[0]) : null;
+}
+
+export class EvidenceIntegrityError extends Error {
+  readonly code = "EVIDENCE_INTEGRITY_ERROR";
+  readonly issues: Array<{ code: string; message: string; headlineId: string }>;
+
+  constructor(issues: Array<{ code: string; message: string; headlineId: string }>) {
+    super(`Evidence integrity validation failed: ${issues.map((issue) => `${issue.code} (${issue.headlineId})`).join(", ")}`);
+    this.name = "EvidenceIntegrityError";
+    this.issues = issues;
+  }
+}
+
+async function persistHeadlineEvidenceRelations(
+  client: PoolClient,
+  eventId: string,
+  eventVersionId: string,
+  headline: Headline,
+): Promise<void> {
+  const sourceVersions = headline.sources
+    .filter((source): source is typeof source & { sourceDocumentId: string; sourceDocumentVersionId: string } =>
+      Boolean(source.sourceDocumentId && source.sourceDocumentVersionId))
+    .filter((source, index, all) => all.findIndex((candidate) =>
+      candidate.sourceDocumentVersionId === source.sourceDocumentVersionId) === index);
+
+  const authoritativeSources = sourceVersions.map((source, index) => ({
+    source,
+    sourceRole: source.role
+      ?? (index === 0 ? "primary" : source.type === "Reddit" || source.type === "X" ? "social_signal" : "corroborating"),
+    sourceOrdinal: index + 1,
+  }));
+
+  for (const { source, sourceRole, sourceOrdinal } of authoritativeSources) {
+    await client.query(`
+      INSERT INTO event_version_sources (
+        event_id, event_version_id, source_document_id, source_document_version_id,
+        source_role, ordinal
+      ) VALUES ($1, $2, $3, $4, $5, $6)
+    `, [eventId, eventVersionId, source.sourceDocumentId, source.sourceDocumentVersionId, sourceRole, sourceOrdinal]);
+
+    for (const [evidenceIndex, evidence] of (source.evidence ?? []).entries()) {
+      if (!evidence.versionId
+        || evidence.sourceDocumentId !== source.sourceDocumentId
+        || evidence.sourceDocumentVersionId !== source.sourceDocumentVersionId) {
+        throw new EvidenceIntegrityError([{
+          code: "EVENT_EVIDENCE_VERSION_REQUIRED",
+          message: `Evidence ${evidence.id} must bind to the exact displayed source version`,
+          headlineId: headline.id,
+        }]);
+      }
+      await client.query(`
+        INSERT INTO event_version_evidence (
+          event_id, event_version_id, source_document_id, source_document_version_id,
+          source_role, source_ordinal, evidence_item_id, evidence_version_id,
+          directness, evidence_ordinal
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `, [
+        eventId,
+        eventVersionId,
+        source.sourceDocumentId,
+        source.sourceDocumentVersionId,
+        sourceRole,
+        sourceOrdinal,
+        evidence.id,
+        evidence.versionId,
+        evidence.directness,
+        evidenceIndex + 1,
+      ]);
+    }
+  }
+
+  if (!headline.claims?.length) return;
+  const validation = validateHeadlineEvidence(headline);
+  if (!validation.valid) throw new EvidenceIntegrityError(validation.issues);
+
+  for (const claim of headline.claims) {
+    const claimDatabaseId = randomUUID();
+    await client.query(`
+      INSERT INTO event_claims (
+        id, event_id, event_version_id, claim_key, claim_type, ordinal,
+        statement, original_statement, statement_hash, language,
+        verification_status, generator, generator_version
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    `, [
+      claimDatabaseId,
+      eventId,
+      eventVersionId,
+      claim.claimKey,
+      claim.type,
+      claim.ordinal + 1,
+      claim.statement,
+      claim.originalStatement ?? null,
+      claim.statementHash,
+      claim.language,
+      claim.verificationStatus,
+      claim.generator,
+      claim.generatorVersion,
+    ]);
+    for (const [citationIndex, citation] of claim.citations.entries()) {
+      if (!citation.sourceDocumentVersionId || !citation.versionId) {
+        throw new EvidenceIntegrityError([{
+          code: "CITATION_VERSION_REQUIRED",
+          message: `Claim ${claim.claimKey} must cite an exact source and evidence version`,
+          headlineId: headline.id,
+        }]);
+      }
+      await client.query(`
+        INSERT INTO claim_evidence_links (
+          event_id, event_version_id, claim_id, claim_key,
+          source_document_id, source_document_version_id,
+          evidence_item_id, evidence_version_id, relation, directness,
+          confidence, ordinal
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `, [
+        eventId,
+        eventVersionId,
+        claimDatabaseId,
+        claim.claimKey,
+        citation.sourceDocumentId,
+        citation.sourceDocumentVersionId,
+        citation.id,
+        citation.versionId,
+        citation.relation,
+        citation.directness,
+        citation.confidence,
+        citationIndex + 1,
+      ]);
+    }
+  }
 }
 
 async function persistBriefObservationPostgres(
@@ -1582,6 +2273,7 @@ async function persistBriefObservationPostgres(
           JSON.stringify(material.payload),
         ]);
         version = rowToEventVersion(insertedVersion.rows[0]);
+        await persistHeadlineEvidenceRelations(client, state.event.id, version.id, stableHeadline);
       }
 
       await client.query(`
@@ -1617,13 +2309,13 @@ async function persistBriefObservationPostgres(
       pendingObservations.push({
         eventId: state.event.id,
         eventVersionId: version.id,
-        rank: incoming.rank,
-        rankingScore: incoming.rankingScore,
-        freshnessScore: incoming.freshnessScore,
-        impact: incoming.impact,
-        confidence: incoming.confidence,
-        mentions: incoming.mentions,
-        crossSourceCount: incoming.crossSourceCount,
+        rank: stableHeadline.rank,
+        rankingScore: stableHeadline.rankingScore,
+        freshnessScore: stableHeadline.freshnessScore,
+        impact: stableHeadline.impact,
+        confidence: stableHeadline.confidence,
+        mentions: stableHeadline.mentions,
+        crossSourceCount: stableHeadline.crossSourceCount,
         matchMethod,
         matchConfidence,
       });
@@ -1653,6 +2345,7 @@ async function persistBriefObservationPostgres(
         previousSnapshotId,
         payloadHash,
         persistedAt,
+        events: pendingObservations.map((observation) => structuredClone(observation)),
       },
     };
     await client.query(`
@@ -1702,6 +2395,48 @@ async function persistBriefObservationPostgres(
         match_method: observation.matchMethod,
         match_confidence: observation.matchConfidence,
       })))]);
+    }
+    const snapshotEventVersions = new Map(
+      pendingObservations.map((observation) => [observation.eventId, observation.eventVersionId]),
+    );
+    for (const headline of stableBrief.headlines) {
+      const eventVersionId = snapshotEventVersions.get(headline.id);
+      if (!eventVersionId) throw new Error(`Snapshot event ${headline.id} has no exact event version`);
+      const observedSources = headline.sources
+        .filter((source): source is typeof source & {
+          sourceDocumentId: string;
+          sourceDocumentVersionId: string;
+          sourceObservationId: string;
+        } => Boolean(source.sourceDocumentId && source.sourceDocumentVersionId && source.sourceObservationId))
+        .filter((source, index, all) => all.findIndex((candidate) =>
+          candidate.sourceDocumentVersionId === source.sourceDocumentVersionId) === index);
+      for (const source of observedSources) {
+        const insertedObservation = await client.query(`
+          INSERT INTO brief_snapshot_source_observations (
+            snapshot_id, event_id, event_version_id,
+            source_document_id, source_document_version_id,
+            source_observation_id, source_role, ordinal
+          )
+          SELECT $1, $2, $3, event_source.source_document_id,
+                 event_source.source_document_version_id, $6,
+                 event_source.source_role, event_source.ordinal
+          FROM event_version_sources AS event_source
+          WHERE event_source.event_id = $2
+            AND event_source.event_version_id = $3
+            AND event_source.source_document_id = $4
+            AND event_source.source_document_version_id = $5
+        `, [
+          snapshotId,
+          headline.id,
+          eventVersionId,
+          source.sourceDocumentId,
+          source.sourceDocumentVersionId,
+          source.sourceObservationId,
+        ]);
+        if (insertedObservation.rowCount !== 1) {
+          throw new Error(`Source observation ${source.sourceObservationId} is not bound to event version ${eventVersionId}`);
+        }
+      }
     }
     let record: BriefRecord | undefined;
     if (dailyWrite?.kind === "save_draft") {
@@ -1952,6 +2687,774 @@ export async function updateDraft(
     : await persistBriefObservationPostgres(brief, normalized, write);
   if (!result.record) throw new Error("日报更新失败");
   return result.record;
+}
+
+export interface EvidenceAuthorityIssue {
+  headlineId: string;
+  code: string;
+  reason: string;
+}
+
+function authorityIssue(headlineId: string, code: string, reason: string): EvidenceAuthorityIssue {
+  return { headlineId, code, reason };
+}
+
+function dbOptionalIso(value: string | Date | null): string | null {
+  return value ? new Date(value).toISOString() : null;
+}
+
+/**
+ * Verifies the snapshot projection against normalized PostgreSQL authority.
+ * This prevents a client from reusing real IDs while forging quote text,
+ * hashes, locators, claim status, or source-version relationships in JSON.
+ */
+export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<EvidenceAuthorityIssue[]> {
+  if (storageMode() === "memory") {
+    return brief.mode === "demo" ? [] : brief.headlines.map((headline) => authorityIssue(
+      headline.id,
+      "DATABASE_AUTHORITY_UNAVAILABLE",
+      "实时日报必须使用 PostgreSQL 核对不可变来源、证据与声明版本",
+    ));
+  }
+  await ensureSchema();
+  const snapshot = brief.snapshot;
+  const snapshotId = snapshot?.id;
+  if (!snapshotId) return brief.headlines.map((headline) =>
+    authorityIssue(headline.id, "SNAPSHOT_AUTHORITY_MISSING", "日报没有可核对的不可变快照版本"));
+
+  const issues: EvidenceAuthorityIssue[] = [];
+  const snapshotEvents = await pool().query<BriefSnapshotEventRow>(`
+    SELECT snapshot_id, event_id, event_version_id, rank, ranking_score,
+           freshness_score, impact, confidence, mentions, cross_source_count,
+           match_method, match_confidence
+    FROM brief_snapshot_events
+    WHERE snapshot_id = $1
+  `, [snapshotId]);
+  const authoritativeSnapshotEvents = new Map(snapshotEvents.rows.map((row) => [row.event_id, rowToSnapshotEvent(row)]));
+  const eventVersions = new Map(snapshotEvents.rows.map((row) => [row.event_id, row.event_version_id]));
+  const projectedEventIds = brief.headlines.map((headline) => headline.id);
+  if (new Set(projectedEventIds).size !== projectedEventIds.length
+    || eventVersions.size !== projectedEventIds.length
+    || projectedEventIds.some((eventId) => !eventVersions.has(eventId))) {
+    for (const headline of brief.headlines) {
+      issues.push(authorityIssue(
+        headline.id,
+        "SNAPSHOT_EVENT_SET_AUTHORITY_MISMATCH",
+        "页面事件集合与不可变快照登记的事件集合或数量不同",
+      ));
+    }
+  }
+  const projectedSnapshotEvents = snapshot?.events ?? [];
+  const projectedSnapshotEventMap = new Map(projectedSnapshotEvents.map((event) => [event.eventId, event]));
+  if (projectedSnapshotEventMap.size !== projectedSnapshotEvents.length
+    || projectedSnapshotEventMap.size !== authoritativeSnapshotEvents.size
+    || [...authoritativeSnapshotEvents.keys()].some((eventId) => !projectedSnapshotEventMap.has(eventId))) {
+    for (const headline of brief.headlines) {
+      issues.push(authorityIssue(
+        headline.id,
+        "SNAPSHOT_EVENT_PROJECTION_SET_MISMATCH",
+        "待发布快照的事件投影集合与数据库冻结的快照事件集合不一致。",
+      ));
+    }
+  }
+
+  for (const headline of brief.headlines) {
+    const eventVersionId = eventVersions.get(headline.id);
+    if (!eventVersionId) {
+      issues.push(authorityIssue(headline.id, "EVENT_VERSION_AUTHORITY_MISSING", "快照没有对应的事件版本"));
+      continue;
+    }
+    const authoritativeSnapshotEvent = authoritativeSnapshotEvents.get(headline.id);
+    const projectedSnapshotEvent = projectedSnapshotEventMap.get(headline.id);
+    if (!authoritativeSnapshotEvent || !projectedSnapshotEvent) {
+      issues.push(authorityIssue(
+        headline.id,
+        "SNAPSHOT_EVENT_PROJECTION_AUTHORITY_MISSING",
+        "待发布事件缺少可与数据库逐项核对的快照事件投影。",
+      ));
+    } else {
+      const authoritativeProjection = snapshotEventProjection(authoritativeSnapshotEvent);
+      if (canonicalEvidenceJson(projectedSnapshotEvent) !== canonicalEvidenceJson(authoritativeProjection)) {
+        issues.push(authorityIssue(
+          headline.id,
+          "SNAPSHOT_EVENT_PROJECTION_AUTHORITY_MISMATCH",
+          "事件版本、排名分数、新鲜度、影响、置信度、提及数、跨来源数或匹配结果与数据库快照不一致。",
+        ));
+      }
+      const projectedRanking = {
+        rank: headline.rank,
+        rankingScore: headline.rankingScore ?? null,
+        freshnessScore: headline.freshnessScore ?? null,
+        impact: headline.impact,
+        confidence: headline.confidence,
+        mentions: headline.mentions,
+        crossSourceCount: headline.crossSourceCount ?? null,
+      };
+      const authoritativeRanking = {
+        rank: authoritativeSnapshotEvent.rank,
+        rankingScore: authoritativeSnapshotEvent.rankingScore ?? null,
+        freshnessScore: authoritativeSnapshotEvent.freshnessScore ?? null,
+        impact: authoritativeSnapshotEvent.impact,
+        confidence: authoritativeSnapshotEvent.confidence,
+        mentions: authoritativeSnapshotEvent.mentions,
+        crossSourceCount: authoritativeSnapshotEvent.crossSourceCount ?? null,
+      };
+      if (canonicalEvidenceJson(projectedRanking) !== canonicalEvidenceJson(authoritativeRanking)) {
+        issues.push(authorityIssue(
+          headline.id,
+          "SNAPSHOT_RANKING_AUTHORITY_MISMATCH",
+          "待发布头条的排名和评分字段与数据库冻结的快照事件不一致。",
+        ));
+      }
+    }
+    const eventVersionResult = await pool().query<EventVersionRow>(`
+      SELECT id, event_id, version_number, previous_version_id, content_hash,
+             evidence_hash, state_hash, presentation_hash, observed_at, run_id,
+             payload, created_at
+      FROM event_versions
+      WHERE event_id = $1 AND id = $2
+    `, [headline.id, eventVersionId]);
+    const eventVersionRow = eventVersionResult.rows[0];
+    if (!eventVersionRow) {
+      issues.push(authorityIssue(
+        headline.id,
+        "EVENT_VERSION_AUTHORITY_MISSING",
+        "快照指向的事件版本不存在。",
+      ));
+    } else {
+      try {
+        const authorityPayload = parseEventVersionPayload(eventVersionRow.payload);
+        const authorityHeadline = authorityPayload?.headline;
+        if (!authorityHeadline) throw new Error("event version has no headline payload");
+        const authorityMaterial = eventVersionMaterial(authorityHeadline);
+        const projectedMaterial = eventVersionMaterial(headline);
+        const storedHashes = {
+          versionHash: eventVersionRow.content_hash,
+          evidenceHash: eventVersionRow.evidence_hash,
+          stateHash: eventVersionRow.state_hash,
+          presentationHash: eventVersionRow.presentation_hash,
+        };
+        const authorityHashes = {
+          versionHash: authorityMaterial.versionHash,
+          evidenceHash: authorityMaterial.evidenceHash,
+          stateHash: authorityMaterial.stateHash,
+          presentationHash: authorityMaterial.presentationHash,
+        };
+        if (canonicalEvidenceJson(storedHashes) !== canonicalEvidenceJson(authorityHashes)
+          || canonicalEvidenceJson({ evidence: authorityPayload?.evidence })
+            !== canonicalEvidenceJson({ evidence: authorityMaterial.payload.evidence })
+          || canonicalEvidenceJson({ state: authorityPayload?.state })
+            !== canonicalEvidenceJson({ state: authorityMaterial.payload.state })
+          || canonicalEvidenceJson({ presentation: authorityPayload?.presentation })
+            !== canonicalEvidenceJson({ presentation: authorityMaterial.payload.presentation })) {
+          issues.push(authorityIssue(
+            headline.id,
+            "EVENT_VERSION_INTERNAL_INTEGRITY_MISMATCH",
+            "数据库事件版本的内容、证据、状态或展示哈希无法由其冻结载荷重算得到。",
+          ));
+        }
+        const projectedHashes = {
+          versionHash: projectedMaterial.versionHash,
+          evidenceHash: projectedMaterial.evidenceHash,
+          stateHash: projectedMaterial.stateHash,
+        };
+        const authoritativeStateHashes = {
+          versionHash: eventVersionRow.content_hash,
+          evidenceHash: eventVersionRow.evidence_hash,
+          stateHash: eventVersionRow.state_hash,
+        };
+        if (canonicalEvidenceJson(projectedHashes) !== canonicalEvidenceJson(authoritativeStateHashes)
+          || canonicalEvidenceJson({ evidence: projectedMaterial.payload.evidence })
+            !== canonicalEvidenceJson({ evidence: authorityPayload?.evidence })
+          || canonicalEvidenceJson({ state: projectedMaterial.payload.state })
+            !== canonicalEvidenceJson({ state: authorityPayload?.state })) {
+          issues.push(authorityIssue(
+            headline.id,
+            "EVENT_VERSION_STATE_AUTHORITY_MISMATCH",
+            "待发布事件的版本哈希、证据状态或投资判断状态与快照指向的数据库事件版本不一致。",
+          ));
+        }
+        // A translated title/summary is a snapshot presentation and may have a
+        // different presentation hash. Those page fields are bound below by
+        // exact claim rows. Equity narratives are not standalone claims, so
+        // they must remain byte-for-byte equal to the reviewed event version.
+        const projectedPresentation = projectedMaterial.payload.presentation as { equityNarrative?: unknown } | undefined;
+        const authorityPresentation = authorityPayload?.presentation as { equityNarrative?: unknown } | undefined;
+        if (canonicalEvidenceJson({ equityNarrative: projectedPresentation?.equityNarrative })
+          !== canonicalEvidenceJson({ equityNarrative: authorityPresentation?.equityNarrative })) {
+          issues.push(authorityIssue(
+            headline.id,
+            "EVENT_PRESENTATION_AUTHORITY_MISMATCH",
+            "待发布的股票影响说明在审核后发生变化，必须另存为新快照并重新审核。",
+          ));
+        }
+      } catch {
+        issues.push(authorityIssue(
+          headline.id,
+          "EVENT_VERSION_INTERNAL_INTEGRITY_INVALID",
+          "数据库事件版本载荷无法解析或无法重算权威哈希。",
+        ));
+      }
+    }
+    const sourceRows = await pool().query<{
+      source_observation_id: string;
+      source_role: NonNullable<SourceLink["role"]>;
+      source_ordinal: number;
+      source_document_id: string;
+      source_document_version_id: string;
+      content_hash: string;
+      original_title: string | null;
+      feed_namespace: string | null;
+      native_id: string | null;
+      observation_source_name: string;
+      observation_source_type: SourceLink["type"];
+      observation_collected_at: string | Date;
+      observation_raw_url: string;
+      observation_final_url: string | null;
+      observation_feed_url: string | null;
+      observation_mime_type: string | null;
+      observation_http_status: number | null;
+      observation_capture_scope: SourceCapture["scope"];
+      timestamp_kind: TimestampKind;
+      canonical_url: string;
+      original_published_at: string | Date | null;
+      published_at_raw: string | null;
+      published_at_field: string | null;
+      source_updated_at: string | Date | null;
+      captured_content_hash: string;
+      captured_artifact: string | null;
+      captured_artifact_encoding: "utf8" | null;
+      captured_artifact_size_bytes: number | null;
+      captured_text_hash: string | null;
+      extraction_method: string;
+      extractor_version: string;
+      backfill_quality: NonNullable<SourceCapture["backfillQuality"]>;
+    }>(`
+      SELECT observation.id AS source_observation_id,
+             snapshot_source.source_role, snapshot_source.ordinal AS source_ordinal,
+             snapshot_source.source_document_id, snapshot_source.source_document_version_id,
+             sdv.content_hash, NULLIF(sdv.payload->>'originalTitle', '') AS original_title,
+             NULLIF(sdv.payload->>'feedNamespace', '') AS feed_namespace,
+             p.native_id,
+             observation.source_name AS observation_source_name,
+             observation.source_type AS observation_source_type,
+             observation.collected_at AS observation_collected_at,
+             observation.raw_url AS observation_raw_url,
+             observation.final_url AS observation_final_url,
+             observation.feed_url AS observation_feed_url,
+             observation.mime_type AS observation_mime_type,
+             observation.http_status AS observation_http_status,
+             observation.capture_scope AS observation_capture_scope,
+             p.timestamp_kind, p.canonical_url, p.original_published_at,
+             p.published_at_raw, p.published_at_field, p.source_updated_at,
+             p.captured_content_hash, p.captured_artifact,
+             p.captured_artifact_encoding, p.captured_artifact_size_bytes,
+             p.captured_text_hash,
+             p.extraction_method, p.extractor_version, p.backfill_quality
+      FROM brief_snapshot_source_observations AS snapshot_source
+      JOIN source_collection_observations AS observation
+        ON observation.source_document_id = snapshot_source.source_document_id
+       AND observation.source_document_version_id = snapshot_source.source_document_version_id
+       AND observation.id = snapshot_source.source_observation_id
+      JOIN source_document_versions sdv
+        ON sdv.source_document_id = snapshot_source.source_document_id
+       AND sdv.id = snapshot_source.source_document_version_id
+      JOIN source_version_provenance p
+        ON p.source_document_id = snapshot_source.source_document_id
+       AND p.source_document_version_id = snapshot_source.source_document_version_id
+      WHERE snapshot_source.snapshot_id = $1
+        AND snapshot_source.event_id = $2
+        AND snapshot_source.event_version_id = $3
+      ORDER BY snapshot_source.ordinal
+    `, [snapshotId, headline.id, eventVersionId]);
+    const eventSourceRows = await pool().query<{
+      source_document_id: string;
+      source_document_version_id: string;
+      source_role: string;
+      ordinal: number;
+    }>(`
+      SELECT source_document_id, source_document_version_id, source_role, ordinal
+      FROM event_version_sources
+      WHERE event_id = $1 AND event_version_id = $2
+      ORDER BY ordinal
+    `, [headline.id, eventVersionId]);
+    const snapshotSourceRegistration = sourceRows.rows.map((row) => ({
+      sourceDocumentId: row.source_document_id,
+      sourceDocumentVersionId: row.source_document_version_id,
+      sourceRole: row.source_role,
+      ordinal: row.source_ordinal,
+    }));
+    const eventSourceRegistration = eventSourceRows.rows.map((row) => ({
+      sourceDocumentId: row.source_document_id,
+      sourceDocumentVersionId: row.source_document_version_id,
+      sourceRole: row.source_role,
+      ordinal: row.ordinal,
+    }));
+    if (canonicalEvidenceJson(snapshotSourceRegistration) !== canonicalEvidenceJson(eventSourceRegistration)) {
+      issues.push(authorityIssue(
+        headline.id,
+        "SNAPSHOT_SOURCE_SET_AUTHORITY_MISMATCH",
+        "快照采集观察没有完整覆盖事件版本登记的来源集合",
+      ));
+    }
+    const authoritativeSources = new Map(sourceRows.rows.map((row) => [row.source_observation_id, row]));
+    const projectedObservationIds = headline.sources
+      .map((source) => source.sourceObservationId)
+      .filter((id): id is string => Boolean(id));
+    if (authoritativeSources.size !== headline.sources.length
+      || projectedObservationIds.length !== headline.sources.length
+      || new Set(projectedObservationIds).size !== projectedObservationIds.length
+      || projectedObservationIds.some((id) => !authoritativeSources.has(id))) {
+      issues.push(authorityIssue(
+        headline.id,
+        "SOURCE_OBSERVATION_SET_AUTHORITY_MISMATCH",
+        "页面来源集合必须逐项对应快照登记的不可变采集观察",
+      ));
+    }
+    for (const [sourceIndex, source] of headline.sources.entries()) {
+      if (!source.sourceObservationId || !source.sourceDocumentVersionId || !source.sourceDocumentId) {
+        issues.push(authorityIssue(headline.id, "SOURCE_AUTHORITY_ID_MISSING", `来源 ${source.name} 缺少文档、版本或采集观察 ID`));
+        continue;
+      }
+      const row = authoritativeSources.get(source.sourceObservationId);
+      if (!row || row.source_document_id !== source.sourceDocumentId) {
+        issues.push(authorityIssue(headline.id, "SOURCE_VERSION_AUTHORITY_MISMATCH", `来源 ${source.name} 未登记在该快照事件版本`));
+        continue;
+      }
+      const capture = source.capture;
+      const authoritativeOriginalPublishedAt = dbOptionalIso(row.original_published_at);
+      const authoritativeCollectedAt = dbOptionalIso(row.observation_collected_at)!;
+      const authoritativePublishedAt = authoritativeOriginalPublishedAt ?? authoritativeCollectedAt;
+      const projected = {
+        sourceObservationId: source.sourceObservationId,
+        role: source.role ?? null,
+        ordinal: sourceIndex + 1,
+        sourceDocumentId: source.sourceDocumentId,
+        sourceDocumentVersionId: source.sourceDocumentVersionId,
+        contentHash: source.contentHash ?? null,
+        originalTitle: source.originalTitle ?? null,
+        feedNamespace: source.feedNamespace ?? null,
+        nativeId: source.nativeId ?? null,
+        sourceName: source.name,
+        sourceType: source.type,
+        url: source.url,
+        timestampKind: source.timestampKind ?? null,
+        canonicalUrl: source.canonicalUrl ?? null,
+        publishedAt: source.publishedAt ? (parseStrictSourceTimestamp(source.publishedAt) ?? `invalid:${source.publishedAt}`) : null,
+        collectedAt: source.collectedAt ? (parseStrictSourceTimestamp(source.collectedAt) ?? `invalid:${source.collectedAt}`) : null,
+        originalPublishedAt: source.originalPublishedAt
+          ? (parseStrictSourceTimestamp(source.originalPublishedAt) ?? `invalid:${source.originalPublishedAt}`)
+          : null,
+        publishedAtRaw: source.publishedAtRaw ?? null,
+        publishedAtField: source.publishedAtField ?? null,
+        sourceUpdatedAt: source.sourceUpdatedAt
+          ? (parseStrictSourceTimestamp(source.sourceUpdatedAt) ?? `invalid:${source.sourceUpdatedAt}`)
+          : null,
+        rawUrl: capture?.rawUrl ?? null,
+        captureCanonicalUrl: capture?.canonicalUrl ?? null,
+        finalUrl: capture?.finalUrl ?? null,
+        feedUrl: capture?.feedUrl ?? null,
+        mimeType: capture?.mimeType ?? null,
+        httpStatus: capture?.httpStatus ?? null,
+        captureOriginalPublishedAt: capture?.originalPublishedAt
+          ? (parseStrictSourceTimestamp(capture.originalPublishedAt) ?? `invalid:${capture.originalPublishedAt}`)
+          : null,
+        capturePublishedAtRaw: capture?.publishedAtRaw ?? null,
+        capturePublishedAtField: capture?.publishedAtField ?? null,
+        captureSourceUpdatedAt: capture?.sourceUpdatedAt
+          ? (parseStrictSourceTimestamp(capture.sourceUpdatedAt) ?? `invalid:${capture.sourceUpdatedAt}`)
+          : null,
+        captureCollectedAt: capture?.collectedAt
+          ? (parseStrictSourceTimestamp(capture.collectedAt) ?? `invalid:${capture.collectedAt}`)
+          : null,
+        captureScope: capture?.scope ?? null,
+        capturedContentHash: capture?.capturedContentHash ?? null,
+        capturedArtifact: capture?.capturedArtifact ?? null,
+        capturedArtifactEncoding: capture?.capturedArtifactEncoding ?? null,
+        capturedArtifactSizeBytes: capture?.capturedArtifactSizeBytes ?? null,
+        capturedTextHash: capture?.capturedTextHash ?? null,
+        extractionMethod: capture?.extractionMethod ?? null,
+        extractorVersion: capture?.extractorVersion ?? null,
+        backfillQuality: capture?.backfillQuality ?? "native",
+      };
+      const authority = {
+        sourceObservationId: row.source_observation_id,
+        role: row.source_role,
+        ordinal: row.source_ordinal,
+        sourceDocumentId: row.source_document_id,
+        sourceDocumentVersionId: row.source_document_version_id,
+        contentHash: row.content_hash,
+        originalTitle: row.original_title,
+        feedNamespace: row.feed_namespace,
+        nativeId: row.native_id,
+        sourceName: row.observation_source_name,
+        sourceType: row.observation_source_type,
+        url: row.observation_raw_url,
+        timestampKind: row.timestamp_kind,
+        canonicalUrl: row.canonical_url,
+        publishedAt: authoritativePublishedAt,
+        collectedAt: authoritativeCollectedAt,
+        originalPublishedAt: authoritativeOriginalPublishedAt,
+        publishedAtRaw: row.published_at_raw,
+        publishedAtField: row.published_at_field,
+        sourceUpdatedAt: dbOptionalIso(row.source_updated_at),
+        rawUrl: row.observation_raw_url,
+        captureCanonicalUrl: row.canonical_url,
+        finalUrl: row.observation_final_url,
+        feedUrl: row.observation_feed_url,
+        mimeType: row.observation_mime_type,
+        httpStatus: row.observation_http_status,
+        captureOriginalPublishedAt: authoritativeOriginalPublishedAt,
+        capturePublishedAtRaw: row.published_at_raw,
+        capturePublishedAtField: row.published_at_field,
+        captureSourceUpdatedAt: dbOptionalIso(row.source_updated_at),
+        captureCollectedAt: authoritativeCollectedAt,
+        captureScope: row.observation_capture_scope,
+        capturedContentHash: row.captured_content_hash,
+        capturedArtifact: row.captured_artifact,
+        capturedArtifactEncoding: row.captured_artifact_encoding,
+        capturedArtifactSizeBytes: row.captured_artifact_size_bytes,
+        capturedTextHash: row.captured_text_hash,
+        extractionMethod: row.extraction_method,
+        extractorVersion: row.extractor_version,
+        backfillQuality: row.backfill_quality,
+      };
+      if (canonicalEvidenceJson(projected) !== canonicalEvidenceJson(authority)) {
+        issues.push(authorityIssue(headline.id, "SOURCE_PROVENANCE_AUTHORITY_MISMATCH", `来源 ${source.name} 的采集证明与数据库不一致`));
+      }
+      if (row.captured_artifact !== null) {
+        const artifactHash = sha256ExactUtf8(row.captured_artifact);
+        const artifactSize = Buffer.byteLength(row.captured_artifact, "utf8");
+        if (artifactHash !== row.captured_content_hash || artifactSize !== row.captured_artifact_size_bytes) {
+          issues.push(authorityIssue(headline.id, "SOURCE_ARTIFACT_INTEGRITY_MISMATCH", `来源 ${source.name} 的原始采集物无法重算出登记哈希或字节数`));
+        }
+      } else if (row.backfill_quality === "native") {
+        issues.push(authorityIssue(headline.id, "SOURCE_ARTIFACT_MISSING", `原生采集来源 ${source.name} 缺少精确原始采集物`));
+      }
+      const expectedObservationId = `obs_${sha256ExactUtf8(canonicalEvidenceJson([
+        "source-collection-observation",
+        1,
+        row.source_document_id,
+        row.source_document_version_id,
+        row.observation_source_name,
+        row.observation_source_type,
+        authoritativeCollectedAt,
+        row.observation_raw_url,
+        row.observation_final_url,
+        row.observation_feed_url,
+        row.observation_mime_type,
+        row.observation_http_status,
+        row.observation_capture_scope,
+        row.captured_content_hash,
+      ]))}`;
+      if (row.source_observation_id !== expectedObservationId) {
+        issues.push(authorityIssue(headline.id, "SOURCE_OBSERVATION_ID_MISMATCH", `来源 ${source.name} 的采集观察 ID 无法由权威字段重算`));
+      }
+      const expectedTimestampKind: TimestampKind = authoritativeOriginalPublishedAt ? "published" : "collected";
+      if (row.timestamp_kind !== expectedTimestampKind) {
+        issues.push(authorityIssue(headline.id, "SOURCE_TIME_AUTHORITY_INCONSISTENT", `来源 ${source.name} 的时间类型与可证明发布时间不一致`));
+      }
+    }
+
+    const primarySources = sourceRows.rows.filter((row) => row.source_role === "primary");
+    if (primarySources.length !== 1) {
+      issues.push(authorityIssue(headline.id, "PRIMARY_SOURCE_AUTHORITY_MISMATCH", "每个事件版本必须且只能有一个权威主来源"));
+    } else {
+      const primary = primarySources[0];
+      const originalPublishedAt = dbOptionalIso(primary.original_published_at);
+      const collectedAt = dbOptionalIso(primary.observation_collected_at)!;
+      const expectedPublishedAt = originalPublishedAt ?? collectedAt;
+      const expectedKind: TimestampKind = originalPublishedAt ? "published" : "collected";
+      const projectedHeadlineTime = headline.publishedAt
+        ? parseStrictSourceTimestamp(headline.publishedAt)
+        : null;
+      if (projectedHeadlineTime !== expectedPublishedAt
+        || headline.timestampKind !== expectedKind
+        || headline.newsTimeSource !== primary.observation_source_name) {
+        issues.push(authorityIssue(
+          headline.id,
+          "HEADLINE_TIME_AUTHORITY_MISMATCH",
+          "头条发布时间、时间类型或时间来源与快照主来源观察不一致",
+        ));
+      }
+    }
+
+    const evidenceRows = await pool().query<{
+      id: string;
+      evidence_item_id: string;
+      anchor_key: string;
+      source_document_id: string;
+      source_document_version_id: string;
+      source_ordinal: number;
+      evidence_ordinal: number;
+      material_hash: string;
+      quote_original: string | null;
+      quote_original_hash: string | null;
+      quote_language: string | null;
+      quote_zh_cn: string | null;
+      locator: SourceEvidence["locator"];
+      locator_hash: string;
+      locator_status: SourceEvidence["locatorStatus"];
+      directness: SourceEvidence["directness"];
+      capture_scope: SourceEvidence["captureScope"];
+      extraction_method: string;
+      extractor_version: string;
+      captured_at: string | Date;
+    }>(`
+      SELECT evidence.id, evidence.evidence_item_id, item.anchor_key,
+             evidence.source_document_id, evidence.source_document_version_id,
+             projection.source_ordinal, projection.evidence_ordinal,
+             evidence.material_hash, evidence.quote_original, evidence.quote_original_hash,
+             evidence.quote_language, evidence.quote_zh_cn, evidence.locator,
+             evidence.locator_hash, evidence.locator_status, evidence.directness,
+             evidence.capture_scope, evidence.extraction_method,
+             evidence.extractor_version, evidence.captured_at
+      FROM event_version_evidence AS projection
+      JOIN evidence_versions AS evidence
+        ON evidence.source_document_id = projection.source_document_id
+       AND evidence.source_document_version_id = projection.source_document_version_id
+       AND evidence.evidence_item_id = projection.evidence_item_id
+       AND evidence.id = projection.evidence_version_id
+      JOIN evidence_items AS item
+        ON item.source_document_id = evidence.source_document_id
+       AND item.id = evidence.evidence_item_id
+      WHERE projection.event_id = $1 AND projection.event_version_id = $2
+      ORDER BY projection.source_ordinal, projection.evidence_ordinal
+    `, [headline.id, eventVersionId]);
+    const authoritativeEvidence = new Map(evidenceRows.rows.map((row) => [row.id, row]));
+    const projectedEvidence = headline.sources.flatMap((source, sourceIndex) =>
+      (source.evidence ?? []).map((evidence, evidenceIndex) => ({ evidence, sourceIndex, evidenceIndex })));
+    const projectedEvidenceVersionIds = projectedEvidence
+      .map(({ evidence }) => evidence.versionId)
+      .filter((id): id is string => Boolean(id));
+    if (authoritativeEvidence.size !== projectedEvidence.length
+      || projectedEvidenceVersionIds.length !== projectedEvidence.length
+      || new Set(projectedEvidenceVersionIds).size !== projectedEvidenceVersionIds.length
+      || projectedEvidenceVersionIds.some((id) => !authoritativeEvidence.has(id))) {
+      issues.push(authorityIssue(headline.id, "EVIDENCE_SET_AUTHORITY_MISMATCH", "页面完整证据集合与事件版本登记集合不同"));
+    }
+    for (const { evidence, sourceIndex, evidenceIndex } of projectedEvidence) {
+      const row = evidence.versionId ? authoritativeEvidence.get(evidence.versionId) : undefined;
+      if (!row) {
+        issues.push(authorityIssue(headline.id, "EVIDENCE_AUTHORITY_MISSING", `证据 ${evidence.id} 没有数据库版本`));
+        continue;
+      }
+      const projected = {
+        id: evidence.id,
+        versionId: evidence.versionId ?? null,
+        sourceDocumentId: evidence.sourceDocumentId,
+        sourceDocumentVersionId: evidence.sourceDocumentVersionId ?? null,
+        sourceOrdinal: sourceIndex + 1,
+        evidenceOrdinal: evidenceIndex + 1,
+        anchorKey: evidence.anchorKey,
+        quoteOriginal: evidence.quoteOriginal ?? null,
+        quoteHash: evidence.quoteHash ?? null,
+        quoteLanguage: evidence.quoteLanguage ?? null,
+        quoteZhCn: evidence.quoteZhCn ?? null,
+        locator: evidence.locator,
+        locatorHash: evidence.locatorHash,
+        locatorStatus: evidence.locatorStatus,
+        directness: evidence.directness,
+        captureScope: evidence.captureScope,
+        extractionMethod: evidence.extractionMethod,
+        extractorVersion: evidence.extractorVersion,
+        capturedAt: parseStrictSourceTimestamp(evidence.capturedAt) ?? `invalid:${evidence.capturedAt}`,
+      };
+      const authority = {
+        id: row.evidence_item_id,
+        versionId: row.id,
+        sourceDocumentId: row.source_document_id,
+        sourceDocumentVersionId: row.source_document_version_id,
+        sourceOrdinal: row.source_ordinal,
+        evidenceOrdinal: row.evidence_ordinal,
+        anchorKey: row.anchor_key,
+        quoteOriginal: row.quote_original,
+        quoteHash: row.quote_original_hash,
+        quoteLanguage: row.quote_language,
+        quoteZhCn: row.quote_zh_cn,
+        locator: row.locator,
+        locatorHash: row.locator_hash,
+        locatorStatus: row.locator_status,
+        directness: row.directness,
+        captureScope: row.capture_scope,
+        extractionMethod: row.extraction_method,
+        extractorVersion: row.extractor_version,
+        capturedAt: dbOptionalIso(row.captured_at),
+      };
+      if (canonicalEvidenceJson(projected) !== canonicalEvidenceJson(authority)) {
+        issues.push(authorityIssue(headline.id, "EVIDENCE_AUTHORITY_MISMATCH", `证据 ${evidence.id} 的原文、哈希或定位与数据库不一致`));
+      }
+      const rowEvidence: SourceEvidence = {
+        id: row.evidence_item_id,
+        versionId: row.id,
+        sourceDocumentId: row.source_document_id,
+        sourceDocumentVersionId: row.source_document_version_id,
+        anchorKey: row.anchor_key,
+        ...(row.quote_original === null ? {} : { quoteOriginal: row.quote_original }),
+        ...(row.quote_original_hash === null ? {} : { quoteHash: row.quote_original_hash }),
+        ...(row.quote_language === null ? {} : { quoteLanguage: row.quote_language }),
+        ...(row.quote_zh_cn === null ? {} : { quoteZhCn: row.quote_zh_cn }),
+        locator: row.locator,
+        locatorHash: row.locator_hash,
+        locatorStatus: row.locator_status,
+        directness: row.directness,
+        captureScope: row.capture_scope,
+        extractionMethod: row.extraction_method,
+        extractorVersion: row.extractor_version,
+        capturedAt: dbOptionalIso(row.captured_at)!,
+      };
+      try {
+        if (evidenceVersionMaterialHash(rowEvidence) !== row.material_hash) {
+          issues.push(authorityIssue(headline.id, "EVIDENCE_MATERIAL_HASH_MISMATCH", `证据 ${evidence.id} 无法重算出数据库材料哈希`));
+        }
+      } catch {
+        issues.push(authorityIssue(headline.id, "EVIDENCE_INTERNAL_INTEGRITY_INVALID", `证据 ${evidence.id} 的数据库内容不满足精确证据规则`));
+      }
+    }
+
+    const claimRows = await pool().query<{
+      id: string;
+      claim_key: string;
+      claim_type: string;
+      original_statement: string | null;
+      statement: string;
+      statement_hash: string;
+      language: string;
+      verification_status: string;
+      generator: string;
+      generator_version: string;
+      ordinal: number;
+    }>(`
+      SELECT id, claim_key, claim_type, original_statement, statement,
+             statement_hash, language, verification_status, generator,
+             generator_version, ordinal
+      FROM event_claims
+      WHERE event_id = $1 AND event_version_id = $2
+    `, [headline.id, eventVersionId]);
+    const authoritativeClaims = new Map(claimRows.rows.map((row) => [row.claim_key, row]));
+    const projectedClaims = headline.claims ?? [];
+    if (authoritativeClaims.size !== projectedClaims.length
+      || new Set(projectedClaims.map((claim) => claim.claimKey)).size !== projectedClaims.length
+      || projectedClaims.some((claim) => !authoritativeClaims.has(claim.claimKey))) {
+      issues.push(authorityIssue(headline.id, "CLAIM_SET_AUTHORITY_MISMATCH", "页面声明集合与事件版本声明集合不同"));
+    }
+    const linkRows = await pool().query<{
+      claim_id: string;
+      claim_key: string;
+      source_document_id: string;
+      source_document_version_id: string;
+      evidence_item_id: string;
+      evidence_version_id: string;
+      relation: string;
+      directness: string;
+      confidence: number | string;
+      ordinal: number;
+    }>(`
+      SELECT claim_id, claim_key, source_document_id, source_document_version_id,
+             evidence_item_id, evidence_version_id, relation, directness, confidence, ordinal
+      FROM claim_evidence_links
+      WHERE event_id = $1 AND event_version_id = $2
+    `, [headline.id, eventVersionId]);
+    const linksByClaim = new Map<string, typeof linkRows.rows>();
+    for (const link of linkRows.rows) {
+      const rows = linksByClaim.get(link.claim_id) ?? [];
+      rows.push(link);
+      linksByClaim.set(link.claim_id, rows);
+    }
+    for (const rows of linksByClaim.values()) rows.sort((left, right) => left.ordinal - right.ordinal);
+    const projectedCitationCount = projectedClaims.reduce((sum, claim) => sum + claim.citations.length, 0);
+    if (projectedCitationCount !== linkRows.rows.length) {
+      issues.push(authorityIssue(headline.id, "CITATION_SET_AUTHORITY_MISMATCH", "页面引用总数与事件版本引用总数不同"));
+    }
+    for (const claim of projectedClaims) {
+      const row = authoritativeClaims.get(claim.claimKey);
+      if (!row) {
+        issues.push(authorityIssue(headline.id, "CLAIM_AUTHORITY_MISSING", `声明 ${claim.claimKey} 不属于该事件版本`));
+        continue;
+      }
+      if (row.claim_type !== claim.type
+        || row.ordinal !== claim.ordinal + 1
+        || row.statement !== claim.statement
+        || row.original_statement !== (claim.originalStatement ?? null)
+        || row.statement_hash !== claim.statementHash
+        || row.language !== claim.language
+        || row.verification_status !== claim.verificationStatus
+        || row.generator !== claim.generator
+        || row.generator_version !== claim.generatorVersion) {
+        issues.push(authorityIssue(headline.id, "CLAIM_AUTHORITY_MISMATCH", `声明 ${claim.claimKey} 与数据库权威版本不一致`));
+      }
+      if (row.statement_hash !== sha256ExactUtf8(row.original_statement ?? row.statement)) {
+        issues.push(authorityIssue(headline.id, "CLAIM_STATEMENT_HASH_MISMATCH", `声明 ${claim.claimKey} 的数据库正文无法重算出声明哈希`));
+      }
+      const claimLinks = linksByClaim.get(row.id) ?? [];
+      if (claimLinks.length !== claim.citations.length) {
+        issues.push(authorityIssue(headline.id, "CITATION_SET_AUTHORITY_MISMATCH", `声明 ${claim.claimKey} 的引用集合数量与数据库不同`));
+      }
+      for (const [citationIndex, citation] of claim.citations.entries()) {
+        const link = claimLinks[citationIndex];
+        if (!link
+          || link.claim_key !== claim.claimKey
+          || link.source_document_id !== citation.sourceDocumentId
+          || link.source_document_version_id !== citation.sourceDocumentVersionId
+          || link.evidence_item_id !== citation.id
+          || link.evidence_version_id !== citation.versionId
+          || link.relation !== citation.relation
+          || link.directness !== citation.directness
+          || Number(link.confidence) !== citation.confidence
+          || link.ordinal !== citationIndex + 1
+          || citation.order !== citationIndex) {
+          issues.push(authorityIssue(headline.id, "CITATION_LINK_AUTHORITY_MISMATCH", `声明 ${claim.claimKey} 的引用关系与数据库不一致`));
+        }
+        const evidence = citation.versionId ? authoritativeEvidence.get(citation.versionId) : undefined;
+        if (!evidence) {
+          issues.push(authorityIssue(headline.id, "CITATION_EVIDENCE_AUTHORITY_MISSING", `声明 ${claim.claimKey} 引用了未登记在事件版本的证据`));
+          continue;
+        }
+        const projectedCitationEvidence = {
+          id: citation.id,
+          versionId: citation.versionId ?? null,
+          sourceDocumentId: citation.sourceDocumentId,
+          sourceDocumentVersionId: citation.sourceDocumentVersionId ?? null,
+          anchorKey: citation.anchorKey,
+          quoteOriginal: citation.quoteOriginal ?? null,
+          quoteHash: citation.quoteHash ?? null,
+          quoteLanguage: citation.quoteLanguage ?? null,
+          quoteZhCn: citation.quoteZhCn ?? null,
+          locator: citation.locator,
+          locatorHash: citation.locatorHash,
+          locatorStatus: citation.locatorStatus,
+          directness: citation.directness,
+          captureScope: citation.captureScope,
+          extractionMethod: citation.extractionMethod,
+          extractorVersion: citation.extractorVersion,
+          capturedAt: parseStrictSourceTimestamp(citation.capturedAt) ?? `invalid:${citation.capturedAt}`,
+        };
+        const authorityCitationEvidence = {
+          id: evidence.evidence_item_id,
+          versionId: evidence.id,
+          sourceDocumentId: evidence.source_document_id,
+          sourceDocumentVersionId: evidence.source_document_version_id,
+          anchorKey: evidence.anchor_key,
+          quoteOriginal: evidence.quote_original,
+          quoteHash: evidence.quote_original_hash,
+          quoteLanguage: evidence.quote_language,
+          quoteZhCn: evidence.quote_zh_cn,
+          locator: evidence.locator,
+          locatorHash: evidence.locator_hash,
+          locatorStatus: evidence.locator_status,
+          directness: evidence.directness,
+          captureScope: evidence.capture_scope,
+          extractionMethod: evidence.extraction_method,
+          extractorVersion: evidence.extractor_version,
+          capturedAt: dbOptionalIso(evidence.captured_at),
+        };
+        if (canonicalEvidenceJson(projectedCitationEvidence) !== canonicalEvidenceJson(authorityCitationEvidence)) {
+          issues.push(authorityIssue(headline.id, "CITATION_EVIDENCE_AUTHORITY_MISMATCH", `声明 ${claim.claimKey} 的引用证据正文或定位与数据库不一致`));
+        }
+      }
+    }
+  }
+  return issues;
 }
 
 export async function publishBrief(

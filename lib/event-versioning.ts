@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { EventRecord, Headline, SourceLink } from "./types";
 import { canonicalizeSourceUrl } from "./source-identity";
 
-export const EVENT_VERSION_SCHEMA = "event-version/v1";
+export const EVENT_VERSION_SCHEMA = "event-version/v2";
 export const EVENT_IDENTITY_SCHEMA = "event-identity/v1";
 export const EVENT_SEMANTIC_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
 
@@ -207,10 +207,28 @@ function sourceIdentityForVersion(source: SourceLink): Record<string, unknown> {
   const canonicalUrl = source.canonicalUrl || canonicalizeSourceUrl(source.url);
   return {
     sourceDocumentId: source.sourceDocumentId,
+    sourceDocumentVersionId: source.sourceDocumentVersionId,
     contentHash: source.contentHash,
     canonicalUrl,
     type: source.type,
-    publishedAt: source.publishedAt,
+    role: source.role,
+    timestampKind: source.timestampKind,
+    originalPublishedAt: source.originalPublishedAt,
+    evidence: [...(source.evidence ?? [])]
+      .map((item) => ({
+        id: item.id,
+        versionId: item.versionId,
+        sourceDocumentVersionId: item.sourceDocumentVersionId,
+        anchorKey: item.anchorKey,
+        quoteHash: item.quoteHash,
+        locatorHash: item.locatorHash,
+        locatorStatus: item.locatorStatus,
+        directness: item.directness,
+        captureScope: item.captureScope,
+        extractionMethod: item.extractionMethod,
+        extractorVersion: item.extractorVersion,
+      }))
+      .sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right))),
   };
 }
 
@@ -238,8 +256,37 @@ function structuredEquityState(headline: Headline): unknown[] {
 
 export function eventVersionMaterial(headline: Headline): EventVersionMaterial {
   const evidence = {
-    schema: "event-evidence/v1",
+    schema: "event-evidence/v2",
     sources: sortedSourceIdentities(headline.sources),
+    claims: [...(headline.claims ?? [])]
+      .map((claim) => ({
+        id: claim.id,
+        claimKey: claim.claimKey,
+        type: claim.type,
+        ordinal: claim.ordinal,
+        // `statementHash` is the hash of the untranslated assertion. The
+        // localized display sentence is deliberately excluded so a pure
+        // translation never creates a false evidence revision.
+        statementHash: claim.statementHash,
+        verificationStatus: claim.verificationStatus,
+        generator: claim.generator,
+        generatorVersion: claim.generatorVersion,
+        citations: [...claim.citations]
+          .map((citation) => ({
+            evidenceId: citation.id,
+            evidenceVersionId: citation.versionId,
+            sourceDocumentId: citation.sourceDocumentId,
+            sourceDocumentVersionId: citation.sourceDocumentVersionId,
+            quoteHash: citation.quoteHash,
+            locatorHash: citation.locatorHash,
+            relation: citation.relation,
+            directness: citation.directness,
+            confidence: citation.confidence,
+            order: citation.order,
+          }))
+          .sort((left, right) => left.order - right.order || canonicalJson(left).localeCompare(canonicalJson(right))),
+      }))
+      .sort((left, right) => left.ordinal - right.ordinal || left.claimKey.localeCompare(right.claimKey)),
   };
   const state = {
     schema: "event-state/v1",
@@ -280,6 +327,11 @@ export function eventVersionMaterial(headline: Headline): EventVersionMaterial {
 
 export function mergeRetainedEvidence(previous: Headline | undefined, incoming: Headline): Headline {
   if (!previous) return structuredClone(incoming);
+  const isManagedPageClaim = (claimKey: string) => claimKey === "title"
+    || claimKey === "summary"
+    || claimKey === "market_impact"
+    || claimKey === "direction_rationale"
+    || /^important_information:\d+$/.test(claimKey);
   const sources = [...previous.sources, ...incoming.sources].reduce<SourceLink[]>((result, source) => {
     const identity = source.sourceDocumentId
       || source.canonicalUrl
@@ -293,17 +345,37 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
       return candidateIdentity === identity;
     });
     if (existingIndex === -1) result.push(structuredClone(source));
-    else result[existingIndex] = { ...result[existingIndex], ...structuredClone(source) };
+    else {
+      const retained = result[existingIndex];
+      const next = structuredClone(source);
+      result[existingIndex] = {
+        ...retained,
+        ...next,
+        evidence: next.evidence ?? retained.evidence,
+        capture: next.capture ?? retained.capture,
+      };
+    }
     return result;
   }, []);
-  sources.sort((left, right) => {
-    const leftIdentity = left.sourceDocumentId || left.canonicalUrl || left.url;
-    const rightIdentity = right.sourceDocumentId || right.canonicalUrl || right.url;
-    return leftIdentity.localeCompare(rightIdentity);
-  });
+  // Preserve the source order recorded by the previous event version. Source
+  // order is deliberately excluded from the event-version hash, so sorting a
+  // reused projection here could make its displayed ordinals disagree with
+  // the immutable `event_version_sources` rows. Existing sources retain their
+  // authoritative positions; genuinely new sources are appended in the order
+  // first observed for the new version.
   return {
     ...structuredClone(incoming),
     sources,
+    claims: [
+      ...(previous.claims ?? []).filter((claim) => {
+        if ((incoming.claims ?? []).some((candidate) => candidate.claimKey === claim.claimKey)) return false;
+        // When the incoming revision has an explicit claim projection, absence
+        // of a page-field claim means the corresponding field was removed. Do
+        // not resurrect stale evidence from the previous event version.
+        return incoming.claims === undefined || !isManagedPageClaim(claim.claimKey);
+      }),
+      ...(incoming.claims ?? []),
+    ].map((claim) => structuredClone(claim)).sort((left, right) => left.ordinal - right.ordinal || left.claimKey.localeCompare(right.claimKey)),
     crossSourceCount: new Set(sources.map((source) => source.type)).size,
   };
 }

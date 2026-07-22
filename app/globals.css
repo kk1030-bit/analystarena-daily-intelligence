@@ -567,6 +567,19 @@ a { color: inherit; text-decoration: none; }
 .review-editor input:disabled, .review-editor textarea:disabled, .review-editor select:disabled { color: #85908d; opacity: .75; }
 .review-fields { display: grid; grid-template-columns: 1fr 100px 100px; gap: 10px; }
 .review-time-fields { grid-template-columns: minmax(220px, 1.4fr) minmax(145px, .7fr) minmax(180px, 1fr); }
+.review-ai-confirmations { margin: 0 0 18px; border: 1px solid rgba(240, 184, 90, .45); background: rgba(240, 184, 90, .055); }
+.review-ai-confirmations > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 13px; border-bottom: 1px solid rgba(240, 184, 90, .28); }
+.review-ai-confirmations > header strong, .review-ai-confirmations > header small { display: block; }
+.review-ai-confirmations > header strong { color: #f0c77f; font-size: 13px; }
+.review-ai-confirmations > header small { margin-top: 4px; color: #9e927e; font-size: 11px; line-height: 1.5; }
+.review-ai-confirmations > header > b { color: #f0c77f; font: 800 13px monospace; }
+.review-ai-confirmations > div { display: grid; }
+.review-editor .review-ai-confirmations label { grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 10px; margin: 0; padding: 11px 13px; border-bottom: 1px solid rgba(240, 184, 90, .16); cursor: pointer; }
+.review-editor .review-ai-confirmations label:last-child { border-bottom: 0; }
+.review-editor .review-ai-confirmations input[type="checkbox"] { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--teal); }
+.review-ai-confirmations label span b, .review-ai-confirmations label span small { display: block; }
+.review-ai-confirmations label span b { color: #d8c49e; font-size: 11px; }
+.review-ai-confirmations label span small { margin-top: 4px; color: #bdc7cf; font-size: 12px; line-height: 1.55; }
 .review-equity-impacts { margin-top: 16px; overflow: hidden; border: 1px solid #314864; background: #081427; }
 .review-equity-impacts > header { display: flex; justify-content: space-between; gap: 12px; padding: 11px 13px; border-bottom: 1px solid #314864; }
 .review-equity-impacts > header span { color: #75e7de; font-size: 12px; font-weight: 800; }

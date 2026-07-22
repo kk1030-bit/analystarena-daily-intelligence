@@ -3,6 +3,8 @@ import { isAdminRequest } from "@/lib/auth";
 import { getBrief, StaleBriefRevisionError, updateDraft } from "@/lib/db";
 import { attachEquityImpacts } from "@/lib/equity-impact";
 import { localizeBriefContent } from "@/lib/translation";
+import { reconcileReviewedBriefEvidence } from "@/lib/review-evidence";
+import type { ManualClaimConfirmation } from "@/lib/review-evidence";
 import type { DailyBrief } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -24,9 +26,18 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   if (!isAdminRequest(request)) return NextResponse.json({ error: "未授权" }, { status: 401 });
   const { id } = await context.params;
   try {
-    const body = await request.json() as { brief?: DailyBrief };
+    const body = await request.json() as {
+      brief?: DailyBrief;
+      manualConfirmations?: ManualClaimConfirmation[];
+    };
     if (!body.brief?.headlines?.length) return NextResponse.json({ error: "日报内容不完整" }, { status: 400 });
-    const localized = await localizeBriefContent(body.brief, { strict: true });
+    const current = await getBrief(id);
+    if (!current) return NextResponse.json({ error: "找不到日报" }, { status: 404 });
+    if (current.status !== "draft") return NextResponse.json({ error: "已发布日报不可修改" }, { status: 409 });
+    const reconciled = reconcileReviewedBriefEvidence(current.brief, body.brief, {
+      manualConfirmations: body.manualConfirmations,
+    });
+    const localized = await localizeBriefContent(reconciled, { strict: true });
     const headlines = await attachEquityImpacts(localized.headlines);
     return NextResponse.json(await updateDraft(id, { ...localized, headlines }, {
       stream: "review",

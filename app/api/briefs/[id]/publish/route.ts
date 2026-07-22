@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { isAdminRequest } from "@/lib/auth";
-import { getBrief, publishBrief, StaleBriefRevisionError } from "@/lib/db";
-import { attachEquityImpacts } from "@/lib/equity-impact";
+import { getBrief, publishBrief, StaleBriefRevisionError, verifyBriefEvidenceAuthority } from "@/lib/db";
 import { generateBriefPdf } from "@/lib/pdf";
 import { localizeBriefContent } from "@/lib/translation";
+import { publicationEvidenceIssues } from "@/lib/publication-evidence";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,10 +17,32 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!record) return NextResponse.json({ error: "找不到日报" }, { status: 404 });
     if (record.status !== "draft") return NextResponse.json({ error: "这份日报已经发布" }, { status: 409 });
 
-    const headlines = await attachEquityImpacts(record.brief.headlines);
-    const preparedDraft = { ...record.brief, headlines };
+    // Publication checks must run against the exact payload used for the PDF
+    // and persisted record. No translation or enrichment may happen after the
+    // evidence gate without being checked again.
+    const localized = await localizeBriefContent(record.brief, { strict: true });
+    // Equity assessments are evidence-bearing reviewed state. Recomputing
+    // them here would create a TOCTOU window in which the PDF/published record
+    // contains mappings that were never part of the reviewed draft snapshot.
+    const headlines = localized.headlines;
+    const preparedDraft = { ...localized, headlines };
+    const evidenceIssues = [
+      ...publicationEvidenceIssues(preparedDraft),
+      ...(await verifyBriefEvidenceAuthority(preparedDraft)).map((item) => ({
+        ...item,
+        headlineRank: headlines.find((headline) => headline.id === item.headlineId)?.rank ?? 0,
+        claimKey: "database_authority",
+      })),
+    ];
+    if (evidenceIssues.length) {
+      return NextResponse.json({
+        error: `有 ${evidenceIssues.length} 项判断尚未通过可稽核证据核验，请补齐证据并完成确认后再发布。`,
+        code: "EVIDENCE_REVIEW_REQUIRED",
+        issues: evidenceIssues,
+      }, { status: 409 });
+    }
     const missingMappings = headlines.filter((headline) => !Array.isArray(headline.equityImpacts));
-    if (headlines === record.brief.headlines || missingMappings.length) {
+    if (missingMappings.length) {
       return NextResponse.json({
         error: "股票影响映射暂时无法完成，请稍后重试后再发布。",
         code: "EQUITY_MAPPING_UNAVAILABLE",
@@ -29,7 +51,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     const pending = headlines.flatMap((headline) => (headline.equityImpacts ?? [])
-      .filter((item) => item.mappingConfidence >= 70 && (!item.reviewStatus || item.reviewStatus === "auto_pending"))
+      .filter((item) => !item.reviewStatus || item.reviewStatus === "auto_pending")
       .map((item) => ({
         headlineId: headline.id,
         headlineRank: headline.rank,
@@ -45,8 +67,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       }, { status: 409 });
     }
 
-    const localized = await localizeBriefContent(preparedDraft, { strict: true });
-    const prepared = { ...localized, id, status: "published" as const, publishedAt: new Date().toISOString() };
+    const prepared = { ...preparedDraft, id, status: "published" as const, publishedAt: new Date().toISOString() };
     const pdf = await generateBriefPdf(prepared);
     const published = await publishBrief(id, prepared, pdf, {
       stream: "publish",

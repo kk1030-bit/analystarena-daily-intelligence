@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Check, FileDown, KeyRound, LoaderCircle, LogOut, PencilLine, Plus, Radar, Save, Send } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { BriefRecord, Category, DailyBrief, Headline, MarketDirection } from "@/lib/types";
+import type { BriefRecord, Category, DailyBrief, Headline, HeadlineClaim, MarketDirection } from "@/lib/types";
 import { categoryDisplayNames, extractTermNotes } from "@/lib/terms";
 import { fromBeijingDateTimeInput, toBeijingDateTimeInput } from "@/lib/time";
 
@@ -19,6 +19,26 @@ function authHeaders(token: string, json = false): HeadersInit {
   return { "x-admin-token": token, ...(json ? { "Content-Type": "application/json" } : {}) };
 }
 
+interface ManualConfirmation {
+  headlineId: string;
+  claimKey: string;
+  method: "manual_semantic_review";
+}
+
+function pendingAiClaims(headline: Headline): HeadlineClaim[] {
+  return (headline.claims ?? []).filter((claim) =>
+    claim.generator === "ai" && claim.verificationStatus === "pending_confirmation");
+}
+
+function claimDisplayName(claim: HeadlineClaim): string {
+  if (claim.claimKey === "title") return "标题";
+  if (claim.claimKey === "summary") return "摘要";
+  if (claim.claimKey === "market_impact") return "市场影响";
+  if (claim.claimKey === "direction_rationale") return "方向依据";
+  if (claim.claimKey.startsWith("important_information:")) return "重要信息";
+  return claim.claimKey;
+}
+
 export function ReviewConsole() {
   const [token, setToken] = useState("");
   const [tokenInput, setTokenInput] = useState("");
@@ -28,8 +48,11 @@ export function ReviewConsole() {
   const [storage, setStorage] = useState<"postgres" | "memory">("memory");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [manualConfirmations, setManualConfirmations] = useState<ManualConfirmation[]>([]);
 
-  const hasChanges = useMemo(() => Boolean(selected && draft && JSON.stringify(selected.brief) !== JSON.stringify(draft)), [selected, draft]);
+  const hasChanges = useMemo(() => Boolean(selected && draft
+    && (JSON.stringify(selected.brief) !== JSON.stringify(draft) || manualConfirmations.length)),
+  [selected, draft, manualConfirmations.length]);
 
   useEffect(() => {
     const existing = sessionStorage.getItem("analystarena-admin-token") ?? "";
@@ -51,6 +74,7 @@ export function ReviewConsole() {
       const first = data.records?.[0] ?? null;
       setSelected(first);
       setDraft(first ? structuredClone(first.brief) : null);
+      setManualConfirmations([]);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "登入失败");
     } finally {
@@ -66,17 +90,33 @@ export function ReviewConsole() {
     const next = data.records.find((record) => record.id === selectId) ?? data.records[0] ?? null;
     setSelected(next);
     setDraft(next ? structuredClone(next.brief) : null);
+    setManualConfirmations([]);
   }
 
   function choose(record: BriefRecord) {
     setSelected(record);
     setDraft(structuredClone(record.brief));
+    setManualConfirmations([]);
     setMessage("");
   }
 
   function updateHeadline(id: string, changes: Partial<Headline>) {
     if (!draft) return;
+    // Any edit may change the meaning of one or more generated assertions.
+    // Clear the whole event's confirmations and require a fresh active review.
+    setManualConfirmations((current) => current.filter((item) => item.headlineId !== id));
     setDraft({ ...draft, headlines: draft.headlines.map((headline) => headline.id === id ? { ...headline, ...changes } : headline) });
+  }
+
+  function toggleManualConfirmation(headlineId: string, claimKey: string, checked: boolean) {
+    setManualConfirmations((current) => {
+      const retained = current.filter((item) => !(item.headlineId === headlineId && item.claimKey === claimKey));
+      return checked ? [...retained, { headlineId, claimKey, method: "manual_semantic_review" }] : retained;
+    });
+  }
+
+  function isManuallyConfirmed(headlineId: string, claimKey: string): boolean {
+    return manualConfirmations.some((item) => item.headlineId === headlineId && item.claimKey === claimKey);
   }
 
   function reviewEquityImpact(headlineId: string, symbol: string, reviewStatus: "approved" | "rejected") {
@@ -111,7 +151,11 @@ export function ReviewConsole() {
     if (!selected || !draft) return;
     setBusy(true);
     try {
-      const response = await fetch(`/api/briefs/${selected.id}`, { method: "PATCH", headers: authHeaders(token, true), body: JSON.stringify({ brief: draft }) });
+      const response = await fetch(`/api/briefs/${selected.id}`, {
+        method: "PATCH",
+        headers: authHeaders(token, true),
+        body: JSON.stringify({ brief: draft, manualConfirmations }),
+      });
       const data = await response.json() as BriefRecord & { error?: string };
       if (!response.ok) throw new Error(data.error || "保存失败");
       await reload(data.id);
@@ -128,7 +172,11 @@ export function ReviewConsole() {
     setBusy(true);
     try {
       if (hasChanges) {
-        const saveResponse = await fetch(`/api/briefs/${selected.id}`, { method: "PATCH", headers: authHeaders(token, true), body: JSON.stringify({ brief: draft }) });
+        const saveResponse = await fetch(`/api/briefs/${selected.id}`, {
+          method: "PATCH",
+          headers: authHeaders(token, true),
+          body: JSON.stringify({ brief: draft, manualConfirmations }),
+        });
         const saveData = await saveResponse.json() as BriefRecord & { error?: string };
         if (!saveResponse.ok) throw new Error(saveData.error || "发布前保存失败");
       }
@@ -146,7 +194,7 @@ export function ReviewConsole() {
 
   function signOut() {
     sessionStorage.removeItem("analystarena-admin-token");
-    setToken(""); setTokenInput(""); setRecords([]); setSelected(null); setDraft(null);
+    setToken(""); setTokenInput(""); setRecords([]); setSelected(null); setDraft(null); setManualConfirmations([]);
   }
 
   if (!token) {
@@ -191,6 +239,20 @@ export function ReviewConsole() {
           {draft.headlines.map((headline) => (
             <article key={headline.id}>
               <header><span>#{headline.rank} · {headline.ticker}</span><div><b>{headline.rankingScore ?? "—"}</b> 排名分数 <PencilLine size={14} /></div></header>
+              {pendingAiClaims(headline).length ? <section className="review-ai-confirmations">
+                <header><div><strong>人工语义确认</strong><small>引用存在不代表原文支持判断。请逐条核对原文后主动勾选；编辑内容会清除本事件全部确认。</small></div><b>{manualConfirmations.filter((item) => item.headlineId === headline.id).length}/{pendingAiClaims(headline).length}</b></header>
+                <div>
+                  {pendingAiClaims(headline).map((claim) => <label key={claim.claimKey}>
+                    <input
+                      type="checkbox"
+                      checked={isManuallyConfirmed(headline.id, claim.claimKey)}
+                      disabled={selected?.status === "published"}
+                      onChange={(event) => toggleManualConfirmation(headline.id, claim.claimKey, event.target.checked)}
+                    />
+                    <span><b>{claimDisplayName(claim)}</b><small>{claim.statement}</small></span>
+                  </label>)}
+                </div>
+              </section> : null}
               {(headline.termNotes?.length || extractTermNotes(headline).length) ? <div className="term-notes">
                 <span>自动术语说明：</span>
                 {(headline.termNotes?.length ? headline.termNotes : extractTermNotes(headline)).map((item) => <em key={item.term}><b>{item.term}</b>＝{item.note}</em>)}
