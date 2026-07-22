@@ -22,6 +22,15 @@ const preservedTerms = new Set([
   "google", "intel", "meta", "microsoft", "nvidia", "openai", "reddit", "reuters", "tesla", "tsmc",
 ]);
 
+// Google Translate can occasionally rewrite publisher brands into descriptive
+// or promotional Chinese text. Protect known proper names before the request
+// and restore their exact source spelling afterwards.
+const preservedPhrases = [
+  "Seeking Alpha", "Business Insider", "The Wall Street Journal", "Wall Street Journal",
+  "The Motley Fool", "Financial Times", "Yahoo Finance", "Google News", "TradingPedia",
+  "Stocktwits", "Benzinga", "Investopedia", "MarketWatch", "Barron's", "Bloomberg", "Reuters",
+] as const;
+
 const commonEnglishProse = new Set([
   "after", "amid", "and", "as", "at", "beat", "beats", "before", "boost", "booms", "boom", "by", "cut",
   "cuts", "decline", "declines", "demand", "down", "earnings", "estimate", "estimates", "for", "from", "growth",
@@ -129,6 +138,36 @@ function cacheKey(value: string): string {
   return `${TRANSLATION_CACHE_PREFIX}${value}`;
 }
 
+function protectTranslationPhrases(value: string): {
+  protectedText: string;
+  restore: (translated: string) => string;
+} {
+  const protectedValues: Array<{ marker: string; original: string }> = [];
+  let protectedText = value;
+  for (const phrase of preservedPhrases) {
+    const pattern = new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    protectedText = protectedText.replace(pattern, (original) => {
+      const marker = `__ANALYSTARENA_KEEP_${protectedValues.length}__`;
+      protectedValues.push({ marker, original });
+      return marker;
+    });
+  }
+  return {
+    protectedText,
+    restore(translated) {
+      return protectedValues.reduce((text, item) => {
+        if (text.includes(item.marker)) return text.replaceAll(item.marker, item.original);
+        // Accept an exact proper name if a translation backend or test double
+        // already restored it, but reject any rewritten or missing variant.
+        if (!text.includes(item.original)) {
+          throw new Error(`\u81ea\u52a8\u7ffb\u8bd1\u672a\u4fdd\u7559\u53d7\u4fdd\u62a4\u7684\u4e13\u540d\uff1a${item.original}`);
+        }
+        return text;
+      }, translated);
+    },
+  };
+}
+
 function getCachedTranslation(key: string): string | undefined {
   const cached = translationCache.get(key);
   if (cached === undefined) return undefined;
@@ -173,14 +212,23 @@ async function translateWithGoogle(value: string): Promise<string> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const params = new URLSearchParams({ client: "gtx", sl: "auto", tl: "zh-CN", dt: "t", q: value });
+      const protectedTranslation = protectTranslationPhrases(value);
+      const params = new URLSearchParams({
+        client: "gtx",
+        sl: "auto",
+        tl: "zh-CN",
+        dt: "t",
+        q: protectedTranslation.protectedText,
+      });
       const response = await fetch(`https://translate.googleapis.com/translate_a/single?${params}`, {
         headers: { "User-Agent": "Mozilla/5.0 AnalystArenaTranslation/2.0" },
         signal: AbortSignal.timeout(12_000),
         cache: "no-store",
       });
       if (!response.ok) throw new Error(`\u81ea\u52a8\u7ffb\u8bd1\u670d\u52a1\u8fd4\u56de ${response.status}`);
-      const translated = simplify(clean(translationFromGooglePayload(await response.json() as unknown)));
+      const translated = simplify(clean(protectedTranslation.restore(
+        translationFromGooglePayload(await response.json() as unknown),
+      )));
       if (!translated) throw new Error("\u81ea\u52a8\u7ffb\u8bd1\u670d\u52a1\u672a\u8fd4\u56de\u5185\u5bb9");
       if (hasTranslatableText(translated)) throw new Error("\u81ea\u52a8\u7ffb\u8bd1\u7ed3\u679c\u4ecd\u5305\u542b\u672a\u7ffb\u8bd1\u53d9\u8ff0");
       return translated;

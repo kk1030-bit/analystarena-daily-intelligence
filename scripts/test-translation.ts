@@ -76,14 +76,20 @@ try {
   );
 
   const translatedIndexHeadline = "AM \u5e02\u573a\u9700\u8981\u4e86\u89e3\uff1a\u7279\u6717\u666e\u516c\u5e03\u836f\u54c1\u5173\u7a0e\u3001OpenAI \u62a5\u544a\u4eba\u5de5\u667a\u80fd\u9ed1\u5ba2\u653b\u51fb\u7b49 (SP500:) - Seeking Alpha";
-  globalThis.fetch = (async () => googleResponse(translatedIndexHeadline)) as typeof fetch;
+  let protectedTranslationQuery = "";
+  globalThis.fetch = (async (input) => {
+    protectedTranslationQuery = new URL(String(input)).searchParams.get("q") ?? "";
+    return googleResponse("AM \u5e02\u573a\u9700\u8981\u4e86\u89e3\uff1a\u7279\u6717\u666e\u516c\u5e03\u836f\u54c1\u5173\u7a0e\u3001OpenAI \u62a5\u544a\u4eba\u5de5\u667a\u80fd\u9ed1\u5ba2\u653b\u51fb\u7b49 (SP500:) - __ANALYSTARENA_KEEP_0__");
+  }) as typeof fetch;
   assert.equal(
     await localizeText("AM Markets Need to Know: Trump unveils drug tariffs, OpenAI reports AI hack, and more (SP500:) - Seeking Alpha"),
     translatedIndexHeadline,
     "SP500 \u8fd9\u7c7b\u5e02\u573a\u6807\u8bc6\u7b26\u4e0d\u5f97\u8ba9\u5df2\u5b8c\u6210\u7684\u4e2d\u6587\u8bd1\u6587\u88ab\u8bef\u5224\u4e3a\u5931\u8d25",
   );
+  assert.ok(!protectedTranslationQuery.includes("Seeking Alpha"), "\u53d1\u9001\u7ffb\u8bd1\u524d\u5fc5\u987b\u9690\u53bb\u5a92\u4f53\u54c1\u724c\u539f\u6587");
+  assert.match(protectedTranslationQuery, /__ANALYSTARENA_KEEP_0__/, "\u5e94\u4f7f\u7528\u53ef\u9a8c\u8bc1\u7684\u4e13\u540d\u4fdd\u62a4\u6807\u8bb0");
 
-  const translatedFundBrand = "\u65bd\u74e6\u5e03\u65b0\u5174\u5e02\u573a ETF \u4e0e iShares MSCI \u65b0\u5174\u5e02\u573a ETF\uff1a\u54ea\u4e2a\u66f4\u597d\u4e70\uff1f\u6742\u4e03\u6742\u516b\u7684\u50bb\u74dc";
+  const translatedFundBrand = "\u65bd\u74e6\u5e03\u65b0\u5174\u5e02\u573a ETF \u4e0e iShares MSCI \u65b0\u5174\u5e02\u573a ETF\uff1a\u54ea\u4e2a\u66f4\u597d\u4e70\uff1fThe Motley Fool";
   globalThis.fetch = (async () => googleResponse(translatedFundBrand)) as typeof fetch;
   assert.equal(
     await localizeText("Schwab Emerging Markets ETF vs iShares MSCI Emerging Markets ETF: Which is the Better Buy? The Motley Fool"),
