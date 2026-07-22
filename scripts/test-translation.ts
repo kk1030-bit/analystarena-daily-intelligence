@@ -89,6 +89,34 @@ try {
   assert.ok(!protectedTranslationQuery.includes("Seeking Alpha"), "\u53d1\u9001\u7ffb\u8bd1\u524d\u5fc5\u987b\u9690\u53bb\u5a92\u4f53\u54c1\u724c\u539f\u6587");
   assert.match(protectedTranslationQuery, /__ANALYSTARENA_KEEP_0__/, "\u5e94\u4f7f\u7528\u53ef\u9a8c\u8bc1\u7684\u4e13\u540d\u4fdd\u62a4\u6807\u8bb0");
 
+  const barronsInput = "Why Micron Stock Is Soaring Ahead of Google Earnings - Barron's";
+  const translatedBarrons = "\u4e3a\u4ec0\u4e48\u7f8e\u5149\u80a1\u4ef7\u5728 Google \u8d22\u62a5\u53d1\u5e03\u524d\u5927\u6da8 - Barron's";
+  let barronsTranslationQuery = "";
+  globalThis.fetch = (async (input) => {
+    barronsTranslationQuery = new URL(String(input)).searchParams.get("q") ?? "";
+    return googleResponse("\u4e3a\u4ec0\u4e48\u7f8e\u5149\u80a1\u4ef7\u5728 Google \u8d22\u62a5\u53d1\u5e03\u524d\u5927\u6da8 - __ANALYSTARENA_KEEP_0__");
+  }) as typeof fetch;
+  const localizedBarrons = await localizeBriefContent(briefWith(barronsInput), { strict: true });
+  assert.equal(localizedBarrons.translationEnabled, true, "Barron's \u4e0d\u5f97\u88ab\u8bef\u5224\u4e3a\u672a\u7ffb\u8bd1\u82f1\u6587");
+  assert.equal(localizedBarrons.headlines[0].title, translatedBarrons);
+  assert.equal(localizedBarrons.headlines[0].summary, translatedBarrons);
+  assert.deepEqual(localizedBarrons.headlines[0].keyPoints, [translatedBarrons]);
+  assert.equal(localizedBarrons.headlines[0].marketImpact, translatedBarrons);
+  assert.ok(!barronsTranslationQuery.includes("Barron's"), "\u53d1\u9001\u7ffb\u8bd1\u524d\u5fc5\u987b\u9690\u53bb Barron's \u54c1\u724c\u539f\u6587");
+  assert.match(barronsTranslationQuery, /__ANALYSTARENA_KEEP_0__/, "Barron's \u5e94\u4f7f\u7528\u53ef\u9a8c\u8bc1\u7684\u4e13\u540d\u4fdd\u62a4\u6807\u8bb0");
+
+  const rewrittenBarronsInput = "Micron shares rise after earnings - Barron's";
+  globalThis.fetch = (async () => googleResponse("\u7f8e\u5149\u80a1\u4ef7\u5728\u8d22\u62a5\u540e\u4e0a\u6da8 - \u5df4\u4f26\u5468\u520a")) as typeof fetch;
+  const rewrittenBarrons = await localizeBriefContent(briefWith(rewrittenBarronsInput));
+  assert.equal(rewrittenBarrons.translationEnabled, false, "\u7ffb\u8bd1\u5668\u6539\u5199 Barron's \u65f6\u5fc5\u987b\u5931\u8d25\u5173\u95ed");
+  assert.equal(rewrittenBarrons.headlines[0].title, rewrittenBarronsInput, "\u5a92\u4f53\u540d\u672a\u539f\u6837\u6062\u590d\u65f6\u5fc5\u987b\u4fdd\u7559\u539f\u6587\u4f9b\u5ba1\u6838");
+  assert.match(rewrittenBarrons.warning ?? "", /\u5f85\u4eba\u5de5\u786e\u8ba4/);
+  await assert.rejects(
+    () => localizeBriefContent(briefWith(rewrittenBarronsInput), { strict: true }),
+    /headlines\.translation-test\.title/,
+    "\u4e25\u683c\u6a21\u5f0f\u4e0d\u5f97\u53d1\u5e03\u6539\u5199\u6216\u9057\u5931 Barron's \u7684\u8bd1\u6587",
+  );
+
   const translatedFundBrand = "\u65bd\u74e6\u5e03\u65b0\u5174\u5e02\u573a ETF \u4e0e iShares MSCI \u65b0\u5174\u5e02\u573a ETF\uff1a\u54ea\u4e2a\u66f4\u597d\u4e70\uff1fThe Motley Fool";
   globalThis.fetch = (async () => googleResponse(translatedFundBrand)) as typeof fetch;
   assert.equal(

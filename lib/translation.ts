@@ -28,8 +28,23 @@ const preservedTerms = new Set([
 const preservedPhrases = [
   "Seeking Alpha", "Business Insider", "The Wall Street Journal", "Wall Street Journal",
   "The Motley Fool", "Financial Times", "Yahoo Finance", "Google News", "TradingPedia",
-  "Stocktwits", "Benzinga", "Investopedia", "MarketWatch", "Barron's", "Bloomberg", "Reuters",
+  "Stocktwits", "Benzinga", "Investopedia", "MarketWatch", "Barron's", "Barron’s", "Bloomberg", "Reuters",
 ] as const;
+
+function preservedPhrasePattern(phrase: string): RegExp {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Every currently protected publisher name starts and ends with an ASCII
+  // letter. Word boundaries prevent a shorter brand from being accepted as a
+  // substring of unrelated English prose.
+  return new RegExp(`\\b${escaped}\\b`, "gi");
+}
+
+function removePreservedPhrases(value: string): string {
+  return preservedPhrases.reduce(
+    (text, phrase) => text.replace(preservedPhrasePattern(phrase), ""),
+    value,
+  );
+}
 
 const commonEnglishProse = new Set([
   "after", "amid", "and", "as", "at", "beat", "beats", "before", "boost", "booms", "boom", "by", "cut",
@@ -107,9 +122,13 @@ function isPreservedEnglishToken(token: string): boolean {
 }
 
 function hasTranslatableText(value: string): boolean {
-  if (translatableForeignScript.test(value)) return true;
-  const tokens = value.match(/[@$]?[A-Za-z][A-Za-z0-9_]*(?:[./'-][A-Za-z0-9_]+)*|Q[1-4]/g) ?? [];
-  const hasChineseContext = /[\u3400-\u9FFF]/.test(value);
+  // Known publisher brands are protected before translation and restored
+  // byte-for-byte afterwards. Exclude only those exact names from the
+  // residual-English check; surrounding prose remains subject to validation.
+  const textToValidate = removePreservedPhrases(value);
+  if (translatableForeignScript.test(textToValidate)) return true;
+  const tokens = textToValidate.match(/[@$]?[A-Za-z][A-Za-z0-9_]*(?:[./'-][A-Za-z0-9_]+)*|Q[1-4]/g) ?? [];
+  const hasChineseContext = /[\u3400-\u9FFF]/.test(textToValidate);
   return tokens.some((token, index) => {
     if (isPreservedEnglishToken(token)) return false;
     const previous = tokens[index - 1] ?? "";
@@ -145,7 +164,7 @@ function protectTranslationPhrases(value: string): {
   const protectedValues: Array<{ marker: string; original: string }> = [];
   let protectedText = value;
   for (const phrase of preservedPhrases) {
-    const pattern = new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    const pattern = preservedPhrasePattern(phrase);
     protectedText = protectedText.replace(pattern, (original) => {
       const marker = `__ANALYSTARENA_KEEP_${protectedValues.length}__`;
       protectedValues.push({ marker, original });
