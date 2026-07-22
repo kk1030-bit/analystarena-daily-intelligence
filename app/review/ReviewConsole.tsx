@@ -4,6 +4,8 @@ import Link from "next/link";
 import { Check, FileDown, KeyRound, LoaderCircle, LogOut, PencilLine, Plus, Radar, Save, Send } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { BriefRecord, Category, DailyBrief, Headline, HeadlineClaim, MarketDirection } from "@/lib/types";
+import { normalizePublicationIssues } from "@/lib/publication-issues";
+import type { PublicationIssueDisplay } from "@/lib/publication-issues";
 import { categoryDisplayNames, extractTermNotes } from "@/lib/terms";
 import { fromBeijingDateTimeInput, toBeijingDateTimeInput } from "@/lib/time";
 
@@ -49,6 +51,7 @@ export function ReviewConsole() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [manualConfirmations, setManualConfirmations] = useState<ManualConfirmation[]>([]);
+  const [publicationIssues, setPublicationIssues] = useState<PublicationIssueDisplay[]>([]);
 
   const hasChanges = useMemo(() => Boolean(selected && draft
     && (JSON.stringify(selected.brief) !== JSON.stringify(draft) || manualConfirmations.length)),
@@ -75,6 +78,7 @@ export function ReviewConsole() {
       setSelected(first);
       setDraft(first ? structuredClone(first.brief) : null);
       setManualConfirmations([]);
+      setPublicationIssues([]);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "登入失败");
     } finally {
@@ -91,12 +95,14 @@ export function ReviewConsole() {
     setSelected(next);
     setDraft(next ? structuredClone(next.brief) : null);
     setManualConfirmations([]);
+    setPublicationIssues([]);
   }
 
   function choose(record: BriefRecord) {
     setSelected(record);
     setDraft(structuredClone(record.brief));
     setManualConfirmations([]);
+    setPublicationIssues([]);
     setMessage("");
   }
 
@@ -179,10 +185,18 @@ export function ReviewConsole() {
         });
         const saveData = await saveResponse.json() as BriefRecord & { error?: string };
         if (!saveResponse.ok) throw new Error(saveData.error || "发布前保存失败");
+        setRecords((current) => current.map((record) => record.id === saveData.id ? saveData : record));
+        setSelected(saveData);
+        setDraft(structuredClone(saveData.brief));
+        setManualConfirmations([]);
       }
       const response = await fetch(`/api/briefs/${selected.id}/publish`, { method: "POST", headers: authHeaders(token) });
-      const data = await response.json() as BriefRecord & { error?: string };
-      if (!response.ok) throw new Error(data.error || "发布失败");
+      const data = await response.json() as BriefRecord & { error?: string; issues?: unknown };
+      if (!response.ok) {
+        setPublicationIssues(normalizePublicationIssues(data.issues));
+        throw new Error(data.error || "发布失败");
+      }
+      setPublicationIssues([]);
       await reload(data.id);
       setMessage("日报已正式发布，首页与历史 PDF 已同步更新。");
     } catch (error) {
@@ -194,7 +208,7 @@ export function ReviewConsole() {
 
   function signOut() {
     sessionStorage.removeItem("analystarena-admin-token");
-    setToken(""); setTokenInput(""); setRecords([]); setSelected(null); setDraft(null); setManualConfirmations([]);
+    setToken(""); setTokenInput(""); setRecords([]); setSelected(null); setDraft(null); setManualConfirmations([]); setPublicationIssues([]);
   }
 
   if (!token) {
@@ -234,6 +248,19 @@ export function ReviewConsole() {
           {selected && <div>{selected.hasPdf && <a className="secondary-button" href={`/api/briefs/${selected.id}/pdf`} target="_blank" rel="noreferrer"><FileDown size={15} />PDF</a>}<button className="secondary-button" onClick={() => void save()} disabled={busy || !hasChanges || selected.status !== "draft"}><Save size={15} />保存</button><button className="publish-button" onClick={() => void publish()} disabled={busy || selected.status === "published"}><Send size={15} />发布日报</button></div>}
         </div>
         {message && <div className="review-message" role="status" aria-live="polite">{busy && <LoaderCircle className="is-spinning" size={15} />}{message}</div>}
+        {publicationIssues.length ? <section className="review-publication-issues" role="alert" aria-live="assertive">
+          <header><strong>发布核验未通过</strong><span>{publicationIssues.length} 项</span></header>
+          <p>系统没有生成 PDF，也没有改变日报发布状态。请依照以下数据库权威核验结果修复后重试。</p>
+          <ol>
+            {publicationIssues.map((issue, index) => <li key={`${issue.code}:${issue.headlineId ?? "brief"}:${issue.claimKey ?? "none"}:${index}`}>
+              <b>{issue.headlineRank ? `头条 #${issue.headlineRank}` : "日报级"}</b>
+              <code>{issue.code}</code>
+              {issue.claimKey ? <em>{issue.claimKey}</em> : null}
+              <span>{issue.message}</span>
+              {issue.headlineId ? <small>事件 ID：{issue.headlineId}</small> : null}
+            </li>)}
+          </ol>
+        </section> : null}
         {draft ? <section className="review-editor">
           {draft.warning && <div className="review-warning">{draft.warning}</div>}
           {draft.headlines.map((headline) => (

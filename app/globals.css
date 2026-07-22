@@ -578,6 +578,19 @@ a { color: inherit; text-decoration: none; }
 .review-editor .review-ai-confirmations label:last-child { border-bottom: 0; }
 .review-editor .review-ai-confirmations input[type="checkbox"] { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--teal); }
 .review-ai-confirmations label span b, .review-ai-confirmations label span small { display: block; }
+.review-publication-issues { margin: 0 0 18px; border: 1px solid rgba(255, 104, 92, .52); background: rgba(106, 24, 30, .2); color: #f4d7d4; }
+.review-publication-issues > header { display: flex; justify-content: space-between; gap: 16px; padding: 12px 14px; border-bottom: 1px solid rgba(255, 104, 92, .3); }
+.review-publication-issues > header strong { color: #ff9b91; }
+.review-publication-issues > header span { font: 800 12px monospace; color: #ffb6ae; }
+.review-publication-issues > p { margin: 0; padding: 12px 14px; color: #d8b8b5; font-size: 12px; line-height: 1.6; }
+.review-publication-issues ol { display: grid; gap: 8px; margin: 0; padding: 0 14px 14px 34px; }
+.review-publication-issues li { padding: 10px 12px; border: 1px solid rgba(255, 104, 92, .22); background: rgba(4, 11, 23, .45); }
+.review-publication-issues li b, .review-publication-issues li code, .review-publication-issues li em, .review-publication-issues li span, .review-publication-issues li small { display: block; }
+.review-publication-issues li b { color: #fff; font-size: 12px; }
+.review-publication-issues li code { margin-top: 5px; color: #ffb6ae; font-size: 11px; overflow-wrap: anywhere; }
+.review-publication-issues li em { margin-top: 3px; color: #e7b36b; font: 700 11px monospace; }
+.review-publication-issues li span { margin-top: 6px; color: #e5d2d0; font-size: 12px; line-height: 1.55; }
+.review-publication-issues li small { margin-top: 5px; color: #9a8381; font: 10px monospace; overflow-wrap: anywhere; }
 .review-ai-confirmations label span b { color: #d8c49e; font-size: 11px; }
 .review-ai-confirmations label span small { margin-top: 4px; color: #bdc7cf; font-size: 12px; line-height: 1.55; }
 .review-equity-impacts { margin-top: 16px; overflow: hidden; border: 1px solid #314864; background: #081427; }
