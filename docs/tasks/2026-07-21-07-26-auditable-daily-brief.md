@@ -3,7 +3,7 @@
 > Canonical task（正式任務）：[GitHub Issue #12](https://github.com/kk1030-bit/analystarena-daily-intelligence/issues/12)<br>
 > Execution branch（執行分支）：`agent/auditable-brief-0721-0726`<br>
 > Period（期間）：2026-07-21 至 2026-07-26<br>
-> Current status（目前狀態）：7/22 程式、migration 與本機驗證已完成；待 Render 正式資料庫遷移及正式站驗收後才能勾選完成。
+> Current status（目前狀態）：7/22 已完成 Render migration、真實重採集、人工審核、正式發布、PDF 與歷史歸檔驗收；下一項為 7/23 What Changed。
 
 ## 使用方式
 
@@ -29,7 +29,7 @@ gantt
 
     section 資料底座
     穩定事件 ID 與版本資料表       :crit, done, a1, 2026-07-21, 1d
-    來源文件與引用片段保存          :crit, active, a2, after a1, 1d
+    來源文件與引用片段保存          :crit, done, a2, after a1, 1d
 
     section 智能分析
     前後版本比較與 What Changed     :crit, a3, after a2, 1d
@@ -48,7 +48,7 @@ gantt
 | 日期 | 更新方向 | 當天交付結果 | 狀態 |
 |---|---|---|---|
 | 7/21 | 資料庫底座 | 建立穩定事件 ID、事件版本、前一版本關聯；每次實際觸發的十分鐘更新不再覆蓋舊資料 | 已完成 |
-| 7/22 | 來源證據鏈 | 同時保存原始發布時間、採集時間、網址、內容雜湊、引用片段及可驗證定位 | 程式完成，待正式站驗收 |
+| 7/22 | 來源證據鏈 | 同時保存原始發布時間、採集時間、網址、內容雜湊、引用片段及可驗證定位 | 已完成（正式站驗收） |
 | 7/23 | What Changed | 自動比較上一版本，標記首次出現、新增證據、數字變動、方向與排名變化 | 待執行 |
 | 7/24 | 投資判斷 | 結構化記錄營收／獲利／估值／風險影響、利好與利空標的、原判斷與新判斷 | 待執行 |
 | 7/25 | 網頁及 PDF | 每則市場頭條呈現「新增資訊、來源、判斷影響、待驗證問題」四區塊；PDF 包含全部頭條 | 待執行 |
@@ -63,7 +63,7 @@ gantt
   - 幂等批次、資料庫鎖、失敗回滾、發布凍結及舊資料回填。
   - 證據：[PR #11](https://github.com/kk1030-bit/analystarena-daily-intelligence/pull/11)、功能提交 `ba904c6`、正式合併 `a0e6022`。
   - 正式站驗證：PostgreSQL 快照序號 2，快照 `0e11329d-655d-4f25-9906-296ac69a9a62` 已連到上一份快照。
-- [ ] **7/22｜來源文件與引用片段保存**
+- [x] **7/22｜來源文件與引用片段保存**
   - [x] 為每條標題、摘要、重要資訊、市場影響及方向依據建立 claim 與 evidence record，不再只保存事件層來源清單。
   - [x] 分開保存原始發布時間、採集時間、原始時間文字、標準化網址、來源原文采集物、UTF-8 位元組數及 SHA-256。
   - [x] RSS／Atom、Reddit 及 X 的引用必須逐欄位回查原始采集物；引用、來源 ID、貼文 ID 或時間不一致時整批拒絕寫入。
@@ -73,8 +73,8 @@ gantt
   - [x] 事件版本、完整證據集合、claim 引用、快照來源觀察及排名投影以複合外鍵綁定，發布前再與 PostgreSQL 權威資料逐欄核對。
   - [x] AI 選到有效引用不等於語義成立；AI claim 一律待確認，審核台新增逐條人工語義確認，編輯內容會清除確認。
   - [x] 歷史資料只回填為 `legacy_unverified`，不捏造原文、發布時間、段落或頁碼。
-  - [x] 功能提交：`03aa498`；Migration：`db/migrations/20260722_source_evidence_v2.sql`。
-  - [ ] Render 正式資料庫 migration、重新採集一份真實日報及正式站發布閘門驗收。
+  - [x] 功能提交：`03aa498`、`18e41f6`、`e51362c`；Migration：`db/migrations/20260722_source_evidence_v2.sql`、`db/migrations/20260722_source_observation_evidence_time.sql`、`db/migrations/20260722_zz_snapshot_claim_presentations.sql`。
+  - [x] Render 正式資料庫 migration、真實來源重採集、人工審核、正式發布、PDF 與歷史歸檔驗收。
 - [ ] **7/23｜前後版本比較與 What Changed**
   - 分辨首次發現、新增／移除證據、數字變動、方向變化、排名變化。
   - 沒有上一版本時只顯示「首次發現」。
@@ -95,14 +95,14 @@ gantt
 
 ## 本週完成後的驗收標準
 
-- [ ] 每條「重要資訊」至少綁定一個證據來源。
+- [x] 每條「重要資訊」至少綁定一個證據來源。
 - [ ] 點擊引用編號可以看到原始來源、引用片段與位置。
 - [ ] 發布時間與採集時間分開顯示，統一為北京時間並精確到分鐘。
 - [ ] 首次出現的事件明確標記「首次發現」，不捏造昨日差異。
 - [ ] 已存在事件能顯示「上一版 → 當前版本 → 改變原因」。
 - [ ] 利好、利空標的及影響機制都會寫入網站與 PDF。
 - [ ] 每個待驗證問題包含驗證條件、期限及狀態。
-- [ ] 缺少證據的高影響判斷不能直接發布，只能降級為「待確認」。
+- [x] 缺少證據的高影響判斷不能直接發布，只能降級為「待確認」。
 
 ## 不可跳過的品質規則
 
@@ -143,14 +143,16 @@ Migration：
 
 ### 2026-07-22
 
-- 狀態：程式、資料庫 migration、審核流程與本機驗證完成；尚未標記為正式完成。
-- PR：[Draft PR #13](https://github.com/kk1030-bit/analystarena-daily-intelligence/pull/13)。
-- Commit：`03aa498`（Add auditable source evidence chain）。
-- Migration：`db/migrations/20260722_source_evidence_v2.sql`；v2 檔名可避免曾記錄早期同日草稿 migration 的資料庫永久跳過最終結構。
+- 狀態：完成並正式部署；真實日報已通過證據閘門、人工審核、發布、PDF 與歸檔驗收。
+- PR：[PR #13](https://github.com/kk1030-bit/analystarena-daily-intelligence/pull/13)。
+- Commit：`03aa498`（Add auditable source evidence chain）、`18e41f6`（Expose publication authority blockers）、`e51362c`（Normalize snapshot claim presentation authority）。
+- Migration：`db/migrations/20260722_source_evidence_v2.sql`、`db/migrations/20260722_source_observation_evidence_time.sql`、`db/migrations/20260722_zz_snapshot_claim_presentations.sql`；最後一項把事件版本的證據斷言與不可變日報快照的翻譯展示文字分開保存，並由快照 payload 幂等回填。
 - 資料模型：新增來源版本 provenance、每次採集 observation、evidence item/version、event-version evidence、claim/evidence link 及 snapshot source observation；所有歷史表禁止更新或刪除。
 - 精度規則：原始時間文字必須嚴格解析並與標準時間一致；模糊時區、無時區及不存在日期不當作發布時間。引用必須存在於來源采集物，且 feed 欄位、Reddit post ID、X status ID、HTML TextQuote 或 PDF 頁碼／偏移必須可驗證。
 - 發布規則：頁面內容、事件版本、證據、來源、快照排名與股票影響均須匹配 PostgreSQL 權威資料；AI 判斷未逐條人工語義確認時不可發布，任何未審核股票影響也不可發布。
-- 自動測試：TypeScript、ESLint、完整日報回歸、股票回歸及 Next.js production build 通過；兩個全新 PostgreSQL 17 實例分別通過來源證據與事件歷史測試，包含並發、A→B→A、不可變 trigger、複合外鍵、舊 migration ledger 升級、重複 migration、偽造引用／時間／排名／事件狀態及低置信未審核股票影響等負向案例。
-- 正式站驗證：尚未執行；依本文件規則，Render migration、真實來源重新採集與正式發布驗收完成前不得勾選 7/22。
-- 已知限制：目前真實采集器涵蓋 RSS／Atom、Reddit 與 X；HTML／PDF 已定義 fail-closed 證據格式，但真正的詳情頁與 PDF 采集器仍屬後續工作。逐句引用的投資人介面安排於 7/25。
-- 下一項：先完成 7/22 Render 驗收，再開始 7/23 What Changed，避免在未驗證證據底座上繼續堆疊功能。
+- 權威不一致修復：首次正式發布回傳 9 個 `CLAIM_AUTHORITY_MISMATCH`，精確對應排名 4–6 的 `title`、`summary`、`important_information:0`。根因是相同證據事件版本正確復用，但舊 `event_claims` 展示翻譯被拿來與新快照翻譯比較；修復後由 43 條不可變 snapshot claim presentation 管理 `statement`／`language`／`ordinal`，而原文、SHA-256、審核狀態、生成器與 57 條引用仍由事件版本逐欄核驗，未繞過證據閘門。
+- 真實採集：[GitHub Actions Run 29917776918](https://github.com/kk1030-bit/analystarena-daily-intelligence/actions/runs/29917776918) 成功；94 則候選、73 個合併事件、8 則頭條，保存 15 份來源文件、30 份證據、43 條 claim 與 57 條 citation。
+- 自動測試：`test:evidence:postgres`、`test:events:postgres` 在隔離 PostgreSQL 18 通過；完整 `test:brief`、TypeScript、ESLint、Next.js production build 與 `git diff --check` 全數通過。新增回歸覆蓋純翻譯不製造事件版本、展示文字／語言篡改阻擋、原文 hash／審核狀態／引用仍嚴格阻擋，以及 migration 完整回填與重跑幂等。
+- 正式站驗證：Render deploy `dep-d9gcs458nd3s73euafog`（commit `e51362c`）為 Live；日報 `4d8bb0a7-67d3-4bee-8cb4-83ab2298091c` 狀態為 `published`，快照 `367ea385-796f-4b03-9133-c6503fafe63b`，8 則頭條、5/5 股票影響已批准、待審 0。[PDF](https://analystarena-daily-intelligence.onrender.com/api/briefs/4d8bb0a7-67d3-4bee-8cb4-83ab2298091c/pdf) 回傳 HTTP 200 `application/pdf`，19 頁無空白頁、缺頁碼、越界文字或壞占位符，含 29 個可點擊來源連結；[歷史歸檔](https://analystarena-daily-intelligence.onrender.com/archive) 已顯示本日報。
+- 已知限制：Reddit RSS 本次受 429 限流且 Playwright 未取得結果；X 未設定原生 `X_AUTH_TOKEN`，本次由新聞索引回退取得 16 條線索。限制已明確保留，不把回退資料冒充原生平台資料。HTML／PDF 已定義 fail-closed 證據格式，但真正的詳情頁與 PDF 采集器仍屬後續工作；逐句引用投資人介面安排於 7/25。
+- 下一項：7/23 前後版本比較與 What Changed。
