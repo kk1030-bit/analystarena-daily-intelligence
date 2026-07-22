@@ -3,44 +3,12 @@ import { isCronRequest } from "@/lib/auth";
 import { saveDraft, storageMode } from "@/lib/db";
 import { buildLiveBrief } from "@/lib/pipeline";
 import { safeCollectorNote } from "@/lib/collectors/router";
-import { ensureRawStoryIdentity } from "@/lib/source-identity";
-import type { CollectorStatus, RawStory } from "@/lib/types";
+import { safeRemoteStories } from "@/lib/collectors/remote";
+import type { CollectorStatus } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
-
-function safeRemoteStories(value: unknown): RawStory[] {
-  if (!Array.isArray(value)) return [];
-  return value.slice(0, 120).flatMap((story) => {
-    if (!story || typeof story !== "object") return [];
-    const item = story as Partial<RawStory>;
-    if ((item.sourceType !== "Reddit" && item.sourceType !== "X") || typeof item.title !== "string" || typeof item.url !== "string" || !/^https?:\/\//.test(item.url)) return [];
-    const ingestedAt = new Date().toISOString();
-    const suppliedCollectedAt = new Date(String(item.collectedAt ?? ""));
-    const collectedAt = Number.isNaN(suppliedCollectedAt.valueOf()) ? ingestedAt : suppliedCollectedAt.toISOString();
-    const publishedAt = new Date(String(item.publishedAt ?? ""));
-    const hasPublishedAt = !Number.isNaN(publishedAt.valueOf());
-    return [ensureRawStoryIdentity({
-      id: String(item.id ?? item.url).slice(0, 1_500),
-      nativeId: typeof item.nativeId === "string" ? item.nativeId.slice(0, 300) : undefined,
-      feedNamespace: typeof item.feedNamespace === "string" ? item.feedNamespace.slice(0, 500) : undefined,
-      title: item.title.slice(0, 240),
-      originalTitle: String(item.originalTitle ?? item.title).slice(0, 240),
-      description: String(item.description ?? "").slice(0, 900),
-      originalDescription: String(item.originalDescription ?? item.description ?? "").slice(0, 900),
-      url: item.url.slice(0, 1_500),
-      publishedAt: hasPublishedAt ? publishedAt.toISOString() : collectedAt,
-      source: String(item.source ?? item.sourceType).slice(0, 100),
-      sourceType: item.sourceType,
-      engagement: Math.max(0, Math.min(10_000_000, Number(item.engagement) || 0)),
-      collectedAt,
-      firstCollectedAt: typeof item.firstCollectedAt === "string" ? item.firstCollectedAt : collectedAt,
-      lastCollectedAt: typeof item.lastCollectedAt === "string" ? item.lastCollectedAt : collectedAt,
-      timestampKind: item.timestampKind === "collected" || !hasPublishedAt ? "collected" : "published",
-    })];
-  });
-}
 
 function safeStatuses(value: unknown): CollectorStatus[] {
   if (!Array.isArray(value)) return [];
