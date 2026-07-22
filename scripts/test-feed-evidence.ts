@@ -41,6 +41,16 @@ assert.equal(rssStory.evidence?.[1].quoteHash, sha256ExactUtf8(decodedDescriptio
 assert.equal(rssStory.evidence?.[1].directness, "direct");
 assert.doesNotThrow(() => assertEvidenceBoundToSourceCapture(rssStory, rssStory.capture!));
 
+const forgedGenericFeedId = structuredClone(rssStory);
+const forgedGenericArtifact = JSON.parse(forgedGenericFeedId.capture!.capturedArtifact!) as Record<string, unknown>;
+forgedGenericArtifact.nativeId = "wire-forged";
+forgedGenericFeedId.capture!.capturedArtifact = JSON.stringify(forgedGenericArtifact);
+assert.throws(
+  () => assertEvidenceBoundToSourceCapture(forgedGenericFeedId, forgedGenericFeedId.capture!),
+  /feed artifact nativeId does not match the source identity/,
+  "a different generic feed GUID must remain fail-closed",
+);
+
 const forgedFeedQuote = structuredClone(rssStory);
 forgedFeedQuote.evidence![1].quoteOriginal = "Revenue rose 99 percent (forged).";
 forgedFeedQuote.evidence![1].quoteHash = sha256ExactUtf8(forgedFeedQuote.evidence![1].quoteOriginal!);
@@ -139,6 +149,46 @@ assert.equal(atomStory.originalPublishedAt, "2026-07-21T08:00:00.000Z");
 assert.equal(atomStory.sourceUpdatedAt, "2026-07-22T09:30:00.000Z");
 assert.equal(atomStory.publishedAtField, "published");
 assert.equal(atomStory.capture?.scope, "atom_entry");
+
+const redditAtomFeed: FeedDefinition = {
+  name: "r/stocks RSS fallback",
+  url: "https://www.reddit.com/r/stocks/hot/.rss?limit=15",
+  type: "Reddit",
+};
+const redditAtom = `<?xml version="1.0"?><feed><entry>
+  <id>t3_1AbC9z</id><title>Quarterly portfolio thread</title>
+  <link rel="alternate" href="https://old.reddit.com/r/stocks/comments/1AbC9z/quarterly_thread/" />
+  <published>2026-07-22T08:00:00Z</published>
+  <content>Discuss portfolio allocations.</content>
+</entry></feed>`;
+const [redditAtomStory] = parseFeedDocument(redditAtomFeed, redditAtom, { collectedAt });
+assert.equal(redditAtomStory.nativeId, "1abc9z", "Reddit source identity must use the normalized URL post ID");
+assert.equal(
+  JSON.parse(redditAtomStory.capture!.capturedArtifact!).nativeId,
+  "t3_1AbC9z",
+  "the immutable feed artifact must preserve Reddit's exact Atom fullname",
+);
+const redditAtomLocator = redditAtomStory.evidence?.[0].locator;
+assert.equal(redditAtomLocator?.kind, "feed_field");
+assert.equal(
+  redditAtomLocator?.kind === "feed_field" ? redditAtomLocator.entryId : undefined,
+  "t3_1AbC9z",
+  "the evidence locator must stay bound to the exact captured Atom entry ID",
+);
+assert.doesNotThrow(
+  () => assertEvidenceBoundToSourceCapture(redditAtomStory, redditAtomStory.capture!),
+  "a Reddit Atom fullname and its URL-derived post ID identify the same source document",
+);
+
+const forgedRedditAtomId = structuredClone(redditAtomStory);
+const forgedRedditArtifact = JSON.parse(forgedRedditAtomId.capture!.capturedArtifact!) as Record<string, unknown>;
+forgedRedditArtifact.nativeId = "t3_9forged";
+forgedRedditAtomId.capture!.capturedArtifact = JSON.stringify(forgedRedditArtifact);
+assert.throws(
+  () => assertEvidenceBoundToSourceCapture(forgedRedditAtomId, forgedRedditAtomId.capture!),
+  /feed artifact nativeId does not match the source identity/,
+  "the Reddit-specific equivalence must not accept a fullname for another post",
+);
 
 const updatedOnly = atom.replace("<published>2026-07-21T08:00:00Z</published>", "");
 const [updatedOnlyStory] = parseFeedDocument(atomFeed, updatedOnly, { collectedAt });

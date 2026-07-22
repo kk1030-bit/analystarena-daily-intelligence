@@ -496,7 +496,29 @@ function assertFeedEvidenceBinding(
   if (artifact.url !== capture.rawUrl || !sameHttpUrl(artifact.url, story.canonicalUrl!)) {
     identityMismatch("feed artifact URL does not match the capture and canonical source identity");
   }
-  if ((artifact.nativeId ?? undefined) !== story.nativeId) {
+  const artifactNativeId = artifact.nativeId ?? undefined;
+  const exactNativeIdMatch = artifactNativeId === story.nativeId;
+  // Reddit's Atom feed preserves the fullname form (`t3_<post-id>`) while
+  // canonical source identity intentionally stores the URL-derived post ID
+  // without the thing-type prefix. Accept only that provable, Reddit-specific
+  // equivalence; every other feed/native-ID mismatch remains fail-closed.
+  const redditAtomFullnameMatch = capture.scope === "atom_entry"
+    && story.sourceType === "Reddit"
+    && Boolean(artifactNativeId)
+    && Boolean(story.nativeId)
+    && artifactNativeId!.toLowerCase() === `t3_${story.nativeId!.toLowerCase()}`
+    && (() => {
+      const artifactIdentity = deriveSourceIdentity({
+        url: artifact.url,
+        sourceType: story.sourceType,
+        source: story.source,
+        nativeId: artifactNativeId,
+        feedNamespace: story.feedNamespace,
+      });
+      return artifactIdentity.nativeId === story.nativeId
+        && artifactIdentity.sourceDocumentId === story.sourceDocumentId;
+    })();
+  if (!exactNativeIdMatch && !redditAtomFullnameMatch) {
     identityMismatch("feed artifact nativeId does not match the source identity");
   }
   const captureRawTime = capture.publishedAtRaw ?? null;
