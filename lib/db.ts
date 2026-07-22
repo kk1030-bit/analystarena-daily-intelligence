@@ -199,6 +199,16 @@ interface BriefSnapshotEventRow {
   match_confidence: number | string;
 }
 
+interface BriefSnapshotClaimPresentationRow {
+  snapshot_id: string;
+  event_id: string;
+  event_version_id: string;
+  claim_key: string;
+  ordinal: number;
+  statement: string;
+  language: string;
+}
+
 interface StockProfileRow {
   symbol: string;
   provider_symbol: string;
@@ -2409,6 +2419,32 @@ async function persistBriefObservationPostgres(
     const snapshotEventVersions = new Map(
       pendingObservations.map((observation) => [observation.eventId, observation.eventVersionId]),
     );
+    const claimPresentations = stableBrief.headlines.flatMap((headline) => {
+      const eventVersionId = snapshotEventVersions.get(headline.id);
+      if (!eventVersionId) throw new Error(`Snapshot event ${headline.id} has no exact event version`);
+      return (headline.claims ?? []).map((claim) => ({
+        event_id: headline.id,
+        event_version_id: eventVersionId,
+        claim_key: claim.claimKey,
+        ordinal: claim.ordinal,
+        statement: claim.statement,
+        language: claim.language,
+      }));
+    });
+    if (claimPresentations.length) {
+      await client.query(`
+        INSERT INTO brief_snapshot_claim_presentations (
+          snapshot_id, event_id, event_version_id, claim_key,
+          ordinal, statement, language
+        )
+        SELECT $1, item.event_id, item.event_version_id, item.claim_key,
+               item.ordinal, item.statement, item.language
+        FROM jsonb_to_recordset($2::jsonb) AS item(
+          event_id TEXT, event_version_id UUID, claim_key TEXT,
+          ordinal INTEGER, statement TEXT, language TEXT
+        )
+      `, [snapshotId, JSON.stringify(claimPresentations)]);
+    }
     for (const headline of stableBrief.headlines) {
       const eventVersionId = snapshotEventVersions.get(headline.id);
       if (!eventVersionId) throw new Error(`Snapshot event ${headline.id} has no exact event version`);
@@ -3331,6 +3367,47 @@ export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<E
       }
     }
 
+    const claimPresentationRows = await pool().query<BriefSnapshotClaimPresentationRow>(`
+      SELECT snapshot_id, event_id, event_version_id, claim_key,
+             ordinal, statement, language
+      FROM brief_snapshot_claim_presentations
+      WHERE snapshot_id = $1 AND event_id = $2 AND event_version_id = $3
+    `, [snapshotId, headline.id, eventVersionId]);
+    const authoritativeClaimPresentations = new Map(
+      claimPresentationRows.rows.map((row) => [row.claim_key, row]),
+    );
+    const projectedClaims = headline.claims ?? [];
+    if (authoritativeClaimPresentations.size !== projectedClaims.length
+      || new Set(projectedClaims.map((claim) => claim.claimKey)).size !== projectedClaims.length
+      || projectedClaims.some((claim) => !authoritativeClaimPresentations.has(claim.claimKey))) {
+      issues.push(authorityIssue(
+        headline.id,
+        "CLAIM_PRESENTATION_SET_AUTHORITY_MISMATCH",
+        "页面声明展示集合与不可变快照登记集合不同",
+      ));
+    }
+    for (const claim of projectedClaims) {
+      const presentation = authoritativeClaimPresentations.get(claim.claimKey);
+      if (!presentation) {
+        issues.push(authorityIssue(
+          headline.id,
+          "CLAIM_PRESENTATION_AUTHORITY_MISSING",
+          `声明 ${claim.claimKey} 没有不可变快照展示记录`,
+        ));
+        continue;
+      }
+      if (presentation.event_version_id !== eventVersionId
+        || presentation.ordinal !== claim.ordinal
+        || presentation.statement !== claim.statement
+        || presentation.language !== claim.language) {
+        issues.push(authorityIssue(
+          headline.id,
+          "CLAIM_PRESENTATION_AUTHORITY_MISMATCH",
+          `声明 ${claim.claimKey} 的展示正文或语言与不可变快照不一致`,
+        ));
+      }
+    }
+
     const claimRows = await pool().query<{
       id: string;
       claim_key: string;
@@ -3351,7 +3428,6 @@ export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<E
       WHERE event_id = $1 AND event_version_id = $2
     `, [headline.id, eventVersionId]);
     const authoritativeClaims = new Map(claimRows.rows.map((row) => [row.claim_key, row]));
-    const projectedClaims = headline.claims ?? [];
     if (authoritativeClaims.size !== projectedClaims.length
       || new Set(projectedClaims.map((claim) => claim.claimKey)).size !== projectedClaims.length
       || projectedClaims.some((claim) => !authoritativeClaims.has(claim.claimKey))) {
@@ -3393,10 +3469,8 @@ export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<E
       }
       if (row.claim_type !== claim.type
         || row.ordinal !== claim.ordinal + 1
-        || row.statement !== claim.statement
         || row.original_statement !== (claim.originalStatement ?? null)
         || row.statement_hash !== claim.statementHash
-        || row.language !== claim.language
         || row.verification_status !== claim.verificationStatus
         || row.generator !== claim.generator
         || row.generator_version !== claim.generatorVersion) {

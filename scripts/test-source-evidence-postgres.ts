@@ -79,6 +79,11 @@ assert.equal(
   1,
   "the finalized migration filename must run even when the earlier draft filename is in the ledger",
 );
+assert.equal(
+  (await raw.query(`SELECT 1 FROM schema_migrations WHERE id = '20260722_zz_snapshot_claim_presentations.sql'`)).rowCount,
+  1,
+  "the snapshot claim presentation migration must run after the evidence schema",
+);
 const upgradedArtifactColumns = await raw.query(`
   SELECT column_name FROM information_schema.columns
   WHERE table_schema = 'public'
@@ -449,6 +454,108 @@ assert.ok(snapshotObservation.rows.every((row) => row.event_version_id === event
 assert.deepEqual(snapshotObservation.rows.map((row) => row.ordinal).sort(), [1, 2]);
 
 assert.deepEqual(await db.verifyBriefEvidenceAuthority(saved.brief), []);
+
+// A localized display is snapshot presentation, not a new evidence/state
+// revision.  It must reuse the event version while remaining byte-for-byte
+// accountable through the normalized snapshot-presentation relation.
+const translatedDisplayByClaim = new Map<string, string>([
+  ["title", "营收证据更新"],
+  ["summary", "营收同比增长百分之十二。"],
+  ["important_information:0", "营收同比增长百分之十二。"],
+  ["market_impact", "更正内容改变了盈利判断。"],
+  ["direction_rationale", "营收证据支持潜在的正面盈利方向。"],
+]);
+const translatedBrief = structuredClone(saved.brief);
+translatedBrief.generatedAt = `${date}T04:05:00.000Z`;
+translatedBrief.headlines[0].title = translatedDisplayByClaim.get("title")!;
+translatedBrief.headlines[0].summary = translatedDisplayByClaim.get("summary")!;
+translatedBrief.headlines[0].keyPoints = [translatedDisplayByClaim.get("important_information:0")!];
+translatedBrief.headlines[0].marketImpact = translatedDisplayByClaim.get("market_impact")!;
+translatedBrief.headlines[0].directionRationale = translatedDisplayByClaim.get("direction_rationale")!;
+translatedBrief.headlines[0].claims = translatedBrief.headlines[0].claims?.map((claim) => ({
+  ...claim,
+  statement: translatedDisplayByClaim.get(claim.claimKey) ?? claim.statement,
+  language: "zh-CN",
+}));
+const versionCountBeforeTranslation = (await db.listEventVersions(eventId)).length;
+const translatedSave = await db.saveDraft(translatedBrief, {
+  stream: "manual",
+  batchKey: "postgres-claim-presentation-translation",
+});
+assert.equal(
+  (await db.listEventVersions(eventId)).length,
+  versionCountBeforeTranslation,
+  "a pure claim display translation must not manufacture an event version",
+);
+assert.deepEqual(await db.verifyBriefEvidenceAuthority(translatedSave.brief), []);
+const translatedPresentations = await raw.query<{
+  claim_key: string;
+  statement: string;
+  language: string;
+}>(`
+  SELECT claim_key, statement, language
+  FROM brief_snapshot_claim_presentations
+  WHERE snapshot_id = $1 AND event_id = $2
+  ORDER BY ordinal
+`, [translatedSave.brief.snapshot?.id, eventId]);
+assert.equal(translatedPresentations.rowCount, claims.length);
+assert.ok(translatedPresentations.rows.every((row) => row.language === "zh-CN"));
+assert.equal(
+  translatedPresentations.rows.find((row) => row.claim_key === "title")?.statement,
+  translatedDisplayByClaim.get("title"),
+);
+assert.equal(
+  (await raw.query<{ statement: string }>(`
+    SELECT statement FROM event_claims
+    WHERE event_id = $1 AND event_version_id = $2 AND claim_key = 'title'
+  `, [eventId, eventVersionId])).rows[0].statement,
+  thirdStory.title,
+  "the event-version claim keeps its original display while the snapshot owns the translation",
+);
+
+const forgedClaimPresentation = structuredClone(translatedSave.brief);
+forgedClaimPresentation.headlines[0].claims![0].statement = "伪造的展示正文";
+assert.ok((await db.verifyBriefEvidenceAuthority(forgedClaimPresentation)).some((issue) =>
+  issue.code === "CLAIM_PRESENTATION_AUTHORITY_MISMATCH"));
+const forgedClaimLanguage = structuredClone(translatedSave.brief);
+forgedClaimLanguage.headlines[0].claims![0].language = "en";
+assert.ok((await db.verifyBriefEvidenceAuthority(forgedClaimLanguage)).some((issue) =>
+  issue.code === "CLAIM_PRESENTATION_AUTHORITY_MISMATCH"));
+const forgedClaimStatus = structuredClone(translatedSave.brief);
+forgedClaimStatus.headlines[0].claims![0].verificationStatus = "legacy_unverified";
+assert.ok((await db.verifyBriefEvidenceAuthority(forgedClaimStatus)).some((issue) =>
+  issue.code === "CLAIM_AUTHORITY_MISMATCH"));
+
+// Simulate a database upgraded after snapshots already existed: remove this
+// test snapshot's derived presentation rows, rerun the migration, then rerun it
+// again to prove both complete backfill and idempotency.
+const claimPresentationMigrationSql = await readFile(
+  new URL("../db/migrations/20260722_zz_snapshot_claim_presentations.sql", import.meta.url),
+  "utf8",
+);
+await raw.query(`DROP TRIGGER brief_snapshot_claim_presentations_immutable ON brief_snapshot_claim_presentations`);
+await raw.query(`DELETE FROM brief_snapshot_claim_presentations WHERE snapshot_id = $1`, [translatedSave.brief.snapshot?.id]);
+assert.equal(
+  Number((await raw.query(`
+    SELECT COUNT(*) AS count FROM brief_snapshot_claim_presentations WHERE snapshot_id = $1
+  `, [translatedSave.brief.snapshot?.id])).rows[0].count),
+  0,
+);
+await raw.query(claimPresentationMigrationSql);
+const backfilledPresentationCount = Number((await raw.query(`
+  SELECT COUNT(*) AS count FROM brief_snapshot_claim_presentations WHERE snapshot_id = $1
+`, [translatedSave.brief.snapshot?.id])).rows[0].count);
+assert.equal(backfilledPresentationCount, claims.length, "migration must backfill every snapshot claim presentation");
+await raw.query(claimPresentationMigrationSql);
+assert.equal(
+  Number((await raw.query(`
+    SELECT COUNT(*) AS count FROM brief_snapshot_claim_presentations WHERE snapshot_id = $1
+  `, [translatedSave.brief.snapshot?.id])).rows[0].count),
+  backfilledPresentationCount,
+  "rerunning the presentation migration must not duplicate rows",
+);
+assert.deepEqual(await db.verifyBriefEvidenceAuthority(translatedSave.brief), []);
+
 const reversedSources = structuredClone(saved.brief);
 reversedSources.headlines[0].sources.reverse();
 const versionCountBeforeReorderedSave = (await db.listEventVersions(eventId)).length;
