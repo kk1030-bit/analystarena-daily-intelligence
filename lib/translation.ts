@@ -87,6 +87,10 @@ function isPreservedEnglishToken(token: string): boolean {
   if (preservedTerms.has(normalized)) return true;
   if (/^q[1-4]$/i.test(token)) return true;
   if (/^\$[a-z]{1,6}$/i.test(token)) return true;
+  // Market index / contract identifiers commonly mix uppercase letters with
+  // digits (for example SP500). They are searchable identifiers, not English
+  // prose, and must not make an otherwise complete Chinese translation fail.
+  if (/^[A-Z]{1,6}\d{1,4}$/.test(token)) return true;
   // Uppercase market identifiers remain searchable, except for common prose
   // that publishers occasionally capitalize in alert-style headlines.
   if (/^[A-Z]{1,6}$/.test(token) && !commonEnglishProse.has(normalized)) return true;
