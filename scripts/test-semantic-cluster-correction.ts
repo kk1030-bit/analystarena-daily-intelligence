@@ -168,10 +168,8 @@ const liveHeadline: Headline = {
   ...structuredClone(publishedHeadline),
   id: "collector-local-id",
   sources: [
-    source("Primary News", "primary", "doc-primary", []),
-    // The source remains in the corrected cluster. Its evidence omission must
-    // not be interpreted as an administrator-authorized retraction.
-    source("Retained News", "corroborating", "doc-retained", []),
+    source("Primary News", "primary", "doc-primary", [primaryEvidence]),
+    source("Retained News", "corroborating", "doc-retained", [retainedEvidence]),
   ],
   claims: [],
 };
@@ -185,9 +183,9 @@ const authorization: SemanticClusterCorrectionAuthorization = {
 };
 
 const requests = deriveSemanticClusterCorrectionRetractions(published, live, authorization);
-assert.equal(requests.length, 3);
+assert.equal(requests.length, 5);
 assert.deepEqual(
-  requests.map((request) => [
+  requests.filter((request) => !request.claimKey).map((request) => [
     request.eventId,
     request.fromEventVersionId,
     request.evidenceItemId,
@@ -201,6 +199,19 @@ assert.deepEqual(
     ["evt-primary", eventVersionId, "evi-wrong-two", "ev-wrong-two-v1", undefined, undefined],
   ],
   "source removal must create exact evidence-scoped requests against the published event version",
+);
+assert.deepEqual(
+  requests.filter((request) => request.claimKey).map((request) => [
+    request.evidenceItemId,
+    request.evidenceVersionId,
+    request.claimKey,
+    request.citationRelation,
+  ]),
+  [
+    ["evi-primary", "ev-primary-v1", "summary", "supports"],
+    ["evi-retained", "ev-retained-v1", "summary", "supports"],
+  ],
+  "retained evidence may receive only an exact claim-relationship retraction",
 );
 
 const replayAuthority = structuredClone(published);
@@ -253,9 +264,9 @@ assert.ok(replayed.warning?.includes("没有引入新来源"));
 assert.ok(requests.every((request) => request.reasonCode === "review_rejected"));
 assert.ok(requests.every((request) => request.reasonNote.includes("管理员逐项确认")));
 assert.ok(
-  !requests.some((request) =>
+  !requests.some((request) => !request.claimKey && (
     request.evidenceItemId === primaryEvidence.id
-    || request.evidenceItemId === retainedEvidence.id),
+    || request.evidenceItemId === retainedEvidence.id)),
   "primary evidence and a still-present corroborating source must never be auto-retracted",
 );
 assert.deepEqual(

@@ -318,6 +318,14 @@ export function deriveSemanticClusterCorrectionRetractions(
     const removedSecondarySources = publishedHeadline.sources.filter((source) =>
       (source.role === "corroborating" || source.role === "social_signal")
       && !liveSources.some((candidate) => sameSourceIdentity(source, candidate)));
+    const removedEvidenceTargets = new Set(removedSecondarySources
+      .flatMap((source) => source.evidence ?? [])
+      .filter((evidence) => evidence.versionId)
+      .map((evidence) => `${evidence.id}\u0000${evidence.versionId}`));
+    const currentEvidenceTargets = new Set(liveSources
+      .flatMap((source) => source.evidence ?? [])
+      .filter((evidence) => evidence.versionId)
+      .map((evidence) => `${evidence.id}\u0000${evidence.versionId}`));
 
     for (const source of removedSecondarySources) {
       for (const evidence of source.evidence ?? []) {
@@ -354,6 +362,64 @@ export function deriveSemanticClusterCorrectionRetractions(
         });
       }
     }
+
+    // Replaying a corrected event may remove one exact claim relationship
+    // while retaining its underlying evidence (for example after key-point
+    // renumbering). Authorize only that relationship, never the evidence item.
+    for (const claim of publishedHeadline.claims ?? []) {
+      const currentClaim = liveHeadline.claims?.find((item) =>
+        item.claimKey === claim.claimKey);
+      for (const citation of claim.citations) {
+        if (!citation.versionId) {
+          fail(
+            "UNVERSIONED_SECONDARY_EVIDENCE",
+            `正式事件 ${publishedHeadline.id} 的旧判断 ${claim.claimKey} 含有无法精确定位版本的引文`,
+          );
+        }
+        const evidenceTarget = `${citation.id}\u0000${citation.versionId}`;
+        if (removedEvidenceTargets.has(evidenceTarget)) continue;
+        if (!currentEvidenceTargets.has(evidenceTarget)) {
+          fail(
+            "PUBLISHED_SOURCE_AUTHORITY_REQUIRED",
+            `正式事件 ${publishedHeadline.id} 的引文 ${citation.id} 不属于可撤下的次要来源，也未保留在重放事件中`,
+          );
+        }
+        const retained = currentClaim?.citations.some((item) =>
+          item.id === citation.id
+          && item.versionId === citation.versionId
+          && item.relation === citation.relation);
+        if (retained) continue;
+        const target = [
+          publishedHeadline.id,
+          snapshotEvent.eventVersionId,
+          citation.id,
+          citation.versionId,
+          claim.claimKey,
+          citation.relation,
+        ].join("\u0000");
+        if (requestTargets.has(target)) continue;
+        requestTargets.add(target);
+        const requestId = `scr_${sha256ExactUtf8(canonicalEvidenceJson([
+          "semantic-cluster-correction-claim-relationship",
+          1,
+          published.id,
+          authority.snapshotId,
+          authority.payloadHash,
+          ...target.split("\u0000"),
+        ]))}`;
+        requests.push({
+          requestId,
+          eventId: publishedHeadline.id,
+          fromEventVersionId: snapshotEvent.eventVersionId,
+          evidenceItemId: citation.id,
+          evidenceVersionId: citation.versionId,
+          claimKey: claim.claimKey,
+          citationRelation: citation.relation,
+          reasonCode: "review_rejected",
+          reasonNote: `${authority.reason.slice(0, 300)}（证据仍保留；管理员只确认旧判断「${claim.claimKey}」与该证据的 ${citation.relation} 关系不再适用于重放后的事件。）`,
+        });
+      }
+    }
   }
 
   return requests.sort((left, right) =>
@@ -372,7 +438,7 @@ export function assertSemanticClusterCorrectionVersionsCurrent(
   requests: EvidenceRetractionRequest[],
   latestVersionIdByEvent: ReadonlyMap<string, string | undefined>,
 ): void {
-  if (!requests.length) {
+  if (!requests.some((request) => !request.claimKey)) {
     fail(
       "CORRECTION_NO_RETRACTIONS",
       "本次 live brief 没有可精确撤下的旧次要来源证据，未建立更正草稿",
