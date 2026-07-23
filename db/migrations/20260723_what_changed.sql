@@ -575,7 +575,7 @@ BEGIN
     LEFT JOIN brief_snapshots AS snapshot
       ON snapshot.id = brief.current_snapshot_id
     WHERE brief.id IS NULL
-       OR brief.status IS DISTINCT FROM 'published'
+       OR brief.status NOT IN ('published', 'superseded')
        OR brief.current_snapshot_id IS DISTINCT FROM audit.snapshot_id
        OR snapshot.payload_hash IS DISTINCT FROM audit.snapshot_payload_hash
        OR (
@@ -664,8 +664,22 @@ DECLARE
   authority_snapshot_payload_hash TEXT;
   authority_snapshot_payload JSONB;
   authority_snapshot_date DATE;
+  old_supersedes_id UUID;
+  new_supersedes_id UUID;
+  old_superseded_by_id UUID;
+  new_superseded_by_id UUID;
 BEGIN
-  IF OLD.status <> 'published' THEN
+  -- `to_jsonb` keeps this migration independently rerunnable both before and
+  -- after the later correction migration adds the lifecycle columns. A direct
+  -- rerun must never downgrade the newer publication-authority trigger.
+  old_supersedes_id := NULLIF(to_jsonb(OLD)->>'supersedes_id', '')::uuid;
+  new_supersedes_id := NULLIF(to_jsonb(NEW)->>'supersedes_id', '')::uuid;
+  old_superseded_by_id :=
+    NULLIF(to_jsonb(OLD)->>'superseded_by_id', '')::uuid;
+  new_superseded_by_id :=
+    NULLIF(to_jsonb(NEW)->>'superseded_by_id', '')::uuid;
+
+  IF OLD.status NOT IN ('published', 'superseded') THEN
     IF TG_OP = 'DELETE' THEN
       RETURN OLD;
     END IF;
@@ -703,7 +717,9 @@ BEGIN
   FROM brief_snapshots
   WHERE id = NEW.current_snapshot_id;
 
-  IF NEW.status IS DISTINCT FROM 'published'
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.brief_date IS DISTINCT FROM OLD.brief_date
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at
      OR NEW.current_snapshot_id IS DISTINCT FROM audit_snapshot_id
      OR authority_snapshot_payload_hash
        IS DISTINCT FROM audit_snapshot_payload_hash
@@ -715,7 +731,26 @@ BEGIN
      )
      OR authority_snapshot_date IS DISTINCT FROM NEW.brief_date
      OR encode(sha256(NEW.pdf_data), 'hex') IS DISTINCT FROM audit_pdf_sha256
-     OR NEW.published_at IS DISTINCT FROM audit_published_at THEN
+     OR NEW.published_at IS DISTINCT FROM audit_published_at
+     OR new_supersedes_id IS DISTINCT FROM old_supersedes_id
+     OR (
+       OLD.status = 'published'
+       AND NOT (
+         (NEW.status = 'published'
+          AND new_superseded_by_id IS NOT DISTINCT FROM old_superseded_by_id)
+         OR
+         (NEW.status = 'superseded'
+          AND old_superseded_by_id IS NULL
+          AND new_superseded_by_id IS NOT NULL)
+       )
+     )
+     OR (
+       OLD.status = 'superseded'
+       AND (
+         NEW.status IS DISTINCT FROM 'superseded'
+         OR new_superseded_by_id IS DISTINCT FROM old_superseded_by_id
+       )
+     ) THEN
     RAISE EXCEPTION 'published brief % cannot diverge from its immutable publication audit',
       OLD.id
       USING ERRCODE = '23514';

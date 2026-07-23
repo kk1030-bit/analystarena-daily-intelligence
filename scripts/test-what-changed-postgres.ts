@@ -50,6 +50,14 @@ assert.equal(
   1,
   "the empty database must run the 7/23 migration through the real migration ledger",
 );
+assert.equal(
+  (await raw.query(`
+    SELECT 1 FROM schema_migrations
+    WHERE id = '20260723_zzz_published_corrections.sql'
+  `)).rowCount,
+  1,
+  "the empty database must run the publication-correction migration after What Changed",
+);
 
 const dayOne = "2095-07-22";
 const dayTwo = "2095-07-23";
@@ -1301,7 +1309,16 @@ const auditSnapshotId = hashDraftTwo.brief.snapshot!.id;
 const auditSnapshotHash = hashDraftTwo.brief.snapshot!.payloadHash;
 const auditPdf = Buffer.from("direct-publication-audit-fixture");
 const auditPdfHash = createHash("sha256").update(auditPdf).digest("hex");
-const auditPublishedAt = `${dayEight}T03:05:00.000Z`;
+const auditPublicationClock = await raw.query<{ published_at: string | Date }>(`
+  SELECT GREATEST(
+    clock_timestamp(),
+    COALESCE(MAX(published_at) + INTERVAL '1 millisecond', '-infinity'::timestamptz)
+  ) AS published_at
+  FROM brief_publication_audits
+`);
+const auditPublishedAt = new Date(
+  auditPublicationClock.rows[0].published_at,
+).toISOString();
 await expectPublicationAuditRejected({
   briefId: hashDraftTwo.id,
   snapshotId: auditSnapshotId,
@@ -2163,6 +2180,12 @@ await raw.query(`
   ALTER TABLE daily_briefs
   DISABLE TRIGGER daily_briefs_require_publication_audit
 `);
+const legacyPublicationClock = await raw.query<{ published_at: string | Date }>(
+  "SELECT clock_timestamp() AS published_at",
+);
+const legacyPublishedAt = new Date(
+  legacyPublicationClock.rows[0].published_at,
+).toISOString();
 try {
   await raw.query(`
     UPDATE daily_briefs
@@ -2175,7 +2198,7 @@ try {
   `, [
     legacyPublishedDraft.id,
     Buffer.from("legacy-published-without-audit"),
-    `${legacyPublishedDate}T03:05:00.000Z`,
+    legacyPublishedAt,
   ]);
 } finally {
   await raw.query(`
@@ -2259,6 +2282,16 @@ const migrationSql = await readFile(
   "utf8",
 );
 await raw.query(migrationSql);
+const correctionAwareAuthorityFunction = await raw.query<{ definition: string }>(`
+  SELECT pg_get_functiondef(
+    'analystarena_preserve_publication_authority()'::regprocedure
+  ) AS definition
+`);
+assert.match(
+  correctionAwareAuthorityFunction.rows[0].definition,
+  /OLD\.status NOT IN \('published', 'superseded'\)/,
+  "rerunning the older What Changed migration must not downgrade superseded-report immutability",
+);
 assert.equal(
   (await raw.query<{ current_snapshot_id: string }>(
     "SELECT current_snapshot_id FROM daily_briefs WHERE id = $1",
@@ -2815,6 +2848,235 @@ assert.deepEqual(
   beforeDirectRerun,
   "process-local schema reinitialization must respect the migration ledger",
 );
+
+// Direct adversarial reruns above intentionally reinstall the older 7/23
+// publication trigger. A convergent full migration pass ends with the
+// correction migration, matching lexical migration order in production.
+const correctionMigrationSql = await readFile(
+  new URL("../db/migrations/20260723_zzz_published_corrections.sql", import.meta.url),
+  "utf8",
+);
+
+// A published correction is a new immutable authority. The predecessor keeps
+// its original payload/PDF/audit, becomes non-current, and remains the exact
+// same-day previous_published baseline for the replacement.
+const correctionDate = "2300-01-01";
+const correctionNextDate = "2300-01-02";
+const originalCorrectionPublication = await createPublishedUnchangedDay(
+  correctionDate,
+  "published-correction-original",
+);
+const originalCorrectionSnapshotId = originalCorrectionPublication.brief.snapshot?.id;
+assert.ok(originalCorrectionSnapshotId);
+const originalAuthority = await raw.query<{
+  payload: DailyBrief;
+  payload_hash: string;
+  pdf_hash: string;
+  audit_count: number;
+}>(`
+  SELECT brief.payload,
+         encode(digest(brief.payload::text, 'sha256'), 'hex') AS payload_hash,
+         encode(digest(brief.pdf_data, 'sha256'), 'hex') AS pdf_hash,
+         COUNT(audit.brief_id)::integer AS audit_count
+  FROM daily_briefs AS brief
+  LEFT JOIN brief_publication_audits AS audit ON audit.brief_id = brief.id
+  WHERE brief.id = $1
+  GROUP BY brief.id
+`, [originalCorrectionPublication.id]);
+assert.equal(originalAuthority.rows[0].audit_count, 1);
+
+const correctionHeadline = structuredClone(
+  originalCorrectionPublication.brief.headlines[0],
+);
+delete correctionHeadline.whatChanged;
+const correctionDraft = await db.saveDraft(
+  brief(
+    correctionDate,
+    `${correctionDate}T03:10:00.000Z`,
+    correctionHeadline,
+  ),
+  {
+    stream: "manual",
+    batchKey: "what-changed-published-correction-draft",
+    observedAt: `${correctionDate}T03:10:00.000Z`,
+  },
+);
+assert.notEqual(correctionDraft.id, originalCorrectionPublication.id);
+assert.equal(correctionDraft.status, "draft");
+assert.equal(correctionDraft.supersedesId, originalCorrectionPublication.id);
+assert.equal(
+  correctionDraft.brief.headlines[0].whatChanged?.investor.baselineSnapshotId,
+  originalCorrectionSnapshotId,
+  "a correction draft must use the same-day current publication as previous_published",
+);
+assert.deepEqual(await db.verifyBriefEvidenceAuthority(correctionDraft.brief), []);
+
+const correctedPublication = await db.publishBrief(
+  correctionDraft.id,
+  correctionDraft.brief,
+  Buffer.from("what-changed-published-correction-pdf"),
+  {
+    stream: "publish",
+    batchKey: "what-changed-published-correction-publish",
+    actor: {
+      type: "admin",
+      idHash: reviewerHash,
+      reason: "Replace the same-date report without mutating its authority",
+      requestId: "what-changed-published-correction-publish-request",
+    },
+  },
+);
+assert.equal(correctedPublication.status, "published");
+assert.equal(correctedPublication.supersedesId, originalCorrectionPublication.id);
+assert.deepEqual(await db.verifyBriefEvidenceAuthority(correctedPublication.brief), []);
+
+const correctionRows = await raw.query<{
+  id: string;
+  status: string;
+  supersedes_id: string | null;
+  superseded_by_id: string | null;
+  snapshot_id: string;
+  payload_hash: string;
+  pdf_hash: string;
+  audit_count: number;
+}>(`
+  SELECT brief.id::text, brief.status, brief.supersedes_id::text,
+         brief.superseded_by_id::text,
+         brief.current_snapshot_id::text AS snapshot_id,
+         encode(digest(brief.payload::text, 'sha256'), 'hex') AS payload_hash,
+         encode(digest(brief.pdf_data, 'sha256'), 'hex') AS pdf_hash,
+         COUNT(audit.brief_id)::integer AS audit_count
+  FROM daily_briefs AS brief
+  LEFT JOIN brief_publication_audits AS audit ON audit.brief_id = brief.id
+  WHERE brief.id = ANY($1::uuid[])
+  GROUP BY brief.id
+  ORDER BY brief.published_at
+`, [[originalCorrectionPublication.id, correctedPublication.id]]);
+assert.equal(correctionRows.rowCount, 2);
+assert.deepEqual(
+  correctionRows.rows.map((row) => ({
+    id: row.id,
+    status: row.status,
+    supersedesId: row.supersedes_id,
+    supersededById: row.superseded_by_id,
+    auditCount: row.audit_count,
+  })),
+  [
+    {
+      id: originalCorrectionPublication.id,
+      status: "superseded",
+      supersedesId: null,
+      supersededById: correctedPublication.id,
+      auditCount: 1,
+    },
+    {
+      id: correctedPublication.id,
+      status: "published",
+      supersedesId: originalCorrectionPublication.id,
+      supersededById: null,
+      auditCount: 1,
+    },
+  ],
+);
+assert.equal(
+  correctionRows.rows[0].snapshot_id,
+  originalCorrectionSnapshotId,
+  "supersession must retain the predecessor snapshot pointer",
+);
+assert.equal(correctionRows.rows[0].payload_hash, originalAuthority.rows[0].payload_hash);
+assert.equal(correctionRows.rows[0].pdf_hash, originalAuthority.rows[0].pdf_hash);
+assert.deepEqual(
+  (await db.listBriefs("published", 500))
+    .filter((record) => record.date === correctionDate)
+    .map((record) => record.id),
+  [correctedPublication.id],
+  "default published queries must return only the current same-date authority",
+);
+assert.equal(
+  (await db.getPublishedPdf(originalCorrectionPublication.id)),
+  null,
+  "a superseded PDF must not be anonymously public",
+);
+assert.ok(
+  (await db.getPublishedPdf(
+    originalCorrectionPublication.id,
+    { includeSuperseded: true },
+  ))?.pdf.length,
+  "an administrator must still be able to audit the superseded PDF",
+);
+
+const postCorrectionHeadline = structuredClone(correctedPublication.brief.headlines[0]);
+delete postCorrectionHeadline.whatChanged;
+const postCorrectionDay = await db.saveDraft(
+  brief(
+    correctionNextDate,
+    `${correctionNextDate}T03:00:00.000Z`,
+    postCorrectionHeadline,
+  ),
+  {
+    stream: "manual",
+    batchKey: "what-changed-post-correction-next-day",
+    observedAt: `${correctionNextDate}T03:00:00.000Z`,
+  },
+);
+assert.equal(
+  postCorrectionDay.brief.headlines[0].whatChanged?.investor.baselineSnapshotId,
+  correctedPublication.brief.snapshot?.id,
+  "the next day must select the final 7/23-style current report, not its superseded predecessor",
+);
+
+await assert.rejects(
+  () => raw.query(
+    "UPDATE daily_briefs SET payload = payload || '{\"tampered\":true}'::jsonb WHERE id = $1",
+    [originalCorrectionPublication.id],
+  ),
+  (error: unknown) => (error as { code?: string }).code === "23514",
+  "superseded payloads must remain protected by the publication audit trigger",
+);
+
+const secondCorrectionHeadline = structuredClone(correctedPublication.brief.headlines[0]);
+delete secondCorrectionHeadline.whatChanged;
+const secondCorrectionDraft = await db.saveDraft(
+  brief(
+    correctionDate,
+    `${correctionDate}T03:20:00.000Z`,
+    secondCorrectionHeadline,
+  ),
+  {
+    stream: "manual",
+    batchKey: "what-changed-second-correction-draft",
+    observedAt: `${correctionDate}T03:20:00.000Z`,
+  },
+);
+const halfTransitionError = await (async () => {
+  const client = await raw.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`
+      UPDATE daily_briefs
+      SET status = 'superseded', superseded_by_id = $2
+      WHERE id = $1
+    `, [correctedPublication.id, secondCorrectionDraft.id]);
+    await client.query("COMMIT");
+    return undefined;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    return error as { code?: string };
+  } finally {
+    client.release();
+  }
+})();
+assert.equal(
+  halfTransitionError?.code,
+  "23514",
+  "a committed half-transition must be rejected by the deferred correction-chain guard",
+);
+assert.equal((await db.getBrief(correctedPublication.id))?.status, "published");
+assert.equal((await db.getBrief(secondCorrectionDraft.id))?.status, "draft");
+
+await raw.query(correctionMigrationSql);
+assert.equal((await db.getBrief(originalCorrectionPublication.id))?.status, "superseded");
+assert.equal((await db.getBrief(correctedPublication.id))?.status, "published");
 
 await raw.end();
 console.log(

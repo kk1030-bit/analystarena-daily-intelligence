@@ -93,6 +93,69 @@ const routineSecTerms = /appoint|personnel|award|conference|speech|remarks|small
 const positiveTerms = /beat|growth|surge|record|approval|expand|upgrade|strong|profit|raise|accelerat/i;
 const negativeTerms = /miss|cut|drop|decline|delay|ban|probe|risk|layoff|warning|weak|fraud|charge|lawsuit/i;
 const stopWords = new Set(["about", "after", "again", "against", "amid", "from", "into", "market", "markets", "more", "over", "says", "that", "their", "this", "with", "will", "would", "stock", "shares", "news"]);
+const mergeEntityAliases: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["alphabet", ["alphabet", "google", "goog", "googl", "谷歌"]],
+  ["amazon", ["amazon", "amzn", "亚马逊", "亞馬遜"]],
+  ["amd", ["advanced micro devices", "amd"]],
+  ["anthropic", ["anthropic"]],
+  ["apple", ["apple", "aapl", "苹果", "蘋果"]],
+  ["bitcoin", ["bitcoin", "btc", "比特币", "比特幣"]],
+  ["broadcom", ["broadcom", "avgo"]],
+  ["coinbase", ["coinbase"]],
+  ["deepseek", ["deepseek"]],
+  ["federal-reserve", ["federal reserve", "fomc", "美联储", "美聯儲"]],
+  ["lockheed-martin", ["lockheed martin", "lockheed", "lmt", "洛克希德马丁", "洛克希德馬丁"]],
+  ["meta", ["meta platforms", "facebook", "meta"]],
+  ["micron", ["micron", "mu", "美光"]],
+  ["microsoft", ["microsoft", "msft", "微软", "微軟"]],
+  ["nasdaq", ["nasdaq", "ndaq"]],
+  ["nvidia", ["nvidia", "nvda", "英伟达", "英偉達", "辉达", "輝達"]],
+  ["openai", ["openai"]],
+  ["palantir", ["palantir", "pltr"]],
+  ["sk-hynix", ["sk hynix"]],
+  ["spacex", ["spacex"]],
+  ["tesla", ["tesla", "tsla", "特斯拉"]],
+  ["tsmc", ["taiwan semiconductor", "tsmc", "tsm", "台积电", "台積電"]],
+];
+const mergeEventPatterns: ReadonlyArray<readonly [string, RegExp]> = [
+  ["acquisition", /\bacqui(?:re|res|red|ring|sition)|\bmerger|\btakeover|并购|收购/i],
+  ["analyst-rating", /\banalysts? (?:raise|cut|upgrade|downgrade)|\bupgrade[ds]?|\bdowngrade[ds]?|\bprice target|评级|目标价/i],
+  ["bankruptcy", /\bbankrupt|\bdefault|\binsolven|破产|违约/i],
+  ["buyback-dividend", /\bbuyback|\brepurchase|\bdividend|回购|股息|分红/i],
+  ["capex", /\bcapex|\bcapital expenditure|\bai spending|\bspending plans?|资本支出/i],
+  ["contract-order", /\bcontract|\border(?:s|ed)?|\bdeal|\bpartnership|\bagreement|合同|订单|协议|合作/i],
+  ["cybersecurity", /\bcyber|\bdata breach|\bhack(?:ed|ing)?|网络安全|数据泄露/i],
+  ["earnings", /\bearnings|\bquarterly results?|\bfinancial results?|\bpost-earnings|财报|业绩/i],
+  ["employment", /\blayoffs?|\bjob cuts?|\bhiring|\bpayrolls?|\bunemployment|裁员|就业|失业/i],
+  ["etf-flow", /\betf|\bfund flows?|\binflows?|\boutflows?|交易所交易基金|资金流/i],
+  ["guidance", /\bguidance|\boutlook|\bforecast|\braises? (?:its )?full-year|\bcuts? (?:its )?full-year|指引|展望|预测/i],
+  ["inflation", /\binflation|\bcpi\b|\bpce\b|通胀|消费者价格/i],
+  ["ipo-financing", /\bipo\b|\bpublic offering|\bfundrais|\bfinancing|首次公开募股|融资/i],
+  ["legal", /\blawsuit|\blitigation|\bsettlement|\bcharged?\b|\bfraud|诉讼|和解|指控|欺诈/i],
+  ["market-move", /\bstock (?:falls?|rises?|slides?|jumps?|gains?)|\bshares? (?:fall|rise|slide|jump|gain)|\bfutures? (?:fall|rise)|股价|股票下跌|股票上涨/i],
+  ["monetary-policy", /\binterest rates?|\brate (?:cut|hike|decision)|\bfomc|\bfederal reserve|降息|加息|利率决议/i],
+  ["product-launch", /\blaunch(?:es|ed|ing)?|\bunveil(?:s|ed)?|\brelease(?:s|d)?|\brolls? out|\bintroduc(?:e|es|ed)|发布|推出|发布会/i],
+  ["recall-safety", /\brecall|\bsafety (?:issue|probe|investigation)|召回|安全调查/i],
+  ["regulation", /\bregulat|\bantitrust|\binvestigation|\bprobe|\bapproval|\bban(?:ned)?|监管|反垄断|调查|批准|禁令/i],
+  ["revenue", /\brevenue|\bsales|\bbookings?|营收|销售额/i],
+  ["trade-policy", /\btariffs?|\bsanctions?|\bexport controls?|\btrade restrictions?|关税|制裁|出口管制/i],
+];
+const mergeEntityNoise = new Set([
+  "a", "about", "after", "ahead", "ai", "amid", "an", "and", "analyst", "analysts", "are", "as", "at",
+  "barron s", "beat", "beats", "before", "between", "beyond", "bloomberg", "buying", "by", "capex", "capital",
+  "chief", "cnbc", "could",
+  "day", "does", "dow", "earnings", "expectations", "fall", "falls", "financial", "for", "free", "from",
+  "full", "futures", "gaining", "growth", "how", "in", "into", "is", "it", "latest", "look", "market",
+  "launch", "launched", "launches", "launching", "markets", "miss", "misses", "more", "morning", "new", "next",
+  "finance", "fool", "investor s", "morningstar", "motley", "negative", "not", "of", "on", "outlook",
+  "over", "phase", "portfolio", "post", "prediction", "price", "q1", "q2", "q3", "q4", "quarter", "race",
+  "raised", "release", "released", "releases", "reports", "results", "revenue", "rising", "slide", "spending",
+  "squawk", "stock", "stocks", "technical", "the", "today", "top", "trigger", "unveil", "unveiled", "unveils",
+  "qz com", "reuters", "up", "versus", "vs", "wall", "why", "with", "worried", "yahoo", "year", "your",
+]);
+const mergeTickerNoise = new Set([
+  "AI", "CEO", "CFO", "CPI", "ETF", "EV", "FOMC", "GDP", "IPO", "PCE", "Q1", "Q2", "Q3", "Q4", "SEC", "US", "USA",
+]);
 export const MAX_FEED_RESPONSE_BYTES = 2 * 1024 * 1024;
 const GOOGLE_NEWS_FEED_NAMESPACE = "https://news.google.com/rss";
 
@@ -358,43 +421,250 @@ function hoursApart(left: string, right: string): number {
   return Math.abs(new Date(left).getTime() - new Date(right).getTime()) / 3_600_000;
 }
 
-function shouldMerge(left: RawStory, right: RawStory): boolean {
-  const score = similarity(`${left.title} ${left.description.slice(0, 180)}`, `${right.title} ${right.description.slice(0, 180)}`);
-  const sharedTokens = [...tokens(left.title)].filter((token) => tokens(right.title).has(token)).length;
-  return hoursApart(left.publishedAt, right.publishedAt) <= 96 && (score >= 0.31 || (score >= 0.18 && sharedTokens >= 2));
+interface MergeSemanticInput {
+  title: string;
+  originalTitle?: string;
+  description?: string;
+  originalDescription?: string;
+  publishedAt: string;
+  url?: string;
+  canonicalUrl?: string;
+  feedNamespace?: string;
+  source?: string;
+  capture?: { feedUrl?: string };
 }
 
-function clusterStories(stories: RawStory[]): RawStory[][] {
-  const ordered = [...stories].sort((left, right) =>
-    (left.sourceDocumentId ?? left.id).localeCompare(right.sourceDocumentId ?? right.id));
-  const parent = ordered.map((_, index) => index);
-  const find = (index: number): number => {
-    let root = index;
-    while (parent[root] !== root) root = parent[root];
-    while (parent[index] !== index) {
-      const next = parent[index];
-      parent[index] = root;
-      index = next;
-    }
-    return root;
-  };
-  const union = (left: number, right: number) => {
-    const leftRoot = find(left);
-    const rightRoot = find(right);
-    if (leftRoot === rightRoot) return;
-    parent[Math.max(leftRoot, rightRoot)] = Math.min(leftRoot, rightRoot);
-  };
-  for (let left = 0; left < ordered.length; left += 1) {
-    for (let right = left + 1; right < ordered.length; right += 1) {
-      if (shouldMerge(ordered[left], ordered[right])) union(left, right);
+interface MergeFingerprint {
+  title: string;
+  entities: Set<string>;
+  eventTags: Set<string>;
+  quarters: Set<string>;
+  years: Set<string>;
+}
+
+function normalizedMergeWords(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isGoogleNewsUrl(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    return new URL(value).hostname.toLowerCase() === "news.google.com";
+  } catch {
+    return false;
+  }
+}
+
+function isGoogleNewsIndexed(input: MergeSemanticInput): boolean {
+  return input.feedNamespace === GOOGLE_NEWS_FEED_NAMESPACE
+    || isGoogleNewsUrl(input.capture?.feedUrl)
+    || isGoogleNewsUrl(input.canonicalUrl)
+    || isGoogleNewsUrl(input.url);
+}
+
+function removeIndexedPublisherSuffix(value: string, indexedByGoogleNews: boolean): string {
+  if (!indexedByGoogleNews) return value.trim();
+  // Google News titles append the publisher after the final dash. That label is
+  // provenance metadata, not event semantics. Letting it enter clustering made
+  // unrelated articles from the same outlet look like corroboration.
+  return value.replace(/\s+(?:-|–|—)\s+[^\r\n]+$/u, "").trim();
+}
+
+function removeKnownPublisherMetadata(value: string, publisher: string | undefined): string {
+  const normalizedPublisher = publisher?.trim();
+  if (!normalizedPublisher) return value;
+  const escaped = normalizedPublisher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return value
+    .replace(new RegExp(`\\s+(?:-|–|—)\\s+${escaped}\\s*$`, "iu"), "")
+    .replace(new RegExp(`^${escaped}\\s*[:|]\\s*`, "iu"), "")
+    .trim();
+}
+
+function containsNormalizedPhrase(text: string, phrase: string): boolean {
+  const normalizedPhrase = normalizedMergeWords(phrase);
+  if (!normalizedPhrase) return false;
+  return /[\u3400-\u9fff]/u.test(normalizedPhrase)
+    ? text.includes(normalizedPhrase)
+    : ` ${text} `.includes(` ${normalizedPhrase} `);
+}
+
+function extractMergeEntities(title: string): Set<string> {
+  const normalized = normalizedMergeWords(title);
+  const entities = new Set<string>();
+
+  for (const [canonical, aliases] of mergeEntityAliases) {
+    if (aliases.some((alias) => containsNormalizedPhrase(normalized, alias))) {
+      entities.add(`alias:${canonical}`);
     }
   }
-  const grouped = new Map<number, RawStory[]>();
-  ordered.forEach((story, index) => {
-    const root = find(index);
-    grouped.set(root, [...(grouped.get(root) ?? []), story]);
-  });
-  return [...grouped.values()].sort((left, right) => {
+
+  const words = title.match(/[\p{L}\p{N}][\p{L}\p{N}&.'’/-]*/gu) ?? [];
+  let properRun: string[] = [];
+  const flushProperRun = () => {
+    if (properRun.length >= 2) {
+      for (let length = 2; length <= Math.min(3, properRun.length); length += 1) {
+        for (let index = 0; index + length <= properRun.length; index += 1) {
+          entities.add(`name:${properRun.slice(index, index + length).join(" ")}`);
+        }
+      }
+    }
+    properRun = [];
+  };
+
+  for (const word of words) {
+    const plain = word.replace(/^[$#]/, "");
+    const lower = normalizedMergeWords(plain);
+    const capitalized = /^\p{Lu}/u.test(plain);
+    const allCaps = /^[A-Z][A-Z0-9.]{1,5}$/.test(plain);
+    const mixedCaseBrand = /(?:\p{Ll}.*\p{Lu}|\p{Lu}.*\p{Ll}.*\p{Lu})/u.test(plain);
+    const isNoise = !lower
+      || mergeEntityNoise.has(lower)
+      || /^(?:19|20)\d{2}$/.test(lower)
+      || /^q[1-4]$/.test(lower);
+
+    if (capitalized && !isNoise) {
+      properRun.push(lower);
+    } else {
+      flushProperRun();
+    }
+
+    if (allCaps && !isNoise && !mergeTickerNoise.has(plain)) entities.add(`ticker:${plain}`);
+    if (mixedCaseBrand && !isNoise) entities.add(`brand:${lower}`);
+  }
+  flushProperRun();
+  return entities;
+}
+
+function extractPeriods(text: string): Pick<MergeFingerprint, "quarters" | "years"> {
+  const normalized = normalizedMergeWords(text);
+  const quarters = new Set<string>();
+  const years = new Set<string>();
+  for (const match of normalized.matchAll(/\bq([1-4])\b/g)) quarters.add(`q${match[1]}`);
+  for (const match of normalized.matchAll(/\b((?:19|20)\d{2})\b/g)) years.add(match[1]);
+  const writtenQuarters: ReadonlyArray<readonly [string, RegExp]> = [
+    ["q1", /\b(?:first|1st) quarter\b|第一季度/i],
+    ["q2", /\b(?:second|2nd) quarter\b|第二季度/i],
+    ["q3", /\b(?:third|3rd) quarter\b|第三季度/i],
+    ["q4", /\b(?:fourth|4th) quarter\b|第四季度/i],
+  ];
+  for (const [quarter, pattern] of writtenQuarters) {
+    if (pattern.test(text)) quarters.add(quarter);
+  }
+  return { quarters, years };
+}
+
+function mergeFingerprint(input: MergeSemanticInput): MergeFingerprint {
+  const indexedByGoogleNews = isGoogleNewsIndexed(input);
+  const rawTitle = input.originalTitle || input.title;
+  const title = removeIndexedPublisherSuffix(rawTitle, indexedByGoogleNews);
+  // Descriptions may contain roundup boilerplate or links to neighbouring
+  // stories, so the event predicate itself must be stated in each title.
+  const eventTags = new Set(
+    mergeEventPatterns
+      .filter(([, pattern]) => pattern.test(title))
+      .map(([tag]) => tag),
+  );
+  return {
+    title,
+    // The source label is provenance, even when an outlet repeats its own name
+    // inside the title. Remove it before named-entity extraction so publisher
+    // equality can never become the entity half of the corroboration predicate.
+    entities: extractMergeEntities(removeKnownPublisherMetadata(title, input.source)),
+    eventTags,
+    ...extractPeriods(title),
+  };
+}
+
+function sharedValues(left: Set<string>, right: Set<string>): string[] {
+  return [...left].filter((value) => right.has(value));
+}
+
+function conflictingPeriods(left: MergeFingerprint, right: MergeFingerprint): boolean {
+  return (left.quarters.size > 0 && right.quarters.size > 0 && sharedValues(left.quarters, right.quarters).length === 0)
+    || (left.years.size > 0 && right.years.size > 0 && sharedValues(left.years, right.years).length === 0);
+}
+
+function conflictingEntityScopes(left: MergeFingerprint, right: MergeFingerprint): boolean {
+  const shared = new Set(sharedValues(left.entities, right.entities));
+  const leftAliases = [...left.entities].filter((entity) => entity.startsWith("alias:"));
+  const rightAliases = [...right.entities].filter((entity) => entity.startsWith("alias:"));
+  const leftExclusiveAliases = leftAliases.filter((entity) => !shared.has(entity));
+  const rightExclusiveAliases = rightAliases.filter((entity) => !shared.has(entity));
+  if (leftExclusiveAliases.length && rightExclusiveAliases.length) return true;
+
+  const leftExclusiveNames = [...left.entities]
+    .filter((entity) => !entity.startsWith("alias:") && !shared.has(entity));
+  const rightExclusiveNames = [...right.entities]
+    .filter((entity) => !entity.startsWith("alias:") && !shared.has(entity));
+  // Distinct counterparties/product names on both sides identify different
+  // transactions or launches even when the same public company and broad event
+  // verb appear in both titles.
+  return leftExclusiveNames.length > 0
+    && rightExclusiveNames.length > 0
+    && ![...shared].some((entity) => !entity.startsWith("alias:"));
+}
+
+function corroborationScore(left: MergeSemanticInput, right: MergeSemanticInput): number {
+  const timeDistance = hoursApart(left.publishedAt, right.publishedAt);
+  if (!Number.isFinite(timeDistance) || timeDistance > 96) return 0;
+  const leftFingerprint = mergeFingerprint(left);
+  const rightFingerprint = mergeFingerprint(right);
+  if (conflictingPeriods(leftFingerprint, rightFingerprint)
+    || conflictingEntityScopes(leftFingerprint, rightFingerprint)) return 0;
+
+  const sharedEntities = sharedValues(leftFingerprint.entities, rightFingerprint.entities);
+  const sharedEvents = sharedValues(leftFingerprint.eventTags, rightFingerprint.eventTags);
+  // Fail closed: corroboration is an event-level assertion. It requires both a
+  // shared named entity/market subject and a shared event predicate. Publisher,
+  // category, recency, or generic lexical similarity can never satisfy either
+  // side on their own.
+  if (!sharedEntities.length || !sharedEvents.length) return 0;
+
+  return sharedEntities.length * 10
+    + sharedEvents.length * 5
+    + similarity(leftFingerprint.title, rightFingerprint.title);
+}
+
+export function storiesCanCorroborate(left: RawStory, right: RawStory): boolean {
+  return corroborationScore(left, right) > 0;
+}
+
+export function clusterStories(stories: RawStory[]): RawStory[][] {
+  const ordered = [...stories].sort((left, right) =>
+    (left.sourceDocumentId ?? left.id).localeCompare(right.sourceDocumentId ?? right.id));
+  const grouped: RawStory[][] = [];
+
+  for (const story of ordered) {
+    const compatible = grouped
+      .map((group, groupIndex) => ({
+        group,
+        groupIndex,
+        // Complete-linkage prevents a multi-company roundup from bridging two
+        // otherwise unrelated event clusters through separate pairwise matches.
+        scores: group.map((member) => corroborationScore(member, story)),
+      }))
+      .filter(({ scores }) => scores.every((score) => score > 0))
+      .sort((left, right) => {
+        const leftMinimum = Math.min(...left.scores);
+        const rightMinimum = Math.min(...right.scores);
+        const leftAverage = left.scores.reduce((sum, score) => sum + score, 0) / left.scores.length;
+        const rightAverage = right.scores.reduce((sum, score) => sum + score, 0) / right.scores.length;
+        return rightMinimum - leftMinimum
+          || rightAverage - leftAverage
+          || left.groupIndex - right.groupIndex;
+      });
+    const target = compatible[0];
+    if (target) target.group.push(story);
+    else grouped.push([story]);
+  }
+
+  return grouped.sort((left, right) => {
     const leftTime = Math.max(...left.map((story) => Date.parse(story.publishedAt)));
     const rightTime = Math.max(...right.map((story) => Date.parse(story.publishedAt)));
     return rightTime - leftTime
@@ -738,6 +1008,22 @@ interface AiItem {
   sentiment: Sentiment;
 }
 
+export function assertAiPreservesDeterministicEvents(sourceIds: string[], availableIds: ReadonlySet<string>): string {
+  const uniqueIds = [...new Set(sourceIds)];
+  if (!uniqueIds.length) throw new Error("AI returned an event without a deterministic source ID");
+  if (uniqueIds.length !== sourceIds.length) throw new Error("AI returned duplicate deterministic source IDs");
+  const unknownIds = uniqueIds.filter((id) => !availableIds.has(id));
+  if (unknownIds.length) throw new Error(`AI returned unknown deterministic source IDs: ${unknownIds.join(", ")}`);
+  // The deterministic stage has already applied the entity+event predicate and
+  // complete-linkage invariant. Combining two of its outputs would discard that
+  // proof boundary and can recreate the exact transitive contamination the gate
+  // is designed to prevent. AI may enrich one event, never redefine identity.
+  if (uniqueIds.length !== 1) {
+    throw new Error(`AI attempted to merge ${uniqueIds.length} deterministic events`);
+  }
+  return uniqueIds[0];
+}
+
 async function enrichAndMergeWithAi(candidates: Headline[]): Promise<Headline[]> {
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const response = await client.responses.create({
@@ -825,9 +1111,12 @@ async function enrichAndMergeWithAi(candidates: Headline[]): Promise<Headline[]>
 
   const parsed = JSON.parse(response.output_text) as { items: AiItem[] };
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const availableIds = new Set(byId.keys());
   const merged = parsed.items.flatMap((item, itemIndex) => {
-    const bases = item.sourceIds.map((id) => byId.get(id)).filter((value): value is Headline => Boolean(value));
-    if (!bases.length) return [];
+    const deterministicId = assertAiPreservesDeterministicEvents(item.sourceIds, availableIds);
+    const deterministicBase = byId.get(deterministicId);
+    if (!deterministicBase) throw new Error(`Missing deterministic event ${deterministicId}`);
+    const bases = [deterministicBase];
     const sources = bases.flatMap((base) => base.sources).filter((source, index, all) =>
       all.findIndex((candidate) => (candidate.sourceDocumentId ?? candidate.canonicalUrl ?? candidate.url)
         === (source.sourceDocumentId ?? source.canonicalUrl ?? source.url)) === index);
@@ -904,6 +1193,19 @@ async function enrichAndMergeWithAi(candidates: Headline[]): Promise<Headline[]>
   });
   if (merged.length < 3) throw new Error("AI returned too few usable events");
   return merged;
+}
+
+export async function applyAiEnrichmentFailClosed(
+  deterministicCandidates: Headline[],
+  enrich: (candidates: Headline[]) => Promise<Headline[]>,
+): Promise<{ candidates: Headline[]; enabled: boolean; error?: unknown }> {
+  try {
+    return { candidates: await enrich(deterministicCandidates), enabled: true };
+  } catch (error) {
+    // Keep the complete deterministic set. A failed identity gate must never
+    // return a partial AI list or silently discard candidates.
+    return { candidates: deterministicCandidates, enabled: false, error };
+  }
 }
 
 function marketHeat(headlines: Headline[]): MarketHeat[] {
@@ -1029,10 +1331,16 @@ export async function buildLiveBrief(options: BuildBriefOptions | boolean = {}):
   let warning: string | undefined;
 
   if (useAi && process.env.OPENAI_API_KEY) {
-    try {
-      finalCandidates = await enrichAndMergeWithAi(deterministicCandidates.slice(0, 18));
-      aiEnabled = true;
-    } catch (error) {
+    const aiInput = deterministicCandidates.slice(0, 18);
+    const enrichment = await applyAiEnrichmentFailClosed(aiInput, enrichAndMergeWithAi);
+    aiEnabled = enrichment.enabled;
+    if (enrichment.enabled) {
+      finalCandidates = enrichment.candidates;
+    } else {
+      // Restore the whole deterministic set, including candidates outside the
+      // AI input window, after any malformed or unsafe sourceIds response.
+      finalCandidates = deterministicCandidates;
+      const error = enrichment.error;
       warning = `AI 分析暂时不可用，已改用内建事件合并与评分。${error instanceof Error ? ` (${error.message.slice(0, 90)})` : ""}`;
     }
   } else if (useAi) {

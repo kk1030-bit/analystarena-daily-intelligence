@@ -87,6 +87,8 @@ interface DatabaseRow {
   published_at: string | Date | null;
   has_pdf: boolean;
   current_snapshot_id: string | null;
+  supersedes_id: string | null;
+  superseded_by_id: string | null;
 }
 
 interface MemoryEntry extends BriefRecord {
@@ -853,7 +855,10 @@ function rowToRecord(row: DatabaseRow): BriefRecord {
   const brief: DailyBrief = {
     ...payload,
     id: row.id,
-    status: row.status,
+    // A superseded row retains the exact payload that was originally
+    // published. Lifecycle state lives on BriefRecord and must not rewrite the
+    // frozen publication body.
+    status: row.status === "superseded" ? payload.status : row.status,
     publishedAt: row.published_at ? iso(row.published_at) : undefined,
     storageMode: "postgres",
   };
@@ -866,6 +871,8 @@ function rowToRecord(row: DatabaseRow): BriefRecord {
     updatedAt: iso(row.updated_at),
     publishedAt: row.published_at ? iso(row.published_at) : undefined,
     hasPdf: row.has_pdf,
+    supersedesId: row.supersedes_id ?? undefined,
+    supersededById: row.superseded_by_id ?? undefined,
   };
 }
 
@@ -879,6 +886,8 @@ function cloneMemory(entry: MemoryEntry): BriefRecord {
     updatedAt: entry.updatedAt,
     publishedAt: entry.publishedAt,
     hasPdf: Boolean(entry.pdf),
+    supersedesId: entry.supersedesId,
+    supersededById: entry.supersededById,
   };
 }
 
@@ -1941,21 +1950,35 @@ function latestMemoryObservation(
     .find((event) => event.eventId === eventId);
 }
 
-function previousPublishedMemorySnapshot(date: string): BriefSnapshotRecord | undefined {
+function previousPublishedMemorySnapshot(
+  date: string,
+  createdBefore?: string,
+): BriefSnapshotRecord | undefined {
   const record = [...memory.values()]
-    .filter((entry) => entry.status === "published" && entry.date < date)
-    .sort((left, right) => right.date.localeCompare(left.date))[0];
+    .filter((entry) =>
+      (entry.status === "published" || entry.status === "superseded")
+      && entry.date <= date
+      && Boolean(entry.publishedAt)
+      && (!createdBefore || entry.publishedAt! < createdBefore))
+    .sort((left, right) => right.date.localeCompare(left.date)
+      || right.publishedAt!.localeCompare(left.publishedAt!))[0];
   const snapshotId = record?.brief.snapshot?.id;
   return snapshotId ? briefSnapshotMemory.get(snapshotId) : undefined;
 }
 
 function latestPublishedMemoryObservation(
   eventId: string,
-  beforeDate: string,
+  date: string,
+  createdBefore?: string,
 ): BriefSnapshotEventRecord | undefined {
   for (const record of [...memory.values()]
-    .filter((entry) => entry.status === "published" && entry.date < beforeDate)
-    .sort((left, right) => right.date.localeCompare(left.date))) {
+    .filter((entry) =>
+      (entry.status === "published" || entry.status === "superseded")
+      && entry.date <= date
+      && Boolean(entry.publishedAt)
+      && (!createdBefore || entry.publishedAt! < createdBefore))
+    .sort((left, right) => right.date.localeCompare(left.date)
+      || right.publishedAt!.localeCompare(left.publishedAt!))) {
     const snapshotId = record.brief.snapshot?.id;
     const event = snapshotId
       ? briefSnapshotMemory.get(snapshotId)?.events.find((candidate) => candidate.eventId === eventId)
@@ -2293,7 +2316,14 @@ async function persistBriefObservationMemory(
     const existingSnapshot = [...briefSnapshotMemory.values()].find((snapshot) => snapshot.runId === existingRun.id);
     if (!existingSnapshot) throw new Error(`Successful collection run ${existingRun.id} has no snapshot`);
     const record = dailyWrite?.kind === "save_draft"
-      ? [...memory.values()].find((entry) => entry.date === brief.date)
+      ? [...memory.values()]
+          .filter((entry) => entry.date === brief.date)
+          .sort((left, right) => {
+            const priority = (status: BriefStatus) =>
+              status === "draft" ? 0 : status === "published" ? 1 : 2;
+            return priority(left.status) - priority(right.status)
+              || (right.publishedAt ?? "").localeCompare(left.publishedAt ?? "");
+          })[0]
       : dailyWrite ? memory.get(dailyWrite.id) : undefined;
     return { snapshot: structuredClone(existingSnapshot), record: record ? cloneMemory(record) : undefined };
   }
@@ -2594,8 +2624,17 @@ async function persistBriefObservationMemory(
     }
     const sequenceNumber = (previous?.sequenceNumber ?? 0) + 1;
     const snapshotId = randomUUID();
-    const persistedAt = new Date().toISOString();
-    const previousPublished = previousPublishedMemorySnapshot(brief.date);
+    const latestVisibilityAt = [
+      ...[...briefSnapshotMemory.values()].map((snapshot) => Date.parse(snapshot.createdAt)),
+      ...[...memory.values()].map((entry) => Date.parse(entry.publishedAt ?? "")),
+    ]
+      .filter(Number.isFinite)
+      .reduce((latest, value) => Math.max(latest, value), Number.NEGATIVE_INFINITY);
+    const persistedAt = new Date(Math.max(
+      Date.now(),
+      Number.isFinite(latestVisibilityAt) ? latestVisibilityAt + 1 : Date.now(),
+    )).toISOString();
+    const previousPublished = previousPublishedMemorySnapshot(brief.date, persistedAt);
     const finalizedObservations: BriefSnapshotEventRecord[] = [];
     const projectedHeadlines = stableHeadlines.map((headline, index) => {
       const baseObservation = observations[index];
@@ -2653,7 +2692,7 @@ async function persistBriefObservationMemory(
       const investorBaseline = previousPublished?.events.find((event) => event.eventId === headline.id);
       const investorHistorical = investorBaseline
         ? undefined
-        : latestPublishedMemoryObservation(headline.id, brief.date);
+        : latestPublishedMemoryObservation(headline.id, brief.date, persistedAt);
       const investorPreviousVersion = investorBaseline
         ? allVersions.find((candidate) => candidate.id === investorBaseline.eventVersionId)
         : undefined;
@@ -2724,23 +2763,25 @@ async function persistBriefObservationMemory(
     };
     let record: BriefRecord | undefined;
     if (dailyWrite?.kind === "save_draft") {
-      const existing = [...memory.values()].find((entry) => entry.date === brief.date);
-      if (existing?.status === "published") record = cloneMemory(existing);
-      else {
-        const id = existing?.id ?? randomUUID();
-        const entry: MemoryEntry = {
-          id,
-          date: stableBrief.date,
-          status: "draft",
-          brief: { ...structuredClone(stableBrief), id, status: "draft", storageMode: "memory" },
-          currentSnapshotId: snapshotId,
-          createdAt: existing?.createdAt ?? persistedAt,
-          updatedAt: persistedAt,
-          hasPdf: false,
-        };
-        memory.set(id, entry);
-        record = cloneMemory(entry);
-      }
+      const sameDate = [...memory.values()].filter((entry) => entry.date === brief.date);
+      const existingDraft = sameDate.find((entry) => entry.status === "draft");
+      const currentPublished = sameDate
+        .filter((entry) => entry.status === "published")
+        .sort((left, right) => (right.publishedAt ?? "").localeCompare(left.publishedAt ?? ""))[0];
+      const id = existingDraft?.id ?? randomUUID();
+      const entry: MemoryEntry = {
+        id,
+        date: stableBrief.date,
+        status: "draft",
+        brief: { ...structuredClone(stableBrief), id, status: "draft", storageMode: "memory" },
+        currentSnapshotId: snapshotId,
+        createdAt: existingDraft?.createdAt ?? persistedAt,
+        updatedAt: persistedAt,
+        hasPdf: false,
+        supersedesId: existingDraft?.supersedesId ?? currentPublished?.id,
+      };
+      memory.set(id, entry);
+      record = cloneMemory(entry);
     } else if (dailyWrite?.kind === "update_draft") {
       const entry = memory.get(dailyWrite.id);
       if (!entry) throw new Error("Daily brief not found");
@@ -2834,7 +2875,15 @@ async function loadDailyRecordForWrite(
   const result = write.kind === "save_draft"
     ? await client.query<DatabaseRow>(`
         SELECT *, (pdf_data IS NOT NULL) AS has_pdf
-        FROM daily_briefs WHERE brief_date = $1 ${lock ? "FOR UPDATE" : ""}
+        FROM daily_briefs
+        WHERE brief_date = $1
+        ORDER BY CASE status
+          WHEN 'draft' THEN 0
+          WHEN 'published' THEN 1
+          ELSE 2
+        END, published_at DESC NULLS LAST
+        LIMIT 1
+        ${lock ? "FOR UPDATE" : ""}
       `, [date])
     : await client.query<DatabaseRow>(`
         SELECT *, (pdf_data IS NOT NULL) AS has_pdf
@@ -2911,26 +2960,26 @@ async function loadLatestSnapshotObservation(
 async function loadPreviousPublishedSnapshotId(
   client: PoolClient | Pool,
   date: string,
-  publishedAsOf?: string,
+  createdBefore?: string,
 ): Promise<string | undefined> {
   const result = await client.query<{ current_snapshot_id: string }>(`
     SELECT current_snapshot_id
     FROM daily_briefs
-    WHERE status = 'published'
-      AND brief_date < $1
+    WHERE status IN ('published', 'superseded')
+      AND brief_date <= $1
       AND current_snapshot_id IS NOT NULL
-      AND ($2::timestamptz IS NULL OR published_at <= $2::timestamptz)
-    ORDER BY brief_date DESC
+      AND ($2::timestamptz IS NULL OR published_at < $2::timestamptz)
+    ORDER BY brief_date DESC, published_at DESC, id DESC
     LIMIT 1
-  `, [date, publishedAsOf ?? null]);
+  `, [date, createdBefore ?? null]);
   return result.rows[0]?.current_snapshot_id;
 }
 
 async function loadLatestPublishedObservation(
   client: PoolClient | Pool,
   eventId: string,
-  beforeDate: string,
-  publishedAsOf?: string,
+  date: string,
+  createdBefore?: string,
 ): Promise<BriefSnapshotEventRecord | undefined> {
   const result = await client.query<BriefSnapshotEventRow>(`
     SELECT observation.snapshot_id, observation.event_id,
@@ -2942,13 +2991,13 @@ async function loadLatestPublishedObservation(
     FROM daily_briefs AS brief
     JOIN brief_snapshot_events AS observation
       ON observation.snapshot_id = brief.current_snapshot_id
-    WHERE brief.status = 'published'
-      AND brief.brief_date < $2
-      AND ($3::timestamptz IS NULL OR brief.published_at <= $3::timestamptz)
+    WHERE brief.status IN ('published', 'superseded')
+      AND brief.brief_date <= $2
+      AND ($3::timestamptz IS NULL OR brief.published_at < $3::timestamptz)
       AND observation.event_id = $1
-    ORDER BY brief.brief_date DESC
+    ORDER BY brief.brief_date DESC, brief.published_at DESC, brief.id DESC
     LIMIT 1
-  `, [eventId, beforeDate, publishedAsOf ?? null]);
+  `, [eventId, date, createdBefore ?? null]);
   return result.rows[0] ? rowToSnapshotEvent(result.rows[0]) : undefined;
 }
 
@@ -3977,8 +4026,15 @@ async function persistBriefObservationPostgres(
       }]);
     }
     const snapshotId = randomUUID();
-    const persistedAt = new Date().toISOString();
-    const previousPublishedSnapshotId = await loadPreviousPublishedSnapshotId(client, brief.date);
+    const snapshotClock = await client.query<{ created_before: string | Date }>(
+      "SELECT clock_timestamp() AS created_before",
+    );
+    const persistedAt = iso(snapshotClock.rows[0].created_before);
+    const previousPublishedSnapshotId = await loadPreviousPublishedSnapshotId(
+      client,
+      brief.date,
+      persistedAt,
+    );
     const finalizedObservations: BriefSnapshotEventRecord[] = [];
     const historicalByChange = new Map<string, BriefSnapshotEventRecord>();
     const projectedHeadlines: Headline[] = [];
@@ -4042,7 +4098,12 @@ async function persistBriefObservationPostgres(
         : undefined;
       const investorHistorical = investorBaseline
         ? undefined
-        : await loadLatestPublishedObservation(client, headline.id, brief.date);
+        : await loadLatestPublishedObservation(
+            client,
+            headline.id,
+            brief.date,
+            persistedAt,
+          );
       const investor = compareSnapshotEvent({
         baselineKind: "previous_published",
         baselineSnapshotId: previousPublishedSnapshotId,
@@ -4220,19 +4281,33 @@ async function persistBriefObservationPostgres(
     }
     let record: BriefRecord | undefined;
     if (dailyWrite?.kind === "save_draft") {
-      const dailyId = currentRecord?.id ?? randomUUID();
+      const dailyId = currentRecord?.status === "draft"
+        ? currentRecord.id
+        : randomUUID();
+      const supersedesId = currentRecord?.status === "draft"
+        ? currentRecord.supersedesId
+        : currentRecord?.status === "published"
+          ? currentRecord.id
+          : undefined;
       const saved = await client.query<DatabaseRow>(`
-        INSERT INTO daily_briefs (id, brief_date, status, payload, current_snapshot_id)
-        VALUES ($1, $2, 'draft', $3::jsonb, $4)
-        ON CONFLICT (brief_date) DO UPDATE
+        INSERT INTO daily_briefs (
+          id, brief_date, status, payload, current_snapshot_id, supersedes_id
+        )
+        VALUES ($1, $2, 'draft', $3::jsonb, $4, $5)
+        ON CONFLICT (brief_date) WHERE status = 'draft' DO UPDATE
           SET payload = EXCLUDED.payload, status = 'draft', pdf_data = NULL,
               published_at = NULL, current_snapshot_id = EXCLUDED.current_snapshot_id,
               updated_at = NOW()
-          WHERE daily_briefs.status <> 'published'
         RETURNING *, (pdf_data IS NOT NULL) AS has_pdf
-      `, [dailyId, stableBrief.date, JSON.stringify(stableBrief), snapshotId]);
+      `, [
+        dailyId,
+        stableBrief.date,
+        JSON.stringify(stableBrief),
+        snapshotId,
+        supersedesId ?? null,
+      ]);
       if (saved.rows[0]) record = rowToRecord(saved.rows[0]);
-      else record = await loadDailyRecordForWrite(client, dailyWrite, brief.date) ?? undefined;
+      else throw new StaleBriefRevisionError("The same-date correction draft changed while saving");
     } else if (dailyWrite?.kind === "update_draft") {
       const updated = await client.query<DatabaseRow>(`
         UPDATE daily_briefs
@@ -4431,11 +4506,28 @@ export async function getBrief(id: string): Promise<BriefRecord | null> {
 
 export async function getBriefByDate(date: string): Promise<BriefRecord | null> {
   if (storageMode() === "memory") {
-    const entry = [...memory.values()].find((candidate) => candidate.date === date);
+    const entry = [...memory.values()]
+      .filter((candidate) => candidate.date === date)
+      .sort((left, right) => {
+        const priority = (status: BriefStatus) =>
+          status === "draft" ? 0 : status === "published" ? 1 : 2;
+        return priority(left.status) - priority(right.status)
+          || (right.publishedAt ?? "").localeCompare(left.publishedAt ?? "");
+      })[0];
     return entry ? cloneMemory(entry) : null;
   }
   await ensureSchema();
-  const result = await pool().query<DatabaseRow>(`SELECT *, (pdf_data IS NOT NULL) AS has_pdf FROM daily_briefs WHERE brief_date = $1`, [date]);
+  const result = await pool().query<DatabaseRow>(`
+    SELECT *, (pdf_data IS NOT NULL) AS has_pdf
+    FROM daily_briefs
+    WHERE brief_date = $1
+    ORDER BY CASE status
+      WHEN 'draft' THEN 0
+      WHEN 'published' THEN 1
+      ELSE 2
+    END, published_at DESC NULLS LAST
+    LIMIT 1
+  `, [date]);
   return result.rows[0] ? rowToRecord(result.rows[0]) : null;
 }
 
@@ -5602,6 +5694,25 @@ function publishBriefMemory(
     || entry.brief.snapshot?.id !== snapshotId) {
     throw new StaleBriefRevisionError("The reviewed snapshot changed during publication");
   }
+  const predecessor = entry.supersedesId
+    ? memory.get(entry.supersedesId)
+    : undefined;
+  const currentSameDate = [...memory.values()].find((candidate) =>
+    candidate.date === entry.date && candidate.status === "published");
+  if (entry.supersedesId) {
+    if (!predecessor
+      || predecessor !== currentSameDate
+      || predecessor.status !== "published"
+      || predecessor.supersededById) {
+      throw new StaleBriefRevisionError(
+        "The same-date publication changed; rebuild the correction before publishing",
+      );
+    }
+  } else if (currentSameDate) {
+    throw new StaleBriefRevisionError(
+      "A same-date publication now exists; rebuild this draft as a correction",
+    );
+  }
   const published: MemoryEntry = {
     ...entry,
     status: "published",
@@ -5623,6 +5734,17 @@ function publishBriefMemory(
     requestId: actor.requestId,
     publishedAt,
   };
+  if (predecessor) {
+    memory.set(predecessor.id, {
+      ...predecessor,
+      status: "superseded",
+      // Keep predecessor.brief byte-for-byte equivalent to the frozen
+      // publication payload. The lifecycle is record metadata only.
+      brief: structuredClone(predecessor.brief),
+      supersededById: id,
+      updatedAt: publishedAt,
+    });
+  }
   memory.set(id, published);
   publicationAuditMemory.set(id, publicationAudit);
   return cloneMemory(published);
@@ -5680,6 +5802,26 @@ async function publishBriefPostgres(
         "The reviewed draft does not match its immutable snapshot authority",
       );
     }
+    const currentPublication = await client.query<DatabaseRow>(`
+      SELECT *, (pdf_data IS NOT NULL) AS has_pdf
+      FROM daily_briefs
+      WHERE brief_date = $1 AND status = 'published'
+      FOR UPDATE
+    `, [dateOnly(row.brief_date)]);
+    const currentPublishedRow = currentPublication.rows[0];
+    if (row.supersedes_id) {
+      if (!currentPublishedRow
+        || currentPublishedRow.id !== row.supersedes_id
+        || currentPublishedRow.superseded_by_id) {
+        throw new StaleBriefRevisionError(
+          "The same-date publication changed; rebuild the correction before publishing",
+        );
+      }
+    } else if (currentPublishedRow) {
+      throw new StaleBriefRevisionError(
+        "A same-date publication now exists; rebuild this draft as a correction",
+      );
+    }
     await assertCurrentPostgresPublishedBaseline(client, snapshotId);
     const publicationClock = await client.query<{ published_at: string | Date }>(`
       SELECT GREATEST(
@@ -5702,6 +5844,22 @@ async function publishBriefPostgres(
     `, [id]);
     const publishedAt = iso(publicationClock.rows[0].published_at);
     const publishedPayload = publishedBriefFromDraft(draft, id, publishedAt, "postgres");
+    if (currentPublishedRow) {
+      const superseded = await client.query(`
+        UPDATE daily_briefs
+        SET status = 'superseded',
+            superseded_by_id = $2,
+            updated_at = $3
+        WHERE id = $1
+          AND status = 'published'
+          AND superseded_by_id IS NULL
+      `, [currentPublishedRow.id, id, publishedAt]);
+      if (superseded.rowCount !== 1) {
+        throw new StaleBriefRevisionError(
+          "The same-date publication changed during correction publication",
+        );
+      }
+    }
     const updated = await client.query<DatabaseRow>(`
       UPDATE daily_briefs
       SET status = 'published',
@@ -5757,13 +5915,25 @@ export async function publishBrief(
   return result;
 }
 
-export async function getPublishedPdf(id: string): Promise<{ pdf: Buffer; date: string } | null> {
+export async function getPublishedPdf(
+  id: string,
+  options: { includeSuperseded?: boolean } = {},
+): Promise<{ pdf: Buffer; date: string } | null> {
   if (storageMode() === "memory") {
     const entry = memory.get(id);
-    return entry?.status === "published" && entry.pdf ? { pdf: entry.pdf, date: entry.date } : null;
+    const visible = entry?.status === "published"
+      || (options.includeSuperseded === true && entry?.status === "superseded");
+    return visible && entry?.pdf ? { pdf: entry.pdf, date: entry.date } : null;
   }
   await ensureSchema();
-  const result = await pool().query<{ pdf_data: Buffer; brief_date: string | Date }>(`SELECT pdf_data, brief_date FROM daily_briefs WHERE id = $1 AND status = 'published' AND pdf_data IS NOT NULL`, [id]);
+  const statuses = options.includeSuperseded
+    ? ["published", "superseded"]
+    : ["published"];
+  const result = await pool().query<{ pdf_data: Buffer; brief_date: string | Date }>(`
+    SELECT pdf_data, brief_date
+    FROM daily_briefs
+    WHERE id = $1 AND status = ANY($2::text[]) AND pdf_data IS NOT NULL
+  `, [id, statuses]);
   return result.rows[0] ? { pdf: result.rows[0].pdf_data, date: dateOnly(result.rows[0].brief_date) } : null;
 }
 

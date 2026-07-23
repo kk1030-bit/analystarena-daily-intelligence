@@ -34,10 +34,16 @@ await raw.query(`
     published_at TIMESTAMPTZ
   )
 `);
+const legacyPublicationClock = await raw.query<{ published_at: string | Date }>(
+  "SELECT clock_timestamp() AS published_at",
+);
+const legacyPublishedAt = new Date(
+  legacyPublicationClock.rows[0].published_at,
+).toISOString();
 await raw.query(`
   INSERT INTO daily_briefs (id, brief_date, status, payload, pdf_data, published_at)
   VALUES ($1, $2, 'published', $3::jsonb, $4, $5)
-`, [legacyId, legacyDate, JSON.stringify(legacyBrief), Buffer.from("legacy-pdf"), `${legacyDate}T02:00:00.000Z`]);
+`, [legacyId, legacyDate, JSON.stringify(legacyBrief), Buffer.from("legacy-pdf"), legacyPublishedAt]);
 
 // Advance the fixture only through 7/22, then insert rows in the exact old
 // event_aliases shape. The regular migration runner below must perform the

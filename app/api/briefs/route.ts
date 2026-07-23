@@ -12,7 +12,13 @@ export async function GET(request: Request) {
     const requested = url.searchParams.get("status") as BriefStatus | null;
     const admin = isAdminRequest(request);
     const status: BriefStatus | undefined = admin
-      ? (requested === "draft" || requested === "published" ? requested : undefined)
+      ? (
+          requested === "draft"
+          || requested === "published"
+          || requested === "superseded"
+            ? requested
+            : undefined
+        )
       : "published";
     const records = await listBriefs(status, 60);
     return NextResponse.json({ records, storageMode: storageMode(), admin });

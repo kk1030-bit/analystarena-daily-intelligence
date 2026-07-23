@@ -6,11 +6,20 @@ import type { Headline, HeadlineClaim } from "../lib/types";
 process.env.ADMIN_TOKEN = "publish-review-test-token";
 process.env.AUDIT_HMAC_KEY = "publish-review-independent-audit-key-for-tests";
 
-const [{ saveDraft, updateDraft, getPublishedPdf }, listRoute, detailRoute, publishRoute] = await Promise.all([
+const [{
+  getBrief,
+  getBriefByDate,
+  getLatestPublished,
+  getPublishedPdf,
+  listBriefs,
+  saveDraft,
+  updateDraft,
+}, listRoute, detailRoute, publishRoute, pdfRoute] = await Promise.all([
   import("../lib/db"),
   import("../app/api/briefs/route"),
   import("../app/api/briefs/[id]/route"),
   import("../app/api/briefs/[id]/publish/route"),
+  import("../app/api/briefs/[id]/pdf/route"),
 ]);
 
 const date = "2099-12-30";
@@ -252,6 +261,146 @@ assert.deepEqual(
   publicDetail.brief.headlines,
   publishedBody.brief.headlines,
   "public detail GET must expose the exact frozen published snapshot without read-time mutation",
+);
+
+const originalSnapshotId = publishedBody.brief.snapshot?.id as string;
+const originalPayloadHash = publishedBody.brief.snapshot?.payloadHash as string;
+const originalPdf = (await getPublishedPdf(saved.id))?.pdf;
+assert.ok(originalSnapshotId && originalPayloadHash && originalPdf?.length);
+
+const correctionGeneratedAt = new Date(
+  Date.parse(publishedBody.brief.generatedAt) + 60_000,
+).toISOString();
+const correctionDraft = await saveDraft({
+  ...structuredClone(publishedBody.brief),
+  id: undefined,
+  status: "draft",
+  publishedAt: undefined,
+  generatedAt: correctionGeneratedAt,
+  stats: {
+    ...publishedBody.brief.stats,
+    candidates: publishedBody.brief.stats.candidates + 1,
+  },
+}, {
+  stream: "review",
+  batchKey: `published-correction:${date}`,
+  observedAt: correctionGeneratedAt,
+});
+assert.notEqual(correctionDraft.id, saved.id, "a correction must be a new immutable report row");
+assert.equal(correctionDraft.status, "draft");
+assert.equal(correctionDraft.supersedesId, saved.id);
+assert.ok(
+  correctionDraft.brief.headlines.every((headline) =>
+    headline.whatChanged?.investor.baselineSnapshotId === originalSnapshotId),
+  "a same-day correction must compare with the exact publication it will replace",
+);
+assert.equal(
+  (await getBriefByDate(date))?.id,
+  correctionDraft.id,
+  "administrative same-date lookup must return the editable correction draft",
+);
+assert.equal(
+  (await getLatestPublished())?.id,
+  saved.id,
+  "a draft correction must not replace the public publication",
+);
+
+const anonymousBeforeCorrection = await listRoute.GET(
+  new Request("http://localhost/api/briefs"),
+);
+const anonymousBeforeCorrectionBody = await anonymousBeforeCorrection.json();
+assert.deepEqual(
+  anonymousBeforeCorrectionBody.records
+    .filter((record: { date: string }) => record.date === date)
+    .map((record: { id: string }) => record.id),
+  [saved.id],
+  "anonymous lists must expose only the current publication while a correction is a draft",
+);
+
+const correctionPublishResponse = await publishRoute.POST(
+  new Request(`http://localhost/api/briefs/${correctionDraft.id}/publish`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({
+      expectedSnapshotId: correctionDraft.brief.snapshot?.id,
+      expectedPayloadHash: correctionDraft.brief.snapshot?.payloadHash,
+    }),
+  }),
+  { params: Promise.resolve({ id: correctionDraft.id }) },
+);
+assert.equal(correctionPublishResponse.status, 200);
+const corrected = await correctionPublishResponse.json();
+assert.equal(corrected.status, "published");
+assert.equal(corrected.supersedesId, saved.id);
+
+const superseded = await getBrief(saved.id);
+assert.equal(superseded?.status, "superseded");
+assert.equal(superseded?.supersededById, correctionDraft.id);
+assert.equal(superseded?.brief.snapshot?.id, originalSnapshotId);
+assert.equal(superseded?.brief.snapshot?.payloadHash, originalPayloadHash);
+assert.deepEqual(
+  (await getPublishedPdf(saved.id, { includeSuperseded: true }))?.pdf,
+  originalPdf,
+  "supersession must not rewrite the predecessor PDF bytes",
+);
+assert.equal(await getPublishedPdf(saved.id), null, "superseded PDFs are not public");
+assert.equal((await getLatestPublished())?.id, correctionDraft.id);
+assert.deepEqual(
+  (await listBriefs("published", 20))
+    .filter((record) => record.date === date)
+    .map((record) => record.id),
+  [correctionDraft.id],
+  "only one same-date publication may remain current",
+);
+
+const anonymousOldDetail = await detailRoute.GET(
+  new Request(`http://localhost/api/briefs/${saved.id}`),
+  { params: Promise.resolve({ id: saved.id }) },
+);
+assert.equal(anonymousOldDetail.status, 401);
+const adminOldDetail = await detailRoute.GET(
+  new Request(`http://localhost/api/briefs/${saved.id}`, { headers }),
+  { params: Promise.resolve({ id: saved.id }) },
+);
+assert.equal(adminOldDetail.status, 200);
+assert.equal((await adminOldDetail.json()).status, "superseded");
+const anonymousOldPdf = await pdfRoute.GET(
+  new Request(`http://localhost/api/briefs/${saved.id}/pdf`),
+  { params: Promise.resolve({ id: saved.id }) },
+);
+assert.equal(anonymousOldPdf.status, 404);
+const adminOldPdf = await pdfRoute.GET(
+  new Request(`http://localhost/api/briefs/${saved.id}/pdf`, { headers }),
+  { params: Promise.resolve({ id: saved.id }) },
+);
+assert.equal(adminOldPdf.status, 200);
+assert.equal(adminOldPdf.headers.get("content-type"), "application/pdf");
+
+await assert.rejects(
+  () => updateDraft(saved.id, superseded!.brief),
+  /immutable/i,
+  "a superseded report must remain frozen",
+);
+
+const nextDate = "2099-12-31";
+const nextGeneratedAt = new Date(Date.parse(correctionGeneratedAt) + 60_000).toISOString();
+const nextDay = await saveDraft({
+  ...structuredClone(corrected.brief),
+  id: undefined,
+  date: nextDate,
+  status: "draft",
+  publishedAt: undefined,
+  generatedAt: nextGeneratedAt,
+}, {
+  stream: "review",
+  batchKey: `post-correction-next-day:${nextDate}`,
+  observedAt: nextGeneratedAt,
+});
+assert.ok(
+  nextDay.brief.headlines.every((headline) =>
+    headline.whatChanged?.investor.baselineSnapshotId
+      === correctionDraft.brief.snapshot?.id),
+  "the next day must select the final current publication, not an older superseded revision",
 );
 
 console.log("publish review gate tests passed");

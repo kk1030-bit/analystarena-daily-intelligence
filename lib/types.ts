@@ -644,7 +644,7 @@ export interface RedditSearchResult {
   nextCursor?: string;
 }
 
-export type BriefStatus = "draft" | "published";
+export type BriefStatus = "draft" | "published" | "superseded";
 
 export interface BriefRecord {
   id: string;
@@ -655,6 +655,13 @@ export interface BriefRecord {
   updatedAt: string;
   publishedAt?: string;
   hasPdf: boolean;
+  /**
+   * A correction keeps both immutable publication authorities. The newer
+   * record points backward with `supersedesId`; the replaced record points
+   * forward with `supersededById`.
+   */
+  supersedesId?: string;
+  supersededById?: string;
 }
 
 export interface CollectorStatus {
