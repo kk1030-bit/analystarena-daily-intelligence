@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { demoBrief } from "../lib/demo-data";
-import { createStableEventIdentity, mergeRetainedEvidence } from "../lib/event-versioning";
+import {
+  aliasesForHeadline,
+  createStableEventIdentity,
+  headlineOwnsAlias,
+  mergeRetainedEvidence,
+  semanticMatchConfidence,
+} from "../lib/event-versioning";
 import { ensureRawStoryIdentity } from "../lib/source-identity";
 import {
   createEvidenceCitation,
@@ -80,6 +86,13 @@ const secondWire = source(
   "News",
   "Second Wire",
 );
+const unrelatedPrimary = source(
+  "https://identity.example.com/portfolio-allocation",
+  "Portfolio allocation policy changes for retirement accounts",
+  "A retirement portfolio changed its long-term allocation policy.",
+  "News",
+  "Identity Wire",
+);
 
 function headline(overrides: Partial<Headline> = {}): Headline {
   return {
@@ -110,6 +123,55 @@ function headline(overrides: Partial<Headline> = {}): Headline {
     ...overrides,
   };
 }
+
+const primaryOnlyIdentity = headline({
+  ticker: "PORT",
+  title: "退休投资组合调整长期配置",
+  summary: "这是一项独立的投资组合配置变化。",
+  keyPoints: ["配置政策调整"],
+  sources: [
+    { ...unrelatedPrimary, role: "primary" },
+    { ...secondWire, role: "corroborating" },
+  ],
+});
+const unrelatedClusterWithSharedCorroboration = headline({
+  ticker: "NVDA",
+  title: "英伟达供应商报告 Blackwell 订单增加",
+  summary: "供应商报告新的订单变化。",
+  keyPoints: ["供应商订单增加"],
+  sources: [
+    { ...secondWire, role: "primary" },
+    { ...unrelatedPrimary, role: "corroborating" },
+  ],
+});
+const primaryAliases = aliasesForHeadline(primaryOnlyIdentity);
+assert.equal(
+  primaryAliases.some((alias) =>
+    alias.type === "document" && alias.key === unrelatedPrimary.sourceDocumentId),
+  true,
+);
+assert.equal(
+  primaryAliases.some((alias) =>
+    alias.type === "document" && alias.key === secondWire.sourceDocumentId),
+  false,
+  "a corroborating roundup source must not become a permanent event alias",
+);
+assert.equal(
+  headlineOwnsAlias(primaryOnlyIdentity, {
+    type: "document",
+    key: secondWire.sourceDocumentId!,
+  }),
+  false,
+);
+assert.equal(
+  semanticMatchConfidence(primaryOnlyIdentity, unrelatedClusterWithSharedCorroboration),
+  0,
+  "shared corroborating documents must not make unrelated primary events a semantic match",
+);
+assert.notEqual(
+  createStableEventIdentity(primaryOnlyIdentity).id,
+  createStableEventIdentity(unrelatedClusterWithSharedCorroboration).id,
+);
 
 // A legacy URL-derived source id and the current native/feed-derived id can
 // identify the same canonical document. Alias intersection must replace the
@@ -640,7 +702,10 @@ assert.equal(snapshots[1].brief.headlines[0].title, firstBrief.headlines[0].titl
 // New evidence and a changed market judgment create exactly one chained v2.
 const evidenceBrief = brief(`${date}T01:30:00.000Z`, headline({
   id: "official-source-now-primary",
-  sources: [sec, wire],
+  sources: [
+    { ...sec, role: "primary" },
+    { ...wire, role: "corroborating" },
+  ],
   crossSourceCount: 2,
   marketDirection: "bearish",
   directionRationale: "New concentration data introduces downside risk.",
@@ -661,7 +726,7 @@ assert.equal(versions[1].previousVersionId, versions[0].id);
 // A temporary collector miss does not erase previously confirmed evidence.
 const partialBrief = brief(`${date}T01:40:00.000Z`, headline({
   id: "only-sec-returned-this-time",
-  sources: [sec],
+  sources: [{ ...sec, role: "primary" }],
   crossSourceCount: 1,
   marketDirection: "bearish",
 }));
@@ -695,7 +760,11 @@ assert.equal(versions[2].previousVersionId, versions[1].id);
 // when the final content hash was seen earlier in the chain.
 const neutralBrief = brief(`${date}T02:00:00.000Z`, headline({
   id: eventId,
-  sources: [wire, sec, secondWire],
+  sources: [
+    { ...wire, role: "corroborating" },
+    { ...sec, role: "corroborating" },
+    { ...secondWire, role: "primary" },
+  ],
   crossSourceCount: 2,
   marketDirection: "neutral",
   directionConfidence: 60,
@@ -703,7 +772,11 @@ const neutralBrief = brief(`${date}T02:00:00.000Z`, headline({
 await saveDraft(neutralBrief, { stream: "shared", batchKey: "event-version-test-6" });
 const bearishAgainBrief = brief(`${date}T02:10:00.000Z`, headline({
   id: eventId,
-  sources: [wire, sec, secondWire],
+  sources: [
+    { ...wire, role: "corroborating" },
+    { ...sec, role: "corroborating" },
+    { ...secondWire, role: "primary" },
+  ],
   crossSourceCount: 2,
   marketDirection: "bearish",
 }));
@@ -731,6 +804,276 @@ const unrelated = brief(`${date}T02:20:00.000Z`, headline({
 const unrelatedRecord = await saveDraft(unrelated, { stream: "shared", batchKey: "event-version-test-8" });
 assert.notEqual(unrelatedRecord.brief.headlines[0].id, eventId);
 
+// A source that has ever been a primary identity remains permanently bound to
+// its original event, even if a later version demotes it to corroborating.
+const staleSharedSource = source(
+  "https://identity.example.com/shared-roundup-document",
+  "Shared roundup document about one market theme",
+  "The roundup mentions several unrelated market themes.",
+  "News",
+  "Identity Wire",
+);
+const replacementIdentitySource = source(
+  "https://identity.example.com/replacement-primary-document",
+  "Replacement primary document about a separate policy decision",
+  "The primary event is now a separate policy decision.",
+  "News",
+  "Identity Wire",
+);
+const staleAliasSeed = brief(`${date}T02:21:00.000Z`, headline({
+  id: "stale-alias-seed",
+  ticker: "ALIASA",
+  category: "Other",
+  title: "共享综述的原始事件",
+  summary: "原始事件使用共享综述作为主来源。",
+  keyPoints: ["共享综述为主来源"],
+  sources: [{ ...staleSharedSource, role: "primary" }],
+  claims: [],
+}));
+const staleAliasSeedRecord = await saveDraft(staleAliasSeed, {
+  stream: "shared",
+  batchKey: "event-version-stale-alias-seed",
+});
+const staleAliasEventId = staleAliasSeedRecord.brief.headlines[0].id;
+await saveDraft(brief(`${date}T02:22:00.000Z`, headline({
+  id: staleAliasEventId,
+  ticker: "ALIASA",
+  category: "Other",
+  title: "独立政策决定成为新的主事件",
+  summary: "该事件现在由独立政策文件定义。",
+  keyPoints: ["独立政策文件为主来源"],
+  sources: [
+    { ...replacementIdentitySource, role: "primary" },
+    { ...staleSharedSource, role: "corroborating" },
+  ],
+  claims: [],
+})), {
+  stream: "shared",
+  batchKey: "event-version-stale-alias-owner-update",
+});
+const demotedPrimaryVersion = (await listEventVersions(staleAliasEventId)).at(-1);
+assert.deepEqual(
+  demotedPrimaryVersion?.headline.sources
+    .filter((item) => item.role === "primary")
+    .map((item) => item.sourceDocumentId),
+  [replacementIdentitySource.sourceDocumentId],
+  "current observation must have exactly its declared primary source",
+);
+assert.equal(
+  demotedPrimaryVersion?.headline.sources
+    .find((item) => item.sourceDocumentId === staleSharedSource.sourceDocumentId)
+    ?.role,
+  "corroborating",
+  "retained historical evidence must not retain a stale primary role",
+);
+const staleAliasReuseRecord = await saveDraft(brief(`${date}T02:23:00.000Z`, headline({
+  id: "stale-secondary-alias-new-event",
+  ticker: "ALIASB",
+  category: "Other",
+  title: "共享综述现在作为另一个事件的主来源",
+  summary: "这是由共享文档定义的另一项独立事件。",
+  keyPoints: ["共享文档成为新事件主来源"],
+  sources: [{ ...staleSharedSource, role: "primary" }],
+  claims: [],
+})), {
+  stream: "shared",
+  batchKey: "event-version-stale-alias-reuse",
+});
+assert.equal(
+  staleAliasReuseRecord.brief.headlines[0].id,
+  staleAliasEventId,
+  "a former primary alias must remain protected after it becomes corroborating",
+);
+assert.equal(staleAliasReuseRecord.brief.snapshot?.events[0].matchMethod, "source_alias");
+
+// A source that belongs to another event but appears only as corroboration in
+// an unrelated incoming headline is not sufficient to merge the two events.
+const secondaryOnlyRecord = await saveDraft(brief(`${date}T02:24:00.000Z`, {
+  ...structuredClone(primaryOnlyIdentity),
+  id: "secondary-alias-must-not-decide",
+}), {
+  stream: "shared",
+  batchKey: "event-version-secondary-alias-isolation",
+});
+assert.notEqual(
+  secondaryOnlyRecord.brief.headlines[0].id,
+  eventId,
+  "an unrelated historical-primary source used only as corroboration must not decide identity",
+);
+assert.equal(secondaryOnlyRecord.brief.snapshot?.events[0].matchMethod, "new");
+
+// Candidate state must be refreshed inside a multi-headline transaction. The
+// second headline resembles the first event's pre-batch version but not the
+// new version written by headline one; a stale candidate would resolve it back
+// to the already-used event and abort the batch.
+const batchOldPrimary = source(
+  "https://identity.example.com/batch-old-blackwell",
+  "NVIDIA Blackwell capacity update expands supplier orders",
+  "Blackwell supplier orders expanded after a capacity update.",
+  "News",
+  "Identity Wire",
+);
+const batchPolicyPrimary = source(
+  "https://identity.example.com/batch-new-policy",
+  "Federal retirement filing policy changes next quarter",
+  "A federal retirement filing policy changes next quarter.",
+  "News",
+  "Identity Wire",
+);
+const batchNvidiaPrimary = source(
+  "https://identity.example.com/batch-nvidia-followup",
+  "NVIDIA Blackwell capacity update expands supplier orders again",
+  "Blackwell supplier orders expanded again after a capacity update.",
+  "News",
+  "Identity Wire",
+);
+const batchSeedRecord = await saveDraft(brief(`${date}T02:25:00.000Z`, headline({
+  id: "same-batch-candidate-seed",
+  ticker: "NVDA",
+  category: "Semiconductor",
+  title: "英伟达 Blackwell 产能更新推动供应商订单",
+  summary: "供应商订单因 Blackwell 产能更新而增加。",
+  keyPoints: ["Blackwell 供应商订单增加"],
+  sources: [{ ...batchOldPrimary, role: "primary" }],
+  claims: [],
+})), {
+  stream: "shared",
+  batchKey: "event-version-same-batch-seed",
+});
+const batchSeedEventId = batchSeedRecord.brief.headlines[0].id;
+const batchUpdatedHeadline = headline({
+  id: batchSeedEventId,
+  rank: 1,
+  ticker: "POLICY",
+  category: "Macro",
+  title: "联邦退休申报政策将在下季度调整",
+  summary: "这是一项与半导体无关的申报政策调整。",
+  keyPoints: ["退休申报政策调整"],
+  sources: [
+    { ...batchPolicyPrimary, role: "primary" },
+    { ...batchOldPrimary, role: "corroborating" },
+  ],
+  claims: [],
+});
+const batchSecondHeadline = headline({
+  id: "same-batch-secondary-transition",
+  rank: 2,
+  ticker: "NVDA",
+  category: "Semiconductor",
+  title: "英伟达 Blackwell 供应商订单再次增加",
+  summary: "供应商订单在产能更新后再次增加。",
+  keyPoints: ["Blackwell 供应商订单再次增加"],
+  sources: [
+    { ...batchNvidiaPrimary, role: "primary" },
+    { ...batchPolicyPrimary, role: "corroborating" },
+  ],
+  claims: [],
+});
+const sameBatchRecord = await persistBriefObservation({
+  ...brief(`${date}T02:26:00.000Z`, batchUpdatedHeadline),
+  headlines: [batchUpdatedHeadline, batchSecondHeadline],
+  stats: { ...demoBrief.stats, topStories: 2, consolidatedEvents: 2 },
+}, {
+  stream: "manual",
+  batchKey: "event-version-same-batch-candidate-refresh",
+});
+assert.notEqual(sameBatchRecord.brief.headlines[1].id, batchSeedEventId);
+assert.equal(sameBatchRecord.events[1].matchMethod, "new");
+
+// Pre-7/23 processes may still hold collector-local legacy aliases in memory.
+// Reusing or truncating such an id must not override durable source identity.
+const aliasMemoryForRegression = (
+  globalThis as typeof globalThis & {
+    __analystArenaEventAliasMemory?: Map<string, {
+      type: "document" | "url" | "legacy";
+      key: string;
+      eventId: string;
+      canonicalUrl?: string;
+      firstSeenAt: string;
+      lastSeenAt: string;
+      primaryEver: boolean;
+      resolutionEligible?: boolean;
+    }>;
+  }
+).__analystArenaEventAliasMemory;
+assert.ok(aliasMemoryForRegression);
+aliasMemoryForRegression.set("legacy:reused-collector-local-id", {
+  type: "legacy",
+  key: "reused-collector-local-id",
+  eventId,
+  firstSeenAt: `${date}T01:00:00.000Z`,
+  lastSeenAt: `${date}T02:26:00.000Z`,
+  primaryEver: true,
+  resolutionEligible: false,
+});
+const reusedLegacySource = source(
+  "https://identity.example.com/reused-legacy-municipal-bond",
+  "Independent municipal bond covenant update",
+  "A municipal bond covenant changed independently of the Blackwell event.",
+  "News",
+  "Identity Wire",
+);
+const reusedLegacyRecord = await saveDraft(brief(`${date}T02:27:00.000Z`, headline({
+  id: "reused-collector-local-id",
+  ticker: "MUNI",
+  category: "Macro",
+  title: "市政债券契约出现独立调整",
+  summary: "重复的采集器本地编号不能把无关事件合并。",
+  keyPoints: ["本地编号不具权威性"],
+  sources: [{ ...reusedLegacySource, role: "primary" }],
+  claims: [],
+})), {
+  stream: "shared",
+  batchKey: "event-version-reused-legacy-id",
+});
+assert.notEqual(reusedLegacyRecord.brief.headlines[0].id, eventId);
+assert.equal(reusedLegacyRecord.brief.snapshot?.events[0].matchMethod, "new");
+
+const unresolvedAliasSource = source(
+  "https://identity.example.com/unresolved-protected-alias",
+  "Independent insurance reserve methodology update",
+  "An insurer changed reserve methodology independently of the Blackwell event.",
+  "News",
+  "Identity Wire",
+);
+const unresolvedAliasHeadline = headline({
+  id: eventId,
+  ticker: "INSURE",
+  category: "Other",
+  title: "保险准备金方法出现独立调整",
+  summary: "无法证明归属的旧别名不得自动合并或转移。",
+  keyPoints: ["未知别名需要人工来源审查"],
+  sources: [{ ...unresolvedAliasSource, role: "primary" }],
+  claims: [],
+});
+const unresolvedUrlAlias = aliasesForHeadline(unresolvedAliasHeadline)
+  .find((alias) => alias.type === "url");
+assert.ok(unresolvedUrlAlias?.canonicalUrl);
+aliasMemoryForRegression.set(`url:${unresolvedUrlAlias.key}`, {
+  type: "url",
+  key: unresolvedUrlAlias.key,
+  eventId,
+  canonicalUrl: unresolvedUrlAlias.canonicalUrl,
+  firstSeenAt: `${date}T01:00:00.000Z`,
+  lastSeenAt: `${date}T02:27:00.000Z`,
+  primaryEver: true,
+  resolutionEligible: false,
+});
+const unresolvedVersionCountBeforeConflict = (await listEventVersions(eventId)).length;
+await assert.rejects(
+  () => saveDraft(brief(`${date}T02:28:00.000Z`, unresolvedAliasHeadline), {
+    stream: "shared",
+    batchKey: "event-version-unresolved-alias-return",
+  }),
+  /protected but not resolution-eligible; manual provenance review is required/,
+  "an unresolved primary alias must fail before an explicit event id can append to its old event",
+);
+assert.equal(
+  (await listEventVersions(eventId)).length,
+  unresolvedVersionCountBeforeConflict,
+  "the provenance conflict must leave the explicitly addressed old event unchanged",
+);
+
 // If a later headline in the same batch points at two established events, the
 // entire batch rolls back, including an event inserted earlier in that batch.
 const newTeslaSource = source(
@@ -752,7 +1095,10 @@ const newTeslaHeadline = headline({
 const conflictingHeadline = headline({
   id: "conflicting-aliases",
   rank: 2,
-  sources: [wire, unrelatedSource],
+  sources: [
+    { ...sec, role: "primary" },
+    { ...unrelatedSource, role: "primary" },
+  ],
 });
 const conflictBrief = {
   ...brief(`${date}T02:30:00.000Z`, newTeslaHeadline),

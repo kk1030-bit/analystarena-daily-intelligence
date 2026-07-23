@@ -4,12 +4,16 @@ import path from "node:path";
 import { Pool, type PoolClient } from "pg";
 import {
   aliasesForHeadline,
+  aliasesForMatching,
   canonicalJson,
   createStableEventIdentity,
+  EVENT_PRIMARY_TRANSITION_MIN_CONFIDENCE,
   eventVersionMaterial,
   findSemanticEvent,
   mergeRetainedEvidence,
+  semanticMatchConfidence,
   stableHash,
+  type EventAlias,
 } from "./event-versioning";
 import { ensureRawStoryIdentity } from "./source-identity";
 import {
@@ -101,6 +105,13 @@ interface MemoryEventAlias {
   canonicalUrl?: string;
   firstSeenAt: string;
   lastSeenAt: string;
+  // Missing only on a hot-reloaded process that predates the 7/23 ownership
+  // model. Fail closed by treating undefined as a protected historical
+  // primary; a corroborating-only legacy alias is identified by the database
+  // migration, never guessed in memory.
+  primaryEver?: boolean;
+  resolutionEligible?: boolean;
+  ownerEventVersionId?: string;
 }
 
 interface MemorySourceDocument {
@@ -206,6 +217,25 @@ interface EventDatabaseRow {
   version_change_reason: string | null;
   version_request_id: string | null;
   version_created_at: string | Date | null;
+}
+
+interface EventAliasDatabaseRow {
+  alias_type: EventAlias["type"];
+  alias_key: string;
+  event_id: string;
+  canonical_url: string | null;
+  first_seen_at: string | Date;
+  last_seen_at: string | Date;
+  primary_ever: boolean;
+  owner_event_version_id: string | null;
+  resolution_eligible: boolean;
+}
+
+interface EventAliasOwnership {
+  eventId: string;
+  primaryEver: boolean;
+  resolutionEligible: boolean;
+  ownerEventVersionId?: string;
 }
 
 interface EventVersionRow {
@@ -2175,6 +2205,78 @@ function persistenceInputHash(
   });
 }
 
+function eventAliasKey(alias: Pick<EventAlias, "type" | "key">): string {
+  return `${alias.type}:${alias.key}`;
+}
+
+function aliasMatchCandidates(
+  incoming: Headline,
+  identityAliases: EventAlias[],
+  matchingAliases: EventAlias[],
+  ownershipByAlias: Map<string, EventAliasOwnership>,
+  headlineForEvent: (eventId: string) => Headline | undefined,
+): Map<string, number> {
+  const identityKeys = new Set(identityAliases.map(eventAliasKey));
+  const exact = new Map<string, number>();
+
+  for (const alias of matchingAliases) {
+    // Collector-local legacy ids are retained only as immutable historical
+    // provenance. They can be truncated or reused and therefore never take
+    // part in event resolution; durable source identities and semantic
+    // matching provide the continuity path.
+    if (alias.type === "legacy") continue;
+    const ownership = ownershipByAlias.get(eventAliasKey(alias));
+    if (!ownership) continue;
+
+    // A migration-proven corroborating-only alias must not influence identity.
+    // If it later appears as a primary source, the write path creates the
+    // correct event first and then moves that polluted alias with an audit row.
+    if (!ownership.primaryEver || !ownership.resolutionEligible) continue;
+
+    if (identityKeys.has(eventAliasKey(alias))) {
+      exact.set(ownership.eventId, 1);
+    }
+  }
+
+  // Current primary identities are authoritative. A corroborating source must
+  // not create a competing match or override an exact primary hit.
+  if (exact.size) return exact;
+
+  const transitions = new Map<string, number>();
+  for (const alias of matchingAliases) {
+    if (alias.type === "legacy" || identityKeys.has(eventAliasKey(alias))) continue;
+    const ownership = ownershipByAlias.get(eventAliasKey(alias));
+    if (!ownership?.primaryEver || !ownership.resolutionEligible) continue;
+    const candidateHeadline = headlineForEvent(ownership.eventId);
+    if (!candidateHeadline) continue;
+    const semanticConfidence = semanticMatchConfidence(incoming, candidateHeadline);
+    if (semanticConfidence >= EVENT_PRIMARY_TRANSITION_MIN_CONFIDENCE) {
+      transitions.set(
+        ownership.eventId,
+        Math.max(transitions.get(ownership.eventId) ?? 0, semanticConfidence),
+      );
+    }
+  }
+
+  return transitions;
+}
+
+function assertResolvableIdentityAliases(
+  identityAliases: EventAlias[],
+  ownershipByAlias: Map<string, EventAliasOwnership>,
+): void {
+  for (const alias of identityAliases) {
+    if (alias.type === "legacy") continue;
+    const aliasKey = eventAliasKey(alias);
+    const ownership = ownershipByAlias.get(aliasKey);
+    if (ownership?.primaryEver && !ownership.resolutionEligible) {
+      throw new EventIdentityConflictError(
+        `Alias ${aliasKey} is protected but not resolution-eligible; manual provenance review is required`,
+      );
+    }
+  }
+}
+
 async function persistBriefObservationMemory(
   brief: DailyBrief,
   options: NormalizedPersistBriefOptions,
@@ -2243,21 +2345,53 @@ async function persistBriefObservationMemory(
 
     for (const incomingCandidate of brief.headlines) {
       const incoming = withoutDerivedWhatChanged(incomingCandidate);
-      const aliases = aliasesForHeadline(incoming);
-      const aliasEventIds = new Set(aliases
-        .map((alias) => eventAliasMemory.get(`${alias.type}:${alias.key}`)?.eventId)
-        .filter((value): value is string => Boolean(value)));
-      if (aliasEventIds.size > 1) {
-        throw new EventIdentityConflictError(`Headline ${incoming.id} points to multiple existing events: ${[...aliasEventIds].join(", ")}`);
+      const identityAliases = aliasesForHeadline(incoming);
+      const matchingAliases = aliasesForMatching(incoming);
+      const matchingOwnership = new Map<string, EventAliasOwnership>();
+      for (const alias of matchingAliases) {
+        const stored = eventAliasMemory.get(eventAliasKey(alias));
+        if (stored) {
+          matchingOwnership.set(eventAliasKey(alias), {
+            eventId: stored.eventId,
+            // Undefined can only come from an in-process hot reload of the old
+            // model. Treat it as protected, never as movable pollution.
+            primaryEver: stored.primaryEver !== false,
+            // Old in-process aliases were registered from every source and
+            // have not passed the PostgreSQL provenance classification.
+            resolutionEligible: stored.resolutionEligible === true,
+            ownerEventVersionId: stored.ownerEventVersionId,
+          });
+        }
+      }
+      // Reject unresolved historical primary identity before id, alias,
+      // semantic, or stable-key resolution can silently attach the new
+      // observation to either the old event or a new event.
+      assertResolvableIdentityAliases(identityAliases, matchingOwnership);
+      const aliasMatches = aliasMatchCandidates(
+        incoming,
+        identityAliases,
+        matchingAliases,
+        matchingOwnership,
+        (eventId) => {
+          const candidate = eventMemory.get(eventId);
+          return candidate ? latestMemoryEventVersion(candidate)?.headline : undefined;
+        },
+      );
+      if (aliasMatches.size > 1) {
+        throw new EventIdentityConflictError(`Headline ${incoming.id} points to multiple existing events: ${[...aliasMatches.keys()].join(", ")}`);
       }
 
       let entry = incoming.id.startsWith("evt_") ? eventMemory.get(incoming.id) : undefined;
       let matchMethod: EventMatchMethod = entry ? "existing_id" : "new";
       let matchConfidence = entry ? 1 : 0;
-      if (!entry && aliasEventIds.size === 1) {
-        entry = eventMemory.get([...aliasEventIds][0]);
+      if (!entry && aliasMatches.size === 1) {
+        const [eventId, confidence] = [...aliasMatches.entries()][0];
+        entry = eventMemory.get(eventId);
+        if (!entry) {
+          throw new EventIdentityConflictError(`Alias points to missing event ${eventId}`);
+        }
         matchMethod = "source_alias";
-        matchConfidence = 1;
+        matchConfidence = confidence;
       }
       if (!entry) {
         const semantic = findSemanticEvent(incoming, [...eventMemory.values()]
@@ -2375,14 +2509,38 @@ async function persistBriefObservationMemory(
       entry.lastSeenAt = new Date(Math.max(Date.parse(entry.lastSeenAt), Date.parse(options.observedAt))).toISOString();
       eventMemory.set(entry.id, entry);
 
-      for (const alias of aliases) {
-        const key = `${alias.type}:${alias.key}`;
+      // Incoming headline ids are collector-local labels. They are useful for
+      // reading immutable historical mappings but are not authoritative source
+      // identities, so new observations persist document/URL aliases only.
+      for (const alias of identityAliases.filter((candidate) => candidate.type !== "legacy")) {
+        const key = eventAliasKey(alias);
         const current = eventAliasMemory.get(key);
         if (current && current.eventId !== entry.id) {
-          throw new EventIdentityConflictError(`Alias ${key} is already assigned to ${current.eventId}`);
+          if (current.primaryEver !== false) {
+            const reason = current.resolutionEligible === true
+              ? `is already assigned to ${current.eventId}`
+              : `is protected but not resolution-eligible; manual provenance review is required`;
+            throw new EventIdentityConflictError(`Alias ${key} ${reason}`);
+          }
         }
         eventAliasMemory.set(key, current
-          ? { ...current, lastSeenAt: options.observedAt, canonicalUrl: alias.canonicalUrl ?? current.canonicalUrl }
+          ? {
+              ...current,
+              eventId: entry.id,
+              firstSeenAt: current.eventId === entry.id
+                ? current.firstSeenAt
+                : options.observedAt,
+              lastSeenAt: options.observedAt,
+              canonicalUrl: alias.canonicalUrl ?? current.canonicalUrl,
+              primaryEver: true,
+              resolutionEligible: current.eventId === entry.id
+                && current.primaryEver !== false
+                ? current.resolutionEligible === true
+                : true,
+              ownerEventVersionId: current.eventId === entry.id && current.primaryEver !== false
+                ? current.ownerEventVersionId ?? version.id
+                : version.id,
+            }
           : {
               type: alias.type,
               key: alias.key,
@@ -2390,6 +2548,9 @@ async function persistBriefObservationMemory(
               canonicalUrl: alias.canonicalUrl,
               firstSeenAt: options.observedAt,
               lastSeenAt: options.observedAt,
+              primaryEver: true,
+              resolutionEligible: true,
+              ownerEventVersionId: version.id,
             });
       }
 
@@ -3360,16 +3521,37 @@ async function persistBriefObservationPostgres(
       throw new StaleBriefRevisionError("The daily brief changed after it was opened; reload before saving");
     }
 
-    const allAliases = brief.headlines.flatMap(aliasesForHeadline);
-    const aliasCompositeKeys = allAliases.map((alias) => `${alias.type}:${alias.key}`);
+    const allAliases = brief.headlines
+      .flatMap(aliasesForMatching)
+      .filter((alias) => alias.type !== "legacy");
+    const aliasCompositeKeys = [...new Set(allAliases.map(eventAliasKey))];
     const aliasResult = aliasCompositeKeys.length
-      ? await client.query<{ alias_type: string; alias_key: string; event_id: string }>(`
-          SELECT alias_type, alias_key, event_id
+      ? await client.query<EventAliasDatabaseRow>(`
+          SELECT alias_type, alias_key, event_id, canonical_url,
+                 first_seen_at, last_seen_at, primary_ever,
+                 owner_event_version_id,
+                 analystarena_event_version_owns_alias(
+                   event_id,
+                   owner_event_version_id,
+                   alias_type,
+                   alias_key,
+                   canonical_url
+                 ) AS resolution_eligible
           FROM event_aliases
           WHERE alias_type || ':' || alias_key = ANY($1::text[])
         `, [aliasCompositeKeys])
-      : { rows: [] as Array<{ alias_type: string; alias_key: string; event_id: string }> };
-    const aliasEventMap = new Map(aliasResult.rows.map((row) => [`${row.alias_type}:${row.alias_key}`, row.event_id]));
+      : { rows: [] as EventAliasDatabaseRow[] };
+    const aliasOwnershipMap = new Map<string, EventAliasOwnership>(
+      aliasResult.rows.map((row) => [
+        `${row.alias_type}:${row.alias_key}`,
+        {
+          eventId: row.event_id,
+          primaryEver: row.primary_ever,
+          resolutionEligible: row.resolution_eligible,
+          ownerEventVersionId: row.owner_event_version_id ?? undefined,
+        },
+      ]),
+    );
     const exactEventIds = [
       ...brief.headlines.map((headline) => headline.id).filter((id) => id.startsWith("evt_")),
       ...aliasResult.rows.map((row) => row.event_id),
@@ -3416,21 +3598,33 @@ async function persistBriefObservationPostgres(
 
     for (const incomingCandidate of brief.headlines) {
       const incoming = withoutDerivedWhatChanged(incomingCandidate);
-      const aliases = aliasesForHeadline(incoming);
-      const aliasEventIds = new Set(aliases
-        .map((alias) => aliasEventMap.get(`${alias.type}:${alias.key}`))
-        .filter((value): value is string => Boolean(value)));
-      if (aliasEventIds.size > 1) {
-        throw new EventIdentityConflictError(`Headline ${incoming.id} points to multiple existing events: ${[...aliasEventIds].join(", ")}`);
+      const identityAliases = aliasesForHeadline(incoming);
+      const matchingAliases = aliasesForMatching(incoming);
+      // Keep PostgreSQL fail-closed as well: an explicit event id or a high
+      // semantic match must not bypass unresolved historical provenance.
+      assertResolvableIdentityAliases(identityAliases, aliasOwnershipMap);
+      const aliasMatches = aliasMatchCandidates(
+        incoming,
+        identityAliases,
+        matchingAliases,
+        aliasOwnershipMap,
+        (eventId) => candidates.get(eventId)?.headline,
+      );
+      if (aliasMatches.size > 1) {
+        throw new EventIdentityConflictError(`Headline ${incoming.id} points to multiple existing events: ${[...aliasMatches.keys()].join(", ")}`);
       }
 
       let state = incoming.id.startsWith("evt_") ? candidates.get(incoming.id) : undefined;
       let matchMethod: EventMatchMethod = state ? "existing_id" : "new";
       let matchConfidence = state ? 1 : 0;
-      if (!state && aliasEventIds.size === 1) {
-        state = candidates.get([...aliasEventIds][0]);
+      if (!state && aliasMatches.size === 1) {
+        const [eventId, confidence] = [...aliasMatches.entries()][0];
+        state = candidates.get(eventId);
+        if (!state) {
+          throw new EventIdentityConflictError(`Alias points to missing event ${eventId}`);
+        }
         matchMethod = "source_alias";
-        matchConfidence = 1;
+        matchConfidence = confidence;
       }
       if (!state) {
         const semantic = findSemanticEvent(incoming, [...candidates.values()]
@@ -3644,17 +3838,94 @@ async function persistBriefObservationPostgres(
         options.observedAt,
       ]);
 
-      for (const alias of aliases) {
-        await client.query(`
+      const incomingCanonicalTitle = incoming.sources
+        .find((source) => source.originalTitle)?.originalTitle;
+      state = {
+        event: {
+          ...state.event,
+          canonicalTitle: incomingCanonicalTitle || state.event.canonicalTitle,
+          category: incoming.category,
+          ticker: incoming.ticker,
+          lastSeenAt: new Date(Math.max(
+            Date.parse(state.event.lastSeenAt),
+            Date.parse(options.observedAt),
+          )).toISOString(),
+        },
+        headline: structuredClone(stableHeadline),
+      };
+      // Keep candidate state transaction-local and current. A later headline
+      // in this same collection batch must resolve against the version and
+      // primary-source roles just persisted above, not the pre-batch row.
+      candidates.set(state.event.id, state);
+
+      for (const alias of identityAliases.filter((candidate) => candidate.type !== "legacy")) {
+        const aliasKey = eventAliasKey(alias);
+        const assigned = aliasOwnershipMap.get(aliasKey);
+        if (assigned && assigned.eventId !== state.event.id) {
+          if (assigned.primaryEver) {
+            const reason = assigned.resolutionEligible
+              ? `is a protected historical primary of ${assigned.eventId}`
+              : "is protected but not resolution-eligible; manual provenance review is required";
+            throw new EventIdentityConflictError(
+              `Alias ${aliasKey} ${reason}`,
+            );
+          }
+        }
+        const persistedAlias = await client.query<EventAliasDatabaseRow>(`
           INSERT INTO event_aliases (
-            alias_type, alias_key, event_id, canonical_url, first_seen_at, last_seen_at
-          ) VALUES ($1, $2, $3, $4, $5, $5)
+            alias_type, alias_key, event_id, canonical_url,
+            first_seen_at, last_seen_at, primary_ever,
+            owner_event_version_id
+          ) VALUES ($1, $2, $3, $4, $5, $5, TRUE, $6)
           ON CONFLICT (alias_type, alias_key) DO UPDATE
             SET event_id = EXCLUDED.event_id,
-                canonical_url = COALESCE(EXCLUDED.canonical_url, event_aliases.canonical_url),
-                last_seen_at = GREATEST(event_aliases.last_seen_at, EXCLUDED.last_seen_at)
-        `, [alias.type, alias.key, state.event.id, alias.canonicalUrl ?? null, options.observedAt]);
-        aliasEventMap.set(`${alias.type}:${alias.key}`, state.event.id);
+                canonical_url = CASE
+                  WHEN event_aliases.event_id IS DISTINCT FROM EXCLUDED.event_id
+                    THEN EXCLUDED.canonical_url
+                  ELSE COALESCE(event_aliases.canonical_url, EXCLUDED.canonical_url)
+                END,
+                first_seen_at = CASE
+                  WHEN event_aliases.event_id IS DISTINCT FROM EXCLUDED.event_id
+                    THEN EXCLUDED.first_seen_at
+                  ELSE event_aliases.first_seen_at
+                END,
+                last_seen_at = CASE
+                  WHEN event_aliases.event_id IS DISTINCT FROM EXCLUDED.event_id
+                    THEN EXCLUDED.last_seen_at
+                  ELSE GREATEST(event_aliases.last_seen_at, EXCLUDED.last_seen_at)
+                END,
+                primary_ever = TRUE,
+                owner_event_version_id = CASE
+                  WHEN event_aliases.event_id IS NOT DISTINCT FROM EXCLUDED.event_id
+                       AND event_aliases.primary_ever
+                    THEN event_aliases.owner_event_version_id
+                  ELSE EXCLUDED.owner_event_version_id
+                END
+          RETURNING alias_type, alias_key, event_id, canonical_url,
+                    first_seen_at, last_seen_at, primary_ever,
+                    owner_event_version_id,
+                    analystarena_event_version_owns_alias(
+                      event_id,
+                      owner_event_version_id,
+                      alias_type,
+                      alias_key,
+                      canonical_url
+                    ) AS resolution_eligible
+        `, [
+          alias.type,
+          alias.key,
+          state.event.id,
+          alias.canonicalUrl ?? null,
+          options.observedAt,
+          version.id,
+        ]);
+        const stored = persistedAlias.rows[0];
+        aliasOwnershipMap.set(aliasKey, {
+          eventId: stored.event_id,
+          primaryEver: stored.primary_ever,
+          resolutionEligible: stored.resolution_eligible,
+          ownerEventVersionId: stored.owner_event_version_id ?? undefined,
+        });
       }
 
       idMap.set(incoming.id, state.event.id);

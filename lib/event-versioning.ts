@@ -5,6 +5,13 @@ import { canonicalizeSourceUrl } from "./source-identity";
 export const EVENT_VERSION_SCHEMA = "event-version/v2";
 export const EVENT_IDENTITY_SCHEMA = "event-identity/v1";
 export const EVENT_SEMANTIC_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
+// A source that used to be primary may become corroborating after an official
+// document arrives. It is useful as a continuity hint, but must never decide
+// identity by itself: the current and previous event still need meaningful
+// semantic overlap. This threshold is deliberately below the general
+// semantic-only threshold (0.58) because the historical primary is additional
+// evidence, while remaining high enough to reject a merely shared roundup.
+export const EVENT_PRIMARY_TRANSITION_MIN_CONFIDENCE = 0.35;
 
 const genericTickers = new Set([
   "AI",
@@ -129,14 +136,29 @@ function specificTicker(value: string): boolean {
   return /^[A-Z][A-Z0-9.-]{0,9}$/.test(ticker) && !genericTickers.has(ticker);
 }
 
+export function eventIdentitySources(headline: Headline): SourceLink[] {
+  const primary = headline.sources.filter((source) => source.role === "primary");
+  // New evidence-bound briefs always declare a primary source. Limit the
+  // fallback for historical/legacy payloads to their first source; treating
+  // every corroborating document as a permanent event alias lets one roundup
+  // article incorrectly merge otherwise unrelated clusters over time.
+  return primary.length ? primary : headline.sources.slice(0, 1);
+}
+
 export function semanticMatchConfidence(incoming: Headline, existing: Headline): number {
   const incomingTime = validTime(incoming.publishedAt);
   const existingTime = validTime(existing.publishedAt);
   if (incomingTime !== undefined && existingTime !== undefined
     && Math.abs(incomingTime - existingTime) > EVENT_SEMANTIC_WINDOW_MS) return 0;
 
-  const incomingOriginalTitles = incoming.sources.map((source) => source.originalTitle ?? "").filter(Boolean).join(" ");
-  const existingOriginalTitles = existing.sources.map((source) => source.originalTitle ?? "").filter(Boolean).join(" ");
+  const incomingOriginalTitles = eventIdentitySources(incoming)
+    .map((source) => source.originalTitle ?? "")
+    .filter(Boolean)
+    .join(" ");
+  const existingOriginalTitles = eventIdentitySources(existing)
+    .map((source) => source.originalTitle ?? "")
+    .filter(Boolean)
+    .join(" ");
   const incomingIdentityTitle = incomingOriginalTitles || incoming.title;
   const existingIdentityTitle = existingOriginalTitles || existing.title;
   const title = overlap(identityTokens(incomingIdentityTitle), identityTokens(existingIdentityTitle));
@@ -188,9 +210,12 @@ export function findSemanticEvent(
   };
 }
 
-export function aliasesForHeadline(headline: Headline): EventAlias[] {
+function aliasesFromSources(
+  headline: Headline,
+  sources: SourceLink[],
+): EventAlias[] {
   const aliases: EventAlias[] = [];
-  for (const source of headline.sources) {
+  for (const source of sources) {
     const canonicalUrl = source.canonicalUrl || canonicalizeSourceUrl(source.url);
     const strongDocumentIdentity = Boolean(source.nativeId) || isDocumentLikeUrl(canonicalUrl);
     if (source.sourceDocumentId && strongDocumentIdentity) {
@@ -201,6 +226,24 @@ export function aliasesForHeadline(headline: Headline): EventAlias[] {
   if (headline.id && !headline.id.startsWith("evt_")) aliases.push({ type: "legacy", key: headline.id });
   return aliases.filter((alias, index, all) =>
     all.findIndex((candidate) => candidate.type === alias.type && candidate.key === alias.key) === index);
+}
+
+export function aliasesForHeadline(headline: Headline): EventAlias[] {
+  return aliasesFromSources(headline, eventIdentitySources(headline));
+}
+
+export function aliasesForMatching(headline: Headline): EventAlias[] {
+  // A previous primary source may become corroborating after a stronger
+  // official document arrives. Consider every incoming source while looking
+  // up candidates, then require the candidate's latest version to own that
+  // alias as a primary identity before accepting it.
+  return aliasesFromSources(headline, headline.sources);
+}
+
+export function headlineOwnsAlias(headline: Headline, alias: EventAlias): boolean {
+  if (alias.type === "legacy") return headline.id === alias.key;
+  return aliasesForHeadline(headline).some((candidate) =>
+    candidate.type === alias.type && candidate.key === alias.key);
 }
 
 function sourceIdentityForVersion(source: SourceLink): Record<string, unknown> {
@@ -326,7 +369,19 @@ export function eventVersionMaterial(headline: Headline): EventVersionMaterial {
 }
 
 export function mergeRetainedEvidence(previous: Headline | undefined, incoming: Headline): Headline {
-  if (!previous) return structuredClone(incoming);
+  const normalizeSourceRoles = (headline: Headline): Headline => {
+    const hasDeclaredPrimary = headline.sources.some((source) => source.role === "primary");
+    return {
+      ...structuredClone(headline),
+      sources: headline.sources.map((source, index) => ({
+        ...structuredClone(source),
+        role: !hasDeclaredPrimary && index === 0
+          ? "primary"
+          : source.role ?? "corroborating",
+      })),
+    };
+  };
+  if (!previous) return normalizeSourceRoles(incoming);
   const evidenceIdentity = (item: { sourceDocumentId?: string; id: string }) =>
     `${item.sourceDocumentId ?? ""}\u0000${item.id}`;
   const evidenceVersionIdentity = (
@@ -381,7 +436,15 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
     || claimKey === "market_impact"
     || claimKey === "direction_rationale"
     || /^important_information:\d+$/.test(claimKey);
-  const sources = [...previous.sources, ...incoming.sources].reduce<SourceLink[]>((result, source) => {
+  const sameSourceIdentity = (left: SourceLink, right: SourceLink): boolean => {
+    const leftDocumentId = left.sourceDocumentId?.trim() || undefined;
+    const rightDocumentId = right.sourceDocumentId?.trim() || undefined;
+    const leftCanonicalUrl = canonicalizeSourceUrl(left.canonicalUrl || left.url);
+    const rightCanonicalUrl = canonicalizeSourceUrl(right.canonicalUrl || right.url);
+    return Boolean(leftDocumentId && rightDocumentId && leftDocumentId === rightDocumentId)
+      || leftCanonicalUrl === rightCanonicalUrl;
+  };
+  const mergedSources = [...previous.sources, ...incoming.sources].reduce<SourceLink[]>((result, source) => {
     const documentId = source.sourceDocumentId?.trim() || undefined;
     const canonicalUrl = canonicalizeSourceUrl(source.canonicalUrl || source.url);
     const existingIndex = result.findIndex((candidate) => {
@@ -461,6 +524,24 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
     }
     return result;
   }, []);
+  const incomingHasDeclaredPrimary = incoming.sources.some((source) => source.role === "primary");
+  const incomingSourceRoles = incoming.sources.map((source, index) => ({
+    source,
+    role: !incomingHasDeclaredPrimary && index === 0
+      ? "primary"
+      : source.role ?? "corroborating",
+  }));
+  const sources = mergedSources.map((source) => {
+    const current = incomingSourceRoles.find((candidate) =>
+      sameSourceIdentity(candidate.source, source));
+    if (current) return { ...source, role: current.role };
+    // Evidence retained from an earlier observation remains auditable, but it
+    // cannot keep controlling current event identity after the collector has
+    // selected another primary source.
+    return source.role === "primary"
+      ? { ...source, role: "corroborating" as const }
+      : source;
+  });
   // Preserve the source order recorded by the previous event version. Source
   // order is deliberately excluded from the event-version hash, so sorting a
   // reused projection here could make its displayed ordinals disagree with
@@ -556,12 +637,13 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
 }
 
 export function stableEventSeed(headline: Headline): string {
-  const documentIds = headline.sources.map((source) => source.sourceDocumentId).filter((value): value is string => Boolean(value)).sort();
-  const canonicalUrls = headline.sources
+  const identitySources = eventIdentitySources(headline);
+  const documentIds = identitySources.map((source) => source.sourceDocumentId).filter((value): value is string => Boolean(value)).sort();
+  const canonicalUrls = identitySources
     .map((source) => source.canonicalUrl || canonicalizeSourceUrl(source.url))
     .filter((value): value is string => Boolean(value))
     .sort();
-  const titleTokens = [...identityTokens(headline.sources.map((source) => source.originalTitle ?? "").join(" ") || headline.title)]
+  const titleTokens = [...identityTokens(identitySources.map((source) => source.originalTitle ?? "").join(" ") || headline.title)]
     .sort()
     .slice(0, 16);
   const publishedDate = headline.publishedAt?.slice(0, 10) ?? "unknown-date";
