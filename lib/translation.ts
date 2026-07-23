@@ -30,6 +30,7 @@ const preservedPhrases = [
   "Seeking Alpha", "Business Insider", "The Wall Street Journal", "Wall Street Journal",
   "The Motley Fool", "Financial Times", "Yahoo Finance", "Google News", "TradingPedia",
   "Stocktwits", "Benzinga", "Investopedia", "MarketWatch", "Barron's", "Barron’s", "Bloomberg", "Reuters",
+  "24/7 Wall St",
 ] as const;
 
 function preservedPhrasePattern(phrase: string): RegExp {

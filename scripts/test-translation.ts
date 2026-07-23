@@ -151,6 +151,23 @@ try {
   assert.ok(!barronsTranslationQuery.includes("Barron's"), "\u53d1\u9001\u7ffb\u8bd1\u524d\u5fc5\u987b\u9690\u53bb Barron's \u54c1\u724c\u539f\u6587");
   assert.match(barronsTranslationQuery, new RegExp(protectedMarkerSource), "Barron's \u5e94\u4f7f\u7528\u53ef\u9a8c\u8bc1\u7684\u4e13\u540d\u4fdd\u62a4\u6807\u8bb0");
 
+  const wallStreetInput = "Prediction: Betting Markets Price Palantir Between $102 and $144 as Earnings Catalysts Loom - 24/7 Wall St.";
+  const translatedWallStreet = "\u9884\u6d4b\uff1a\u968f\u7740\u8d22\u62a5\u50ac\u5316\u5242\u4e34\u8fd1\uff0c\u9884\u6d4b\u5e02\u573a\u8ba4\u4e3a Palantir \u80a1\u4ef7\u5c06\u5728 102 \u7f8e\u5143\u81f3 144 \u7f8e\u5143\u4e4b\u95f4 - 24/7 Wall St.";
+  let wallStreetTranslationQuery = "";
+  globalThis.fetch = (async (input) => {
+    const protectedValue = singleProtectedMarker(input);
+    wallStreetTranslationQuery = protectedValue.query;
+    return googleResponse(`\u9884\u6d4b\uff1a\u968f\u7740\u8d22\u62a5\u50ac\u5316\u5242\u4e34\u8fd1\uff0c\u9884\u6d4b\u5e02\u573a\u8ba4\u4e3a Palantir \u80a1\u4ef7\u5c06\u5728 102 \u7f8e\u5143\u81f3 144 \u7f8e\u5143\u4e4b\u95f4 - ${protectedValue.marker}.`);
+  }) as typeof fetch;
+  const localizedWallStreet = await localizeBriefContent(briefWith(wallStreetInput), { strict: true });
+  assert.equal(localizedWallStreet.translationEnabled, true);
+  assert.equal(localizedWallStreet.headlines[0].title, translatedWallStreet);
+  assert.ok(
+    !wallStreetTranslationQuery.includes("24/7 Wall St"),
+    "\u53d1\u9001\u7ffb\u8bd1\u524d\u5fc5\u987b\u9690\u53bb 24/7 Wall St \u54c1\u724c\u539f\u6587",
+  );
+  assert.match(wallStreetTranslationQuery, new RegExp(protectedMarkerSource));
+
   const rewrittenBarronsInput = "Micron shares rise after earnings - Barron's";
   globalThis.fetch = (async () => googleResponse("\u7f8e\u5149\u80a1\u4ef7\u5728\u8d22\u62a5\u540e\u4e0a\u6da8 - \u5df4\u4f26\u5468\u520a")) as typeof fetch;
   const rewrittenBarrons = await localizeBriefContent(briefWith(rewrittenBarronsInput));
