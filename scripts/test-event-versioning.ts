@@ -517,12 +517,12 @@ const partialRecaptureMerged = mergeRetainedEvidence(
 );
 assert.deepEqual(
   partialRecaptureMerged.sources[0].evidence?.map((evidence) => evidence.versionId),
-  [retainedEvidence.versionId],
-  "a partial later observation must retain the prior complete projection until an audited retraction",
+  [recapturedEvidence.versionId],
+  "a partial observation with genuinely new evidence must remain available for an audited replacement",
 );
 assert.equal(
   partialRecaptureMerged.sources[0].sourceObservationId,
-  currentWire.sourceObservationId,
+  "obs_current_feed_identity_recaptured",
 );
 assert.deepEqual(validateHeadlineEvidence(partialRecaptureMerged).issues, []);
 

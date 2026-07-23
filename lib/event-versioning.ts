@@ -477,18 +477,24 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
         ?? candidate.collectedAt
         ?? "";
       const observationsDiffer = observationKey(preferred) !== observationKey(fallback);
-      const preferredEvidenceIds = new Set(
-        (preferred.evidence ?? []).map(evidenceIdentity),
+      const preferredEvidenceVersions = new Set(
+        (preferred.evidence ?? []).map(evidenceVersionIdentity),
       );
+      const fallbackEvidenceVersions = new Set(
+        (fallback.evidence ?? []).map(evidenceVersionIdentity),
+      );
+      const preferredIsExactSubset = (preferred.evidence ?? []).every((evidence) =>
+        fallbackEvidenceVersions.has(evidenceVersionIdentity(evidence)));
       const omitsFallbackEvidence = (fallback.evidence ?? []).some((evidence) =>
-        !preferredEvidenceIds.has(evidenceIdentity(evidence)));
+        !preferredEvidenceVersions.has(evidenceVersionIdentity(evidence)));
       // Absence from a later scrape is not proof that a publisher retracted
-      // evidence. If the later observation omits any previously verified
-      // anchor, retain the entire prior projection rather than manufacturing a
-      // removal or mixing capture metadata across observations. A reviewed
-      // EvidenceRetractionRequest remains the only removal authority.
+      // evidence. When the later observation is only an exact subset of the
+      // prior verified projection, retain the prior projection rather than
+      // manufacturing a removal or mixing capture metadata. Genuinely revised
+      // evidence remains visible to the audited replacement flow.
       const retainFallbackProjection = observationsDiffer
         && preferred.sourceDocumentId === fallback.sourceDocumentId
+        && preferredIsExactSubset
         && omitsFallbackEvidence
         && Boolean(fallback.evidence?.length)
         && Boolean(
