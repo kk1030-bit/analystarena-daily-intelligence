@@ -3,7 +3,7 @@
 > Canonical task（正式任務）：[GitHub Issue #12](https://github.com/kk1030-bit/analystarena-daily-intelligence/issues/12)<br>
 > Execution branch（執行分支）：`agent/auditable-brief-0721-0726`<br>
 > Period（期間）：2026-07-21 至 2026-07-26<br>
-> Current status（目前狀態）：7/22 已完成正式站驗收；7/23 What Changed 的資料模型、比較器與發布權威核驗已實作，正在進行最終 PostgreSQL 回歸、部署與正式站驗證，尚未標記完成。
+> Current status（目前狀態）：7/23 What Changed 已完成正式站部署、真實採集、人工審核、發布、PDF 與歷史歸檔驗收；下一項為 7/24 Thesis Impact 與待驗證問題。
 
 ## 使用方式
 
@@ -32,7 +32,7 @@ gantt
     來源文件與引用片段保存          :crit, done, a2, after a1, 1d
 
     section 智能分析
-    前後版本比較與 What Changed     :crit, a3, after a2, 1d
+    前後版本比較與 What Changed     :crit, done, a3, after a2, 1d
     Thesis Impact 與待驗證問題       :a4, after a3, 1d
 
     section 產品呈現
@@ -49,7 +49,7 @@ gantt
 |---|---|---|---|
 | 7/21 | 資料庫底座 | 建立穩定事件 ID、事件版本、前一版本關聯；每次實際觸發的十分鐘更新不再覆蓋舊資料 | 已完成 |
 | 7/22 | 來源證據鏈 | 同時保存原始發布時間、採集時間、網址、內容雜湊、引用片段及可驗證定位 | 已完成（正式站驗收） |
-| 7/23 | What Changed | 自動比較上一版本，標記首次出現、新增證據、數字變動、方向與排名變化 | 進行中（已實作，待最終驗證） |
+| 7/23 | What Changed | 自動比較上一版本，標記首次出現、新增證據、數字變動、方向與排名變化 | 已完成（正式站驗收） |
 | 7/24 | 投資判斷 | 結構化記錄營收／獲利／估值／風險影響、利好與利空標的、原判斷與新判斷 | 待執行 |
 | 7/25 | 網頁及 PDF | 每則市場頭條呈現「新增資訊、來源、判斷影響、待驗證問題」四區塊；PDF 包含全部頭條 | 待執行 |
 | 7/26 | 驗收部署 | 測試十分鐘更新、歷史版本、來源連結、PDF、人工審核及 Render 正式站 | 待執行 |
@@ -75,7 +75,7 @@ gantt
   - [x] 歷史資料只回填為 `legacy_unverified`，不捏造原文、發布時間、段落或頁碼。
   - [x] 功能提交：`03aa498`、`18e41f6`、`e51362c`；Migration：`db/migrations/20260722_source_evidence_v2.sql`、`db/migrations/20260722_source_observation_evidence_time.sql`、`db/migrations/20260722_zz_snapshot_claim_presentations.sql`。
   - [x] Render 正式資料庫 migration、真實來源重採集、人工審核、正式發布、PDF 與歷史歸檔驗收。
-- [ ] **7/23｜前後版本比較與 What Changed**
+- [x] **7/23｜前後版本比較與 What Changed**
   - [x] 事件內容差異與快照排名差異分表保存；排名、時效分及版面變化不建立新的事件內容版本。
   - [x] 同時建立 `previous_observation` 與 `previous_published` 雙基線：前者比較同日上一個實際快照，供營運監測；後者比較上一份已發布日報的凍結快照，供投資人閱讀。
   - [x] 精確分辨 `first_seen`、`entered` 與 `reentered`：資料庫沒有任何歷史觀察時才是首次發現；基線沒有但更早曾出現時只能標記重新進榜，不捏造內容變化。
@@ -86,7 +86,7 @@ gantt
   - [x] 遷移前版本只標記 `legacy_unverified`，不回填推測性的證據、數字、方向或排名差異。
   - [x] 發布前從 PostgreSQL 重新載入兩個比較端點並重算；缺少權威比較、payload 與權威結果不一致或內部 hash／端點不完整時 fail closed，不得繞過證據閘門。
   - [x] 人工審核與明確證據撤回若建立新事件版本，版本保存 `actor_type`、服務端 keyed-HMAC `actor_id_hash`、修改原因及 request ID；即使事件內容未變，審核快照仍保存操作者。發布以同一事務保存精確快照 hash、PDF SHA-256 與同一組審計欄位，不保存管理員明文憑證。
-  - [ ] 最終驗證：隔離 PostgreSQL migration／不可變 trigger／雙基線／撤回／發布篡改回歸，全套 TypeScript、ESLint、build 與 Render 正式站驗收。
+  - [x] 最終驗證：隔離 PostgreSQL migration／不可變 trigger／雙基線／撤回／發布篡改回歸，全套 TypeScript、ESLint、build 與 Render 正式站驗收。
 - [ ] **7/24｜Thesis Impact 與待驗證問題**
   - 結構化保存營收、獲利、估值、風險與催化劑影響。
   - 保存原判斷、新判斷、利好／利空標的與影響機制。
@@ -164,3 +164,21 @@ Migration：
 - 正式站驗證：Render deploy `dep-d9gcs458nd3s73euafog`（commit `e51362c`）為 Live；日報 `4d8bb0a7-67d3-4bee-8cb4-83ab2298091c` 狀態為 `published`，快照 `367ea385-796f-4b03-9133-c6503fafe63b`，8 則頭條、5/5 股票影響已批准、待審 0。[PDF](https://analystarena-daily-intelligence.onrender.com/api/briefs/4d8bb0a7-67d3-4bee-8cb4-83ab2298091c/pdf) 回傳 HTTP 200 `application/pdf`，19 頁無空白頁、缺頁碼、越界文字或壞占位符，含 29 個可點擊來源連結；[歷史歸檔](https://analystarena-daily-intelligence.onrender.com/archive) 已顯示本日報。
 - 已知限制：Reddit RSS 本次受 429 限流且 Playwright 未取得結果；X 未設定原生 `X_AUTH_TOKEN`，本次由新聞索引回退取得 16 條線索。限制已明確保留，不把回退資料冒充原生平台資料。HTML／PDF 已定義 fail-closed 證據格式，但真正的詳情頁與 PDF 采集器仍屬後續工作；逐句引用投資人介面安排於 7/25。
 - 下一項：7/23 前後版本比較與 What Changed。
+
+### 2026-07-23
+
+- 狀態：完成並正式部署；真實日報已通過雙基線差異重算、證據權威核驗、人工審核、發布凍結、PDF 與歷史歸檔驗收。
+- PR：[PR #13](https://github.com/kk1030-bit/analystarena-daily-intelligence/pull/13)。
+- Commit：`9cb2b67`（Build auditable What Changed comparisons）、`1128849`（Preserve auditable citation merges）、`5ca95e0`（Protect auditable event identity resolution）、`1d9547b`（Accept audited legacy rank context）、`14ed581`（Preserve 24/7 Wall St in Chinese translations）。
+- Migration：`db/migrations/20260723_what_changed.sql`、`db/migrations/20260723_event_alias_primary_ownership.sql`、`db/migrations/20260723_what_changed_legacy_rank.sql`。
+- 比較模型：同時保存 `previous_observation` 與 `previous_published`，精確區分首次發現、進榜、重新進榜、證據新增／修訂／撤回、數字、方向與排名變化。輸入、結果及每個差異項均以 SHA-256 固定，歷史記錄只可新增，發布前從 PostgreSQL 權威端點重新載入並重算。
+- 身分精度修復：只有 `role=primary` 的來源可建立事件 alias；次要佐證只可作語義提示，不能奪取或污染事件身分。Migration 會標記並隔離舊 collector ID、孤兒、混合角色及非 primary alias，保留不可變擁有權與重分配審計；解析前即 fail closed，避免先命中受污染 alias。
+- 歷史資料規則：遷移前資料沒有足夠證據時只保存 `legacy_unverified`。`20260723_what_changed_legacy_rank.sql` 只容許具備同一事件／版本、確切基線快照及 `continued` 狀態的舊排名脈絡；缺少 delta、缺少基線或複合外鍵不完整的資料仍會被 PostgreSQL 拒絕。
+- 缺陷處理紀錄：[Run 30015488862](https://github.com/kk1030-bit/analystarena-daily-intelligence/actions/runs/30015488862) 首次揭露舊排名約束不接受可稽核的 legacy baseline，未繞過約束，而是新增精確條件與反向 PostgreSQL 測試；[Run 30017205159](https://github.com/kk1030-bit/analystarena-daily-intelligence/actions/runs/30017205159) 採集成功後又發現 `24/7 Wall St` 被誤判為未翻譯文字，加入出版商保留詞與精確翻譯回歸後才執行最終採集。
+- 真實採集：[GitHub Actions Run 30017746912](https://github.com/kk1030-bit/analystarena-daily-intelligence/actions/runs/30017746912) 成功；96 則候選、76 個合併事件、8 則頭條，正式資料為 PostgreSQL 模式且自動簡體中文翻譯已啟用。
+- What Changed 結果：最終人工審核快照為 `54e7ec70-9c99-41d9-8056-00c649e8ee58`（序號 5，前一快照 `c18cd1b6-db0a-4b15-ad8e-058f30fe3eb2`），payload SHA-256 為 `5435db09588bac98fba597bf6b087432541508b020495ee54b8ebc7f6e17a956`。排名 1–6 為可驗證變化，共保存 11 個差異項；排名 7–8 明確為 `legacy_unverified`，沒有捏造差異。
+- 人工審核：12 項股票影響中批准 10 項、駁回 2 項、待審 0；排名 1 由無關次要文章帶入的 NVDA／TSLA 映射被駁回，沒有因為系統已推薦就放行。
+- 自動測試：`test:events:postgres`、`test:evidence:postgres`、`test:what-changed:postgres` 均在全新 PostgreSQL 通過；`test:brief`、`test:stocks`、TypeScript、ESLint、Next.js production build 與 `git diff --check` 全數通過。回歸涵蓋雙基線、撤回授權、身份污染、alias 擁有權、複合外鍵、不可變 trigger、歷史排名及發布篡改。
+- 正式站驗證：Render deploy `dep-d9h2jsgk1i2s739eqagg`（commit `14ed581`）為 Live；日報 `9aa4b53c-673c-439d-8134-1dc33d8ccdfd` 於 2026-07-23 發布，狀態為 `published`。發布後 PATCH 回傳 409「已發布日報不可修改」，快照 ID 與 payload hash 均未改變。[PDF](https://analystarena-daily-intelligence.onrender.com/api/briefs/9aa4b53c-673c-439d-8134-1dc33d8ccdfd/pdf) 回傳 HTTP 200 `application/pdf`，共 22 頁、34 個可點擊來源連結，無空白頁、越界文字、壞字元或占位符；[歷史歸檔](https://analystarena-daily-intelligence.onrender.com/archive) 已顯示本日報。
+- 已知限制：正式站未設定付費 OpenAI 密鑰，故摘要、事件合併及市場影響仍使用可重現的規則流程；自動簡體中文翻譯正常啟用，網站也明確顯示此限制。7/23 完成的是可稽核差異資料與發布權威；投資人端四區塊及逐句引用互動仍依計畫於 7/25 完成，不提前宣稱。
+- 下一項：7/24 Thesis Impact 與待驗證問題。
