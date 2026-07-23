@@ -1999,7 +1999,16 @@ function applyEvidenceRetractions(
   current: Headline,
   requests: EvidenceRetractionRequest[],
 ): { headline: Headline; applied: EvidenceRetractionRequest[] } {
-  if (!requests.length) return { headline: current, applied: [] };
+  const pruneEmptySecondarySources = (headline: Headline): Headline => ({
+    ...headline,
+    sources: headline.sources.filter((source) =>
+      source.role === "primary"
+      || !Array.isArray(source.evidence)
+      || source.evidence.length > 0),
+  });
+  if (!requests.length) {
+    return { headline: pruneEmptySecondarySources(current), applied: [] };
+  }
   if (!previous) {
     throw new EvidenceIntegrityError(requests.map((request) => ({
       code: "RETRACTION_PREVIOUS_VERSION_REQUIRED",
@@ -2117,7 +2126,7 @@ function applyEvidenceRetractions(
     }
     applied.push(structuredClone(request));
   }
-  return { headline, applied };
+  return { headline: pruneEmptySecondarySources(headline), applied };
 }
 
 function changeItemClaimKey(
