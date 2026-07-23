@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { EventRecord, Headline, SourceLink } from "./types";
+import type { EvidenceCitation, EventRecord, Headline, SourceEvidence, SourceLink } from "./types";
 import { canonicalizeSourceUrl } from "./source-identity";
 
 export const EVENT_VERSION_SCHEMA = "event-version/v2";
@@ -329,6 +329,14 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
   if (!previous) return structuredClone(incoming);
   const evidenceIdentity = (item: { sourceDocumentId?: string; id: string }) =>
     `${item.sourceDocumentId ?? ""}\u0000${item.id}`;
+  const evidenceVersionIdentity = (
+    item: Pick<SourceEvidence, "sourceDocumentId" | "sourceDocumentVersionId" | "id" | "versionId">,
+  ) => [
+    item.sourceDocumentId,
+    item.sourceDocumentVersionId ?? "",
+    item.id,
+    item.versionId ?? "",
+  ].join("\u0000");
   const mergeEvidence = <T extends { sourceDocumentId?: string; id: string }>(
     preferred: T[] | undefined,
     fallback: T[] | undefined,
@@ -339,6 +347,32 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
       ...preferred.map((item) => structuredClone(item)),
       ...(fallback ?? [])
         .filter((item) => !preferredIds.has(evidenceIdentity(item)))
+        .map((item) => structuredClone(item)),
+    ];
+  };
+  const mergeCitations = (
+    preferred: EvidenceCitation[] | undefined,
+    fallback: EvidenceCitation[] | undefined,
+    availableEvidenceVersions: ReadonlySet<string>,
+  ): EvidenceCitation[] => {
+    const availablePreferred = (preferred ?? []).filter((item) =>
+      availableEvidenceVersions.has(evidenceVersionIdentity(item)));
+    const availableFallback = (fallback ?? []).filter((item) =>
+      availableEvidenceVersions.has(evidenceVersionIdentity(item)));
+    if (!availablePreferred.length) {
+      return availableFallback.map((item) => structuredClone(item));
+    }
+    // A claim can intentionally bind the same immutable evidence as support,
+    // contradiction, and/or context. Relation is therefore part of citation
+    // identity. Within one relation, the current evidence version supersedes
+    // the retained version of the same anchor.
+    const citationIdentity = (item: EvidenceCitation) =>
+      `${evidenceIdentity(item)}\u0000${item.relation}`;
+    const preferredIds = new Set(availablePreferred.map(citationIdentity));
+    return [
+      ...availablePreferred.map((item) => structuredClone(item)),
+      ...availableFallback
+        .filter((item) => !preferredIds.has(citationIdentity(item)))
         .map((item) => structuredClone(item)),
     ];
   };
@@ -374,20 +408,55 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
       // are equally authoritative, the later (incoming) observation wins.
       const preferred = retainedHasObservationAuthority && !nextHasObservationAuthority ? retained : next;
       const fallback = preferred === retained ? next : retained;
+      const observationKey = (candidate: SourceLink) =>
+        candidate.sourceObservationId
+        ?? candidate.capture?.collectedAt
+        ?? candidate.collectedAt
+        ?? "";
+      const observationsDiffer = observationKey(preferred) !== observationKey(fallback);
+      // If a later observation produced no evidence at all, retain the entire
+      // last verified observation rather than mixing its evidence with the
+      // later observation's capture metadata. A non-empty later projection is
+      // authoritative and omissions must reach the retraction gate.
+      const retainFallbackProjection = observationsDiffer
+        && !(preferred.evidence?.length)
+        && Boolean(fallback.evidence?.length)
+        && Boolean(
+          fallback.sourceDocumentId
+          && fallback.sourceDocumentVersionId
+          && fallback.sourceObservationId,
+        );
+      const selected = retainFallbackProjection ? fallback : preferred;
+      const alternate = selected === preferred ? fallback : preferred;
+      const sameObservationProjection = selected.sourceDocumentId === alternate.sourceDocumentId
+        && selected.sourceDocumentVersionId === alternate.sourceDocumentVersionId
+        && observationKey(selected) === observationKey(alternate);
+      const mergedEvidence = (
+        sameObservationProjection
+          ? mergeEvidence(selected.evidence, alternate.evidence)
+          : selected.evidence?.map((evidence) => structuredClone(evidence))
+      )
+        ?.filter((evidence) =>
+          evidence.sourceDocumentId === selected.sourceDocumentId
+          && evidence.sourceDocumentVersionId === selected.sourceDocumentVersionId);
       result[existingIndex] = {
-        ...fallback,
-        ...preferred,
+        ...alternate,
+        ...selected,
         // A collector may rediscover the same source while temporarily
         // failing to extract its evidence. Both `undefined` and an empty
         // projection mean "no new evidence observed", not authorization to
         // erase immutable evidence. Explicit removals are applied later from
         // an audited EvidenceRetractionRequest.
-        // A non-empty collector projection can still be partial. Preserve
-        // omitted immutable evidence items while allowing a new version of the
-        // same evidence anchor to replace its predecessor. Actual removals are
-        // applied only from scoped EvidenceRetractionRequests below this merge.
-        evidence: mergeEvidence(preferred.evidence, fallback.evidence),
-        capture: preferred.capture ?? fallback.capture,
+        // Evidence from the exact same immutable observation can be merged.
+        // Across observations, a non-empty projection stands alone so omitted
+        // evidence is treated as a removal and requires scoped authorization.
+        // A canonical-URL alias can migrate to a different document identity.
+        // Never attach evidence or a capture from that old parent to the new
+        // SourceLink; any resulting removal remains subject to the explicit
+        // evidence-retraction gate.
+        evidence: mergedEvidence,
+        capture: selected.capture
+          ?? (sameObservationProjection ? alternate.capture : undefined),
       };
     }
     return result;
@@ -398,32 +467,90 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
   // the immutable `event_version_sources` rows. Existing sources retain their
   // authoritative positions; genuinely new sources are appended in the order
   // first observed for the new version.
+  const availableEvidenceVersions = new Set(
+    sources.flatMap((source) =>
+      (source.evidence ?? []).map((evidence) => evidenceVersionIdentity(evidence))),
+  );
+  const normalizeClaimEvidence = (
+    claim: NonNullable<Headline["claims"]>[number],
+  ): NonNullable<Headline["claims"]>[number] => {
+    const citations = claim.citations
+      .filter((citation) =>
+        availableEvidenceVersions.has(evidenceVersionIdentity(citation)))
+      .map((citation, order) => ({ ...structuredClone(citation), order }));
+    const hasAvailableSupport = citations.some((citation) =>
+      citation.relation === "supports"
+      && citation.confidence > 0
+      && citation.locatorStatus !== "unavailable"
+      && citation.directness !== "unavailable");
+    const hasDirectExactSupport = citations.some((citation) =>
+      citation.relation === "supports"
+      && citation.confidence > 0
+      && citation.locatorStatus === "exact"
+      && citation.directness === "direct");
+    const hasActiveContradiction = citations.some((citation) =>
+      citation.relation === "contradicts"
+      && citation.confidence > 0
+      && citation.locatorStatus !== "unavailable"
+      && citation.directness !== "unavailable");
+    let verificationStatus = claim.verificationStatus;
+    if (
+      (verificationStatus === "supported" || verificationStatus === "partially_supported")
+      && !hasAvailableSupport
+    ) {
+      verificationStatus = "pending_confirmation";
+    } else if (
+      verificationStatus === "supported"
+      && (!hasDirectExactSupport || hasActiveContradiction)
+    ) {
+      verificationStatus = "partially_supported";
+    }
+    return {
+      ...structuredClone(claim),
+      citations,
+      verificationStatus,
+    };
+  };
+  const claims = [
+    ...(previous.claims ?? []).filter((claim) => {
+      if ((incoming.claims ?? []).some((candidate) => candidate.claimKey === claim.claimKey)) return false;
+      // When the incoming revision has an explicit claim projection, absence
+      // of a page-field claim means the corresponding field was removed. Do
+      // not resurrect stale evidence from the previous event version.
+      return incoming.claims === undefined || !isManagedPageClaim(claim.claimKey);
+    }),
+    ...(incoming.claims ?? []).map((claim) => {
+      const prior = previous.claims?.find((candidate) =>
+        candidate.claimKey === claim.claimKey);
+      const sameAssertion = prior
+        && prior.type === claim.type
+        && prior.statement === claim.statement
+        && prior.originalStatement === claim.originalStatement;
+      if (!prior || !sameAssertion) return claim;
+      // A claim can retain earlier relationships only for the exact same
+      // assertion. Filter unavailable preferred citations before relation
+      // de-duplication so a stale current projection cannot shadow valid
+      // immutable support from the selected source observation.
+      return {
+        ...claim,
+        citations: mergeCitations(
+          claim.citations,
+          prior.citations,
+          availableEvidenceVersions,
+        ),
+      };
+    }),
+  ]
+    // Normalization also applies to changed/new assertions and unmanaged
+    // retained claims; source authority resolution may have discarded an
+    // incoming or historical evidence version in either branch.
+    .map((claim) => normalizeClaimEvidence(claim))
+    .sort((left, right) =>
+      left.ordinal - right.ordinal || left.claimKey.localeCompare(right.claimKey));
   return {
     ...structuredClone(incoming),
     sources,
-    claims: [
-      ...(previous.claims ?? []).filter((claim) => {
-        if ((incoming.claims ?? []).some((candidate) => candidate.claimKey === claim.claimKey)) return false;
-        // When the incoming revision has an explicit claim projection, absence
-        // of a page-field claim means the corresponding field was removed. Do
-        // not resurrect stale evidence from the previous event version.
-        return incoming.claims === undefined || !isManagedPageClaim(claim.claimKey);
-      }),
-      ...(incoming.claims ?? []).map((claim) => {
-        const prior = previous.claims?.find((candidate) =>
-          candidate.claimKey === claim.claimKey);
-        const sameAssertion = prior
-          && prior.type === claim.type
-          && prior.statement === claim.statement
-          && prior.originalStatement === claim.originalStatement;
-        return prior && sameAssertion
-          ? {
-              ...claim,
-              citations: mergeEvidence(claim.citations, prior.citations) ?? [],
-            }
-          : claim;
-      }),
-    ].map((claim) => structuredClone(claim)).sort((left, right) => left.ordinal - right.ordinal || left.claimKey.localeCompare(right.claimKey)),
+    claims,
     crossSourceCount: new Set(sources.map((source) => source.type)).size,
   };
 }

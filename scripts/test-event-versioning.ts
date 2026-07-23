@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { demoBrief } from "../lib/demo-data";
 import { createStableEventIdentity, mergeRetainedEvidence } from "../lib/event-versioning";
 import { ensureRawStoryIdentity } from "../lib/source-identity";
-import { createSourceEvidence } from "../lib/source-evidence";
+import {
+  createEvidenceCitation,
+  createHeadlineClaim,
+  createSourceEvidence,
+  validateHeadlineEvidence,
+} from "../lib/source-evidence";
 import type { DailyBrief, Headline, RawStory, SourceLink } from "../lib/types";
 
 delete process.env.DATABASE_URL;
@@ -176,6 +181,389 @@ assert.deepEqual(
 );
 assert.equal(reverseAliasMerged.sources[0].sourceDocumentVersionId, currentWire.sourceDocumentVersionId);
 assert.equal(reverseAliasMerged.sources[0].sourceObservationId, currentWire.sourceObservationId);
+
+const legacyEvidence = createSourceEvidence({
+  sourceDocumentId: legacyWire.sourceDocumentId!,
+  sourceDocumentVersionId: "00000000-0000-4000-8000-000000000004",
+  versionId: "10000000-0000-4000-8000-000000000004",
+  anchorKey: retainedEvidence.anchorKey,
+  quoteOriginal: retainedEvidence.quoteOriginal,
+  locator: retainedEvidence.locator,
+  locatorStatus: retainedEvidence.locatorStatus,
+  directness: retainedEvidence.directness,
+  captureScope: retainedEvidence.captureScope,
+  extractionMethod: retainedEvidence.extractionMethod,
+  extractorVersion: "legacy-v1",
+  capturedAt: `${date}T01:04:00.000Z`,
+});
+const evidenceAliasMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{
+      ...legacyWire,
+      sourceDocumentVersionId: legacyEvidence.sourceDocumentVersionId,
+      sourceObservationId: "obs_legacy_url_identity",
+      evidence: [legacyEvidence],
+    }],
+    claims: [],
+  }),
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [],
+  }),
+);
+assert.deepEqual(
+  evidenceAliasMerged.sources[0].evidence?.map((evidence) => evidence.sourceDocumentId),
+  [currentWire.sourceDocumentId],
+  "a canonical-URL identity migration must not attach legacy evidence to the current parent source",
+);
+assert.deepEqual(validateHeadlineEvidence(evidenceAliasMerged).issues, []);
+
+// A rediscovered assertion can add a new citation while retaining immutable
+// prior evidence. Each input projection numbers its first citation as zero;
+// the merged claim must normalize those ordinals before integrity validation.
+const newerEvidence = createSourceEvidence({
+  sourceDocumentId: secondWire.sourceDocumentId!,
+  sourceDocumentVersionId: "00000000-0000-4000-8000-000000000002",
+  versionId: "10000000-0000-4000-8000-000000000002",
+  anchorKey: "test:second-wire-description",
+  quoteOriginal: "Suppliers reported additional Blackwell production capacity.",
+  locator: {
+    kind: "feed_field",
+    feedUrl: "https://another.example.com/feed.xml",
+    entryId: "blackwell-orders-rise",
+    field: "description",
+    fieldPath: "/rss/channel/item/description",
+  },
+  locatorStatus: "exact",
+  directness: "direct",
+  captureScope: "rss_entry",
+  extractionMethod: "test-fixture",
+  extractorVersion: "v1",
+  capturedAt: `${date}T01:06:00.000Z`,
+});
+const assertion = "Blackwell 订单增加";
+const retainedClaim = createHeadlineClaim({
+  claimKey: "important_information:0",
+  type: "important_information",
+  ordinal: 3,
+  statement: assertion,
+  originalStatement: assertion,
+  language: "zh-CN",
+  verificationStatus: "supported",
+  citations: [createEvidenceCitation(retainedEvidence, { order: 0 })],
+  generator: "deterministic",
+  generatorVersion: "test/v1",
+});
+const incomingClaim = createHeadlineClaim({
+  claimKey: retainedClaim.claimKey,
+  type: retainedClaim.type,
+  ordinal: retainedClaim.ordinal,
+  statement: assertion,
+  originalStatement: assertion,
+  language: "zh-CN",
+  verificationStatus: "supported",
+  citations: [createEvidenceCitation(newerEvidence, { order: 0 })],
+  generator: "deterministic",
+  generatorVersion: "test/v1",
+});
+const citationOrderMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [retainedClaim],
+  }),
+  headline({
+    sources: [
+      { ...currentWire, evidence: [retainedEvidence] },
+      { ...secondWire, evidence: [newerEvidence] },
+    ],
+    claims: [incomingClaim],
+  }),
+);
+assert.deepEqual(
+  citationOrderMerged.claims?.[0].citations.map((citation) => citation.order),
+  [0, 1],
+  "merged current and retained citations must have contiguous claim-local order",
+);
+assert.deepEqual(
+  validateHeadlineEvidence(citationOrderMerged).issues,
+  [],
+  "retained evidence must remain publishable after citation-order normalization",
+);
+
+const contextualRetainedClaim = createHeadlineClaim({
+  ...retainedClaim,
+  verificationStatus: "pending_confirmation",
+  citations: [createEvidenceCitation(retainedEvidence, {
+    relation: "context",
+    order: 0,
+  })],
+});
+const supportingIncomingClaim = createHeadlineClaim({
+  ...retainedClaim,
+  citations: [createEvidenceCitation(retainedEvidence, {
+    relation: "supports",
+    order: 0,
+  })],
+});
+const relationAwareMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [contextualRetainedClaim],
+  }),
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [supportingIncomingClaim],
+  }),
+);
+assert.deepEqual(
+  relationAwareMerged.claims?.[0].citations.map((citation) => ({
+    relation: citation.relation,
+    order: citation.order,
+  })),
+  [
+    { relation: "supports", order: 0 },
+    { relation: "context", order: 1 },
+  ],
+  "retaining one evidence relationship must not silently erase a different relation",
+);
+assert.deepEqual(validateHeadlineEvidence(relationAwareMerged).issues, []);
+
+const contradictoryRetainedClaim = createHeadlineClaim({
+  ...retainedClaim,
+  verificationStatus: "pending_confirmation",
+  citations: [createEvidenceCitation(retainedEvidence, {
+    relation: "contradicts",
+    order: 0,
+  })],
+});
+const contradictionAwareMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [contradictoryRetainedClaim],
+  }),
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [supportingIncomingClaim],
+  }),
+);
+assert.equal(
+  contradictionAwareMerged.claims?.[0].verificationStatus,
+  "partially_supported",
+  "active retained contradiction must prevent a merged claim from remaining fully supported",
+);
+assert.deepEqual(validateHeadlineEvidence(contradictionAwareMerged).issues, []);
+
+const revisedEvidence = createSourceEvidence({
+  sourceDocumentId: currentWire.sourceDocumentId!,
+  sourceDocumentVersionId: "00000000-0000-4000-8000-000000000003",
+  versionId: "10000000-0000-4000-8000-000000000003",
+  anchorKey: retainedEvidence.anchorKey,
+  quoteOriginal: "Customers increased Blackwell orders and revised their delivery schedule.",
+  locator: retainedEvidence.locator,
+  locatorStatus: retainedEvidence.locatorStatus,
+  directness: retainedEvidence.directness,
+  captureScope: retainedEvidence.captureScope,
+  extractionMethod: retainedEvidence.extractionMethod,
+  extractorVersion: "v2",
+  capturedAt: `${date}T01:07:00.000Z`,
+});
+assert.equal(revisedEvidence.id, retainedEvidence.id);
+const unsupportedIncomingClaim = createHeadlineClaim({
+  ...retainedClaim,
+  verificationStatus: "pending_confirmation",
+  citations: [],
+});
+const revisedEvidenceMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [retainedClaim],
+  }),
+  headline({
+    sources: [{
+      ...currentWire,
+      sourceDocumentVersionId: revisedEvidence.sourceDocumentVersionId,
+      evidence: [revisedEvidence],
+    }],
+    claims: [unsupportedIncomingClaim],
+  }),
+);
+assert.deepEqual(
+  revisedEvidenceMerged.claims?.[0].citations,
+  [],
+  "a prior citation must not dangle after its exact source evidence version is superseded",
+);
+assert.equal(
+  revisedEvidenceMerged.claims?.[0].verificationStatus,
+  "pending_confirmation",
+  "a claim without remaining publishable support must be downgraded",
+);
+assert.deepEqual(validateHeadlineEvidence(revisedEvidenceMerged).issues, []);
+
+const recapturedAt = `${date}T01:15:00.000Z`;
+const emptyRecaptureMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [],
+  }),
+  headline({
+    sources: [{
+      ...currentWire,
+      sourceObservationId: "obs_current_feed_identity_recaptured",
+      collectedAt: recapturedAt,
+      evidence: [],
+    }],
+    claims: [],
+  }),
+);
+assert.equal(
+  emptyRecaptureMerged.sources[0].sourceObservationId,
+  currentWire.sourceObservationId,
+  "an empty recapture must retain the entire last verified source observation",
+);
+assert.equal(emptyRecaptureMerged.sources[0].collectedAt, currentWire.collectedAt);
+assert.equal(emptyRecaptureMerged.sources[0].evidence?.[0].versionId, retainedEvidence.versionId);
+assert.deepEqual(validateHeadlineEvidence(emptyRecaptureMerged).issues, []);
+
+const recapturedEvidence = createSourceEvidence({
+  sourceDocumentId: currentWire.sourceDocumentId!,
+  sourceDocumentVersionId: currentWire.sourceDocumentVersionId!,
+  versionId: "10000000-0000-4000-8000-000000000005",
+  anchorKey: "test:recaptured-supplier-detail",
+  quoteOriginal: "A later observation added a supplier delivery detail.",
+  locator: retainedEvidence.locator,
+  locatorStatus: retainedEvidence.locatorStatus,
+  directness: retainedEvidence.directness,
+  captureScope: retainedEvidence.captureScope,
+  extractionMethod: retainedEvidence.extractionMethod,
+  extractorVersion: "recapture-v1",
+  capturedAt: recapturedAt,
+});
+const partialRecaptureMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [],
+  }),
+  headline({
+    sources: [{
+      ...currentWire,
+      sourceObservationId: "obs_current_feed_identity_recaptured",
+      collectedAt: recapturedAt,
+      evidence: [recapturedEvidence],
+    }],
+    claims: [],
+  }),
+);
+assert.deepEqual(
+  partialRecaptureMerged.sources[0].evidence?.map((evidence) => evidence.versionId),
+  [recapturedEvidence.versionId],
+  "a non-empty later observation must not mix omitted evidence from an earlier capture",
+);
+assert.deepEqual(validateHeadlineEvidence(partialRecaptureMerged).issues, []);
+
+const stalePreferredClaim = createHeadlineClaim({
+  ...retainedClaim,
+  citations: [createEvidenceCitation(revisedEvidence, { order: 0 })],
+});
+const stalePreferredMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [retainedClaim],
+  }),
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [stalePreferredClaim],
+  }),
+);
+assert.equal(
+  stalePreferredMerged.claims?.[0].citations[0].versionId,
+  retainedEvidence.versionId,
+  "an unavailable preferred citation must not shadow valid retained support",
+);
+assert.deepEqual(validateHeadlineEvidence(stalePreferredMerged).issues, []);
+
+const indirectEvidence = createSourceEvidence({
+  sourceDocumentId: currentWire.sourceDocumentId!,
+  sourceDocumentVersionId: currentWire.sourceDocumentVersionId!,
+  versionId: "10000000-0000-4000-8000-000000000006",
+  anchorKey: "test:indirect-guidance",
+  quoteOriginal: "A supplier said the order trend could imply stronger demand.",
+  locator: retainedEvidence.locator,
+  locatorStatus: "exact",
+  directness: "indirect",
+  captureScope: retainedEvidence.captureScope,
+  extractionMethod: retainedEvidence.extractionMethod,
+  extractorVersion: "indirect-v1",
+  capturedAt: retainedEvidence.capturedAt,
+});
+const revisedDirectEvidence = createSourceEvidence({
+  sourceDocumentId: currentWire.sourceDocumentId!,
+  sourceDocumentVersionId: revisedEvidence.sourceDocumentVersionId!,
+  versionId: "10000000-0000-4000-8000-000000000007",
+  anchorKey: indirectEvidence.anchorKey,
+  quoteOriginal: "The company directly confirmed stronger demand.",
+  locator: retainedEvidence.locator,
+  locatorStatus: "exact",
+  directness: "direct",
+  captureScope: retainedEvidence.captureScope,
+  extractionMethod: retainedEvidence.extractionMethod,
+  extractorVersion: "direct-v2",
+  capturedAt: revisedEvidence.capturedAt,
+});
+assert.equal(revisedDirectEvidence.id, indirectEvidence.id);
+const partiallyRetainedClaim = createHeadlineClaim({
+  ...retainedClaim,
+  verificationStatus: "partially_supported",
+  citations: [createEvidenceCitation(indirectEvidence, { order: 0 })],
+});
+const unavailableDirectClaim = createHeadlineClaim({
+  ...retainedClaim,
+  verificationStatus: "supported",
+  citations: [createEvidenceCitation(revisedDirectEvidence, { order: 0 })],
+});
+const indirectFallbackMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{ ...currentWire, evidence: [indirectEvidence] }],
+    claims: [partiallyRetainedClaim],
+  }),
+  headline({
+    sources: [{ ...currentWire, evidence: [indirectEvidence] }],
+    claims: [unavailableDirectClaim],
+  }),
+);
+assert.equal(indirectFallbackMerged.claims?.[0].citations[0].versionId, indirectEvidence.versionId);
+assert.equal(
+  indirectFallbackMerged.claims?.[0].verificationStatus,
+  "partially_supported",
+  "supported must downgrade when only indirect support remains",
+);
+assert.deepEqual(validateHeadlineEvidence(indirectFallbackMerged).issues, []);
+
+const changedAssertion = "Blackwell 订单增速仍有待确认";
+const changedAssertionClaim = createHeadlineClaim({
+  ...retainedClaim,
+  statement: changedAssertion,
+  originalStatement: changedAssertion,
+  statementHash: undefined,
+  verificationStatus: "supported",
+  citations: [createEvidenceCitation(revisedEvidence, { order: 0 })],
+});
+const changedAssertionMerged = mergeRetainedEvidence(
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [retainedClaim],
+  }),
+  headline({
+    sources: [{ ...currentWire, evidence: [retainedEvidence] }],
+    claims: [changedAssertionClaim],
+  }),
+);
+assert.deepEqual(changedAssertionMerged.claims?.[0].citations, []);
+assert.equal(changedAssertionMerged.claims?.[0].verificationStatus, "pending_confirmation");
+assert.deepEqual(
+  validateHeadlineEvidence(changedAssertionMerged).issues,
+  [],
+  "changed assertions must also discard dangling citations and normalize verification",
+);
 
 function brief(generatedAt: string, item: Headline): DailyBrief {
   return {
