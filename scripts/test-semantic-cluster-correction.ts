@@ -3,9 +3,11 @@ import { readFile } from "node:fs/promises";
 import {
   assertSemanticClusterCorrectionVersionsCurrent,
   deriveSemanticClusterCorrectionRetractions,
+  rebuildPublishedBriefWithCurrentClustering,
   SemanticClusterCorrectionError,
   type SemanticClusterCorrectionAuthorization,
 } from "../lib/semantic-cluster-correction";
+import { createSourceEvidence } from "../lib/source-evidence";
 import type {
   BriefRecord,
   DailyBrief,
@@ -200,6 +202,54 @@ assert.deepEqual(
   ],
   "source removal must create exact evidence-scoped requests against the published event version",
 );
+
+const replayAuthority = structuredClone(published);
+replayAuthority.brief.headlines[0].sources[0].originalTitle = "Tesla reports quarterly earnings";
+replayAuthority.brief.headlines[0].sources[1].originalTitle = "Google raises AI capital spending";
+replayAuthority.brief.headlines[0].sources[2].originalTitle = "Apple unveils iPhone";
+replayAuthority.brief.headlines[0].sources[3].originalTitle = "Micron reports quarterly earnings";
+for (const [index, replaySource] of replayAuthority.brief.headlines[0].sources.entries()) {
+  const quote = replaySource.originalTitle!;
+  replaySource.evidence = [{
+    ...createSourceEvidence({
+      sourceDocumentId: replaySource.sourceDocumentId!,
+      anchorKey: `feed:title:${index}`,
+      quoteOriginal: quote,
+      locator: {
+        kind: "feed_field",
+        feedUrl: "https://sources.example/feed.xml",
+        entryId: `entry-${index}`,
+        field: "title",
+        fieldPath: `rss.channel.item[${index}].title`,
+      },
+      locatorStatus: "exact",
+      directness: "direct",
+      captureScope: "rss_entry",
+      extractionMethod: "test",
+      extractorVersion: "test/v1",
+      capturedAt: generatedAt,
+    }),
+    versionId: `replay-evidence-version-${index}`,
+    sourceDocumentVersionId: replaySource.sourceDocumentVersionId,
+  }];
+}
+const replayed = rebuildPublishedBriefWithCurrentClustering(replayAuthority, generatedAt);
+assert.equal(replayed.date, published.date);
+assert.equal(replayed.status, "draft");
+assert.equal(replayed.snapshot, undefined);
+assert.equal(replayed.id, undefined);
+assert.equal(replayed.headlines[0].rank, publishedHeadline.rank);
+assert.deepEqual(
+  replayed.headlines[0].sources.map((item) => item.sourceDocumentId),
+  ["doc-primary"],
+  "current complete-linkage clustering must remove unrelated published secondary sources",
+);
+assert.equal(
+  replayed.stats.consolidatedEvents,
+  published.brief.stats.consolidatedEvents + 3,
+  "split source groups must be reflected in consolidated event counts",
+);
+assert.ok(replayed.warning?.includes("没有引入新来源"));
 assert.ok(requests.every((request) => request.reasonCode === "review_rejected"));
 assert.ok(requests.every((request) => request.reasonNote.includes("管理员逐项确认")));
 assert.ok(

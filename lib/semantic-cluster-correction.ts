@@ -1,10 +1,14 @@
 import { canonicalizeSourceUrl } from "./source-identity";
 import { canonicalEvidenceJson, sha256ExactUtf8 } from "./source-evidence";
+import { clusterStories, headlineFromGroup } from "./pipeline";
 import type {
   BriefRecord,
+  Category,
   DailyBrief,
   EvidenceRetractionRequest,
   Headline,
+  MarketHeat,
+  RawStory,
   SourceLink,
 } from "./types";
 
@@ -28,6 +32,8 @@ export type SemanticClusterCorrectionErrorCode =
   | "AMBIGUOUS_PRIMARY_SOURCE"
   | "DUPLICATE_PRIMARY_MATCH"
   | "PUBLISHED_EVENT_VERSION_REQUIRED"
+  | "PUBLISHED_SOURCE_AUTHORITY_REQUIRED"
+  | "CORRECTION_PRIMARY_CHANGED"
   | "UNVERSIONED_SECONDARY_EVIDENCE"
   | "CORRECTION_NO_RETRACTIONS"
   | "STALE_EVENT_VERSION";
@@ -62,6 +68,143 @@ function sameSourceIdentity(left: SourceLink, right: SourceLink): boolean {
   const leftKeys = sourceIdentityKeys(left);
   const rightKeys = sourceIdentityKeys(right);
   return [...leftKeys].some((key) => rightKeys.has(key));
+}
+
+function publishedSourceAsStory(
+  headline: Headline,
+  source: SourceLink,
+  generatedAt: string,
+): RawStory {
+  if (
+    !source.sourceDocumentId
+    || !source.sourceDocumentVersionId
+    || !source.sourceObservationId
+    || !(source.evidence?.length)
+    || source.evidence.some((item) => !item.versionId)
+  ) {
+    fail(
+      "PUBLISHED_SOURCE_AUTHORITY_REQUIRED",
+      `正式事件 ${headline.id} 的来源「${source.name}」缺少不可变文件、观察或证据版本`,
+    );
+  }
+  const titleEvidence = source.evidence.find((item) =>
+    /(?:^|:)(?:title|headline)(?:$|:)/i.test(item.anchorKey));
+  const bodyEvidence = source.evidence.find((item) =>
+    /(?:^|:)(?:body|description|summary)(?:$|:)/i.test(item.anchorKey));
+  const title = source.originalTitle?.trim()
+    || titleEvidence?.quoteOriginal?.trim()
+    || headline.title;
+  const description = bodyEvidence?.quoteOriginal?.trim()
+    || source.evidence.find((item) => item.quoteOriginal?.trim())?.quoteOriginal?.trim()
+    || title;
+  const publishedAt = source.publishedAt ?? headline.publishedAt ?? generatedAt;
+  const collectedAt = source.collectedAt ?? source.capture?.collectedAt ?? generatedAt;
+  return {
+    id: source.nativeId ?? source.sourceDocumentId,
+    sourceDocumentId: source.sourceDocumentId,
+    nativeId: source.nativeId,
+    feedNamespace: source.feedNamespace,
+    canonicalUrl: source.canonicalUrl ?? source.url,
+    title,
+    originalTitle: source.originalTitle ?? title,
+    description,
+    originalDescription: description,
+    url: source.url,
+    publishedAt,
+    originalPublishedAt: source.originalPublishedAt,
+    publishedAtRaw: source.publishedAtRaw,
+    publishedAtField: source.publishedAtField,
+    sourceUpdatedAt: source.sourceUpdatedAt,
+    source: source.name,
+    sourceType: source.type,
+    collectedAt,
+    firstCollectedAt: collectedAt,
+    lastCollectedAt: collectedAt,
+    contentHash: source.contentHash,
+    timestampKind: source.timestampKind ?? "published",
+    sourceDocumentVersionId: source.sourceDocumentVersionId,
+    sourceObservationId: source.sourceObservationId,
+    capture: source.capture,
+    evidence: source.evidence,
+  };
+}
+
+function correctedMarketHeat(headlines: Headline[]): MarketHeat[] {
+  return (["AI", "Semiconductor", "Macro", "Crypto", "Geopolitics"] as Category[])
+    .map((category) => {
+      const matches = headlines.filter((headline) => headline.category === category);
+      const score = matches.length
+        ? Math.max(1, Math.min(5, Math.round(
+            matches.reduce((sum, item) => sum + item.impact, 0) / matches.length,
+          )))
+        : 1;
+      const positive = matches.filter((item) => item.sentiment === "positive").length;
+      const negative = matches.filter((item) => item.sentiment === "negative").length;
+      return {
+        category,
+        score,
+        direction: positive > negative ? "up" as const : negative > positive ? "down" as const : "flat" as const,
+        note: matches.length ? `${matches.length} 个事件通过分类配额` : "暂无高信心事件",
+      };
+    });
+}
+
+/**
+ * Replays the exact immutable sources from a published brief through the
+ * current deterministic cluster invariant. This is the bounded fallback for a
+ * same-day correction when a dynamic feed no longer ranks the old primary
+ * event in the live top eight. It never introduces a new source and preserves
+ * headlines whose source set remains valid.
+ */
+export function rebuildPublishedBriefWithCurrentClustering(
+  published: BriefRecord,
+  generatedAt = new Date().toISOString(),
+): DailyBrief {
+  if (published.status !== "published" || !published.brief.snapshot?.id) {
+    fail("PUBLISHED_AUTHORITY_REQUIRED", "只有带不可变快照的当前正式日报可以重放聚类");
+  }
+  let additionalEvents = 0;
+  const headlines = published.brief.headlines.map((headline, index) => {
+    const publishedPrimary = exactPrimary(headline, `正式日报第 ${index + 1} 则头条`);
+    const stories = headline.sources.map((source) =>
+      publishedSourceAsStory(headline, source, generatedAt));
+    const groups = clusterStories(stories);
+    const primaryGroup = groups.find((group) => group.some((story) =>
+      sourceIdentityKeys(publishedPrimary).has(`document:${story.sourceDocumentId}`)
+      || sourceIdentityKeys(publishedPrimary).has(`url:${canonicalizeSourceUrl(story.canonicalUrl || story.url)}`)));
+    if (!primaryGroup) {
+      fail("CORRECTION_PRIMARY_CHANGED", `无法在重放结果中定位正式事件 ${headline.id} 的 primary source`);
+    }
+    additionalEvents += Math.max(0, groups.length - 1);
+    if (primaryGroup.length === stories.length) return structuredClone(headline);
+    const rebuilt = headlineFromGroup(primaryGroup);
+    const rebuiltPrimary = exactPrimary(rebuilt, `重放后的正式事件 ${headline.id}`);
+    if (!sameSourceIdentity(publishedPrimary, rebuiltPrimary)) {
+      fail("CORRECTION_PRIMARY_CHANGED", `重放后的事件 ${headline.id} 改变了 primary source，禁止自动更正`);
+    }
+    return { ...rebuilt, rank: headline.rank };
+  });
+
+  const brief = structuredClone(published.brief);
+  delete brief.id;
+  delete brief.publishedAt;
+  delete brief.snapshot;
+  delete brief.storageMode;
+  brief.status = "draft";
+  brief.generatedAt = generatedAt;
+  brief.mode = "live";
+  brief.headlines = headlines;
+  brief.stats = {
+    ...brief.stats,
+    consolidatedEvents: brief.stats.consolidatedEvents + additionalEvents,
+    topStories: headlines.length,
+  };
+  brief.marketHeat = correctedMarketHeat(headlines);
+  brief.warning = [
+    brief.warning,
+    "本更正稿只重放已发布快照中的不可变来源，并以当前实体、事件谓词及完整链接规则拆除错误聚类；没有引入新来源。",
+  ].filter(Boolean).join(" ");
+  return brief;
 }
 
 function exactPrimary(headline: Headline, context: string): SourceLink {

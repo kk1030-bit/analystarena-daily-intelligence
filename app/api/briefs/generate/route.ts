@@ -3,12 +3,15 @@ import { adminAuditActor, adminConfigured, isAdminRequest } from "@/lib/auth";
 import { safeCollectorNote } from "@/lib/collectors/router";
 import { safeRemoteStories } from "@/lib/collectors/remote";
 import { getLatestPublished, listEventVersions, saveDraft, storageMode } from "@/lib/db";
+import { attachEquityImpacts } from "@/lib/equity-impact";
 import { buildLiveBrief } from "@/lib/pipeline";
 import {
   assertSemanticClusterCorrectionVersionsCurrent,
   deriveSemanticClusterCorrectionRetractions,
+  rebuildPublishedBriefWithCurrentClustering,
   SemanticClusterCorrectionError,
 } from "@/lib/semantic-cluster-correction";
+import { localizeBriefContent } from "@/lib/translation";
 import type { SemanticClusterCorrectionAuthorization } from "@/lib/semantic-cluster-correction";
 import type { CollectorStatus, EvidenceRetractionRequest } from "@/lib/types";
 
@@ -23,6 +26,7 @@ interface GenerateCorrectionInput {
   expectedPublishedBriefId?: unknown;
   expectedPublishedSnapshotId?: unknown;
   expectedPublishedPayloadHash?: unknown;
+  rebuildPublishedClusters?: boolean;
 }
 
 function correctionAuthorization(input: GenerateCorrectionInput): SemanticClusterCorrectionAuthorization {
@@ -88,22 +92,34 @@ export async function POST(request: Request) {
       statuses?: unknown;
       semanticClusterCorrection?: GenerateCorrectionInput;
     };
-    const seedStories = safeRemoteStories(body.stories);
-    const brief = await buildLiveBrief({
-      useAi: body.useAi !== false,
-      useBrowserCollectors: process.env.NODE_ENV !== "production" && body.useBrowserCollectors !== false,
-      strictTranslation: false,
-      seedStories,
-      seedCollectorStatuses: safeCollectorStatuses(body.statuses),
-    });
     const correction = body.semanticClusterCorrection;
+    const published = correction?.enabled === true ? await getLatestPublished() : null;
+    if (correction?.enabled === true && !published) {
+      return NextResponse.json({ error: "当前没有可作为更正基线的正式日报" }, { status: 409 });
+    }
+    const seedStories = safeRemoteStories(body.stories);
+    let brief = correction?.enabled === true
+      && correction.rebuildPublishedClusters === true
+      && published
+      ? rebuildPublishedBriefWithCurrentClustering(published)
+      : await buildLiveBrief({
+          useAi: body.useAi !== false,
+          useBrowserCollectors: process.env.NODE_ENV !== "production" && body.useBrowserCollectors !== false,
+          strictTranslation: false,
+          seedStories,
+          seedCollectorStatuses: safeCollectorStatuses(body.statuses),
+        });
+    if (correction?.enabled === true && correction.rebuildPublishedClusters === true) {
+      brief = await localizeBriefContent(brief, { strict: false });
+      brief = {
+        ...brief,
+        headlines: await attachEquityImpacts(brief.headlines),
+      };
+    }
     let evidenceRetractions: EvidenceRetractionRequest[] | undefined;
     let actor: ReturnType<typeof adminAuditActor> | undefined;
     if (correction?.enabled === true) {
-      const published = await getLatestPublished();
-      if (!published) {
-        return NextResponse.json({ error: "当前没有可作为更正基线的正式日报" }, { status: 409 });
-      }
+      if (!published) throw new Error("Published correction authority disappeared");
       const authorization = correctionAuthorization(correction);
       evidenceRetractions = deriveSemanticClusterCorrectionRetractions(
         published,
