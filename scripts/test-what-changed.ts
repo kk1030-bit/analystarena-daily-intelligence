@@ -325,6 +325,24 @@ const rankDown = compareSnapshotEvent({
 });
 assert.equal(rankDown.items.some((change) => change.kind === "rank_down"), true);
 assert.equal(rankDown.rankDelta, -3);
+const legacyRankContext = compareSnapshotEvent({
+  baselineKind: "previous_observation",
+  baselineSnapshotId: previousSnapshot.snapshotId,
+  baselineEvent: previousSnapshot,
+  current: currentSnapshot,
+  currentSnapshotId: currentSnapshot.snapshotId,
+  comparedAt: "2026-07-23T03:30:00.000Z",
+  legacyUnverified: true,
+  contentComparison: changed,
+});
+assert.equal(legacyRankContext.status, "legacy_unverified");
+assert.equal(
+  legacyRankContext.previousRank,
+  previousSnapshot.rank,
+  "legacy comparison keeps the immutable prior rank as historical context",
+);
+assert.equal(legacyRankContext.rankDelta, undefined);
+assert.equal(legacyRankContext.rankMovement, "not_comparable");
 const entered = compareSnapshotEvent({
   baselineKind: "previous_published",
   baselineSnapshotId: "snapshot_published",

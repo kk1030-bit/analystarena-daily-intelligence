@@ -2600,6 +2600,102 @@ assert.equal(
   "the serialized snapshot clock must remain strictly monotonic across wall-clock rollback",
 );
 
+// A legacy event version keeps the immutable prior rank as context, while the
+// comparison remains explicitly non-comparable. This is the exact shape that
+// production generated from pre-audit snapshots on 7/23.
+const legacyRankMigrationSql = await readFile(
+  new URL("../db/migrations/20260723_what_changed_legacy_rank.sql", import.meta.url),
+  "utf8",
+);
+await raw.query(legacyRankMigrationSql);
+await raw.query(legacyRankMigrationSql);
+await raw.query(`
+  INSERT INTO comparison_algorithms (version, implementation_hash, config)
+  VALUES
+    ('schema-test/legacy-rank', $1, '{"schema":"schema-test/legacy-rank"}'::jsonb),
+    ('schema-test/missing-delta', $1, '{"schema":"schema-test/missing-delta"}'::jsonb),
+    ('schema-test/legacy-without-baseline', $1, '{"schema":"schema-test/legacy-without-baseline"}'::jsonb)
+`, ["7".repeat(64)]);
+const insertedLegacyRankShape = await raw.query(`
+  INSERT INTO brief_snapshot_event_changes (
+    current_snapshot_id, event_id, current_event_version_id, baseline_kind,
+    baseline_snapshot_id, baseline_event_id, baseline_event_version_id,
+    historical_observation_snapshot_id, historical_observation_event_id,
+    historical_observation_event_version_id, presence, previous_rank,
+    current_rank, rank_delta, rank_movement, status, algorithm_version,
+    input_hash, result_hash, summary, compared_at
+  )
+  SELECT
+    current_snapshot_id, event_id, current_event_version_id, baseline_kind,
+    baseline_snapshot_id, baseline_event_id, baseline_event_version_id,
+    historical_observation_snapshot_id, historical_observation_event_id,
+    historical_observation_event_version_id, presence, previous_rank,
+    current_rank, NULL, 'not_comparable', 'legacy_unverified',
+    'schema-test/legacy-rank', 'legacy-rank-input', 'legacy-rank-result',
+    'legacy rank remains contextual and non-comparable', compared_at
+  FROM brief_snapshot_event_changes
+  WHERE previous_rank IS NOT NULL
+    AND rank_movement IN ('up', 'down', 'unchanged')
+  ORDER BY compared_at
+  LIMIT 1
+  RETURNING previous_rank, current_rank, rank_delta, rank_movement, status
+`);
+assert.equal(
+  insertedLegacyRankShape.rowCount,
+  1,
+  "PostgreSQL must accept the fail-closed legacy rank shape emitted by compareSnapshotEvent",
+);
+await assert.rejects(
+  () => raw.query(`
+    INSERT INTO brief_snapshot_event_changes (
+      current_snapshot_id, event_id, current_event_version_id, baseline_kind,
+      baseline_snapshot_id, baseline_event_id, baseline_event_version_id,
+      historical_observation_snapshot_id, historical_observation_event_id,
+      historical_observation_event_version_id, presence, previous_rank,
+      current_rank, rank_delta, rank_movement, status, algorithm_version,
+      input_hash, result_hash, summary, compared_at
+    )
+    SELECT
+      current_snapshot_id, event_id, current_event_version_id, baseline_kind,
+      baseline_snapshot_id, baseline_event_id, baseline_event_version_id,
+      historical_observation_snapshot_id, historical_observation_event_id,
+      historical_observation_event_version_id, presence, previous_rank,
+      current_rank, NULL, 'up', 'changed', 'schema-test/missing-delta',
+      'missing-delta-input', 'missing-delta-result',
+      'invalid ordinary rank without a delta', compared_at
+    FROM brief_snapshot_event_changes
+    WHERE algorithm_version = 'schema-test/legacy-rank'
+    LIMIT 1
+  `),
+  (error: unknown) => (error as { code?: string }).code === "23514",
+  "ordinary rank movement must never pass PostgreSQL with a NULL delta",
+);
+await assert.rejects(
+  () => raw.query(`
+    INSERT INTO brief_snapshot_event_changes (
+      current_snapshot_id, event_id, current_event_version_id, baseline_kind,
+      baseline_snapshot_id, baseline_event_id, baseline_event_version_id,
+      historical_observation_snapshot_id, historical_observation_event_id,
+      historical_observation_event_version_id, presence, previous_rank,
+      current_rank, rank_delta, rank_movement, status, algorithm_version,
+      input_hash, result_hash, summary, compared_at
+    )
+    SELECT
+      current_snapshot_id, event_id, current_event_version_id, baseline_kind,
+      NULL, event_id, '00000000-0000-0000-0000-000000000999'::uuid,
+      NULL, NULL, NULL, 'continued', previous_rank,
+      current_rank, NULL, 'not_comparable', 'legacy_unverified',
+      'schema-test/legacy-without-baseline', 'legacy-no-baseline-input',
+      'legacy-no-baseline-result',
+      'invalid legacy rank without an exact baseline snapshot', compared_at
+    FROM brief_snapshot_event_changes
+    WHERE algorithm_version = 'schema-test/legacy-rank'
+    LIMIT 1
+  `),
+  (error: unknown) => (error as { code?: string }).code === "23514",
+  "legacy previous_rank must be anchored to an exact baseline snapshot row, not a MATCH SIMPLE partial key",
+);
+
 const auditTables = [
   "comparison_algorithms",
   "event_version_comparisons",
