@@ -477,12 +477,19 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
         ?? candidate.collectedAt
         ?? "";
       const observationsDiffer = observationKey(preferred) !== observationKey(fallback);
-      // If a later observation produced no evidence at all, retain the entire
-      // last verified observation rather than mixing its evidence with the
-      // later observation's capture metadata. A non-empty later projection is
-      // authoritative and omissions must reach the retraction gate.
+      const preferredEvidenceIds = new Set(
+        (preferred.evidence ?? []).map(evidenceIdentity),
+      );
+      const omitsFallbackEvidence = (fallback.evidence ?? []).some((evidence) =>
+        !preferredEvidenceIds.has(evidenceIdentity(evidence)));
+      // Absence from a later scrape is not proof that a publisher retracted
+      // evidence. If the later observation omits any previously verified
+      // anchor, retain the entire prior projection rather than manufacturing a
+      // removal or mixing capture metadata across observations. A reviewed
+      // EvidenceRetractionRequest remains the only removal authority.
       const retainFallbackProjection = observationsDiffer
-        && !(preferred.evidence?.length)
+        && preferred.sourceDocumentId === fallback.sourceDocumentId
+        && omitsFallbackEvidence
         && Boolean(fallback.evidence?.length)
         && Boolean(
           fallback.sourceDocumentId
@@ -511,8 +518,8 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
         // erase immutable evidence. Explicit removals are applied later from
         // an audited EvidenceRetractionRequest.
         // Evidence from the exact same immutable observation can be merged.
-        // Across observations, a non-empty projection stands alone so omitted
-        // evidence is treated as a removal and requires scoped authorization.
+        // Across observations, an incomplete projection cannot erase an
+        // earlier verified anchor; explicit audited retraction is required.
         // A canonical-URL alias can migrate to a different document identity.
         // Never attach evidence or a capture from that old parent to the new
         // SourceLink; any resulting removal remains subject to the explicit
