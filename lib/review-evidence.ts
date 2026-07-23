@@ -1,4 +1,9 @@
-import { createHeadlineClaim, MANUAL_REVIEW_GENERATOR_VERSION } from "./source-evidence";
+import {
+  createEvidenceCitation,
+  createHeadlineClaim,
+  MANUAL_EVIDENCE_REBIND_GENERATOR_VERSION,
+  MANUAL_REVIEW_GENERATOR_VERSION,
+} from "./source-evidence";
 import type { DailyBrief, EquityImpactAssessment, Headline, HeadlineClaim } from "./types";
 
 const CATEGORIES = new Set<Headline["category"]>([
@@ -23,8 +28,74 @@ export interface ManualClaimConfirmation {
   method: "manual_semantic_review";
 }
 
+export interface ManualEditedClaimSupport {
+  headlineId: string;
+  claimKey: string;
+  evidenceVersionIds: string[];
+  method: "manual_evidence_rebind";
+  note: string;
+}
+
 export interface ReviewEvidenceOptions {
   manualConfirmations?: ManualClaimConfirmation[];
+  manualEditedClaimSupports?: ManualEditedClaimSupport[];
+}
+
+/**
+ * Returns only support relationships that the review console can truthfully
+ * preselect. A contradictory/context citation, an indirect citation, or a
+ * citation no longer backed by the event's exact stored evidence must require
+ * an explicit reviewer choice and must never be silently converted to support.
+ */
+export function defaultMaintainedEvidenceVersionIds(
+  headline: Headline,
+  claim: HeadlineClaim | undefined,
+): string[] {
+  if (!claim) return [];
+  const selectableEvidence = new Map(
+    headline.sources.flatMap((source) => source.evidence ?? [])
+      .filter((evidence) =>
+        evidence.versionId
+        && evidence.sourceDocumentVersionId
+        && evidence.locatorStatus === "exact"
+        && evidence.directness === "direct")
+      .map((evidence) => [evidence.versionId!, evidence]),
+  );
+  return [...new Set(claim.citations
+    .filter((citation) => {
+      if (citation.relation !== "supports"
+        || citation.confidence <= 0
+        || citation.locatorStatus !== "exact"
+        || citation.directness !== "direct"
+        || !citation.versionId
+        || !citation.sourceDocumentVersionId) {
+        return false;
+      }
+      const evidence = selectableEvidence.get(citation.versionId);
+      return Boolean(
+        evidence
+        && evidence.id === citation.id
+        && evidence.sourceDocumentId === citation.sourceDocumentId
+        && evidence.sourceDocumentVersionId === citation.sourceDocumentVersionId
+        && evidence.locatorHash === citation.locatorHash,
+      );
+    })
+    .map((citation) => citation.versionId!))];
+}
+
+/**
+ * Evidence identity alone is not enough to retain a citation relationship.
+ * In particular, changing `contradicts` or `context` to `supports` is a
+ * removal plus an explicit rebind and must create a retraction audit.
+ */
+export function reviewedClaimRetainsCitationRelationship(
+  claim: HeadlineClaim | undefined,
+  citation: HeadlineClaim["citations"][number],
+): boolean {
+  return Boolean(claim?.citations.some((candidate) =>
+    candidate.id === citation.id
+    && candidate.versionId === citation.versionId
+    && candidate.relation === citation.relation));
 }
 
 function reviewClaim(field: ClaimField): HeadlineClaim {
@@ -39,6 +110,53 @@ function reviewClaim(field: ClaimField): HeadlineClaim {
     citations: [],
     generator: "review",
     generatorVersion: "review-console/v2",
+  });
+}
+
+function reviewClaimWithSelectedEvidence(
+  field: ClaimField,
+  previousHeadline: Headline,
+  support: ManualEditedClaimSupport,
+): HeadlineClaim {
+  const selectedIds = new Set(support.evidenceVersionIds);
+  if (selectedIds.size !== support.evidenceVersionIds.length) {
+    throw new Error(`声明 ${field.claimKey} 的人工证据重绑包含重复证据`);
+  }
+  if (!selectedIds.size) return reviewClaim(field);
+  const availableEvidence = new Map(
+    previousHeadline.sources.flatMap((source) => source.evidence ?? [])
+      .filter((evidence) =>
+        evidence.versionId
+        && evidence.sourceDocumentVersionId
+        && evidence.locatorStatus === "exact"
+        && evidence.directness === "direct")
+      .map((evidence) => [evidence.versionId!, evidence]),
+  );
+  const citations = support.evidenceVersionIds.map((versionId, order) => {
+    const evidence = availableEvidence.get(versionId);
+    if (!evidence) {
+      throw new Error(`声明 ${field.claimKey} 的人工证据重绑包含不属于当前事件的精确证据`);
+    }
+    return createEvidenceCitation(structuredClone(evidence), {
+      relation: "supports",
+      confidence: 1,
+      order,
+    });
+  });
+  if (citations.length !== selectedIds.size) {
+    throw new Error(`声明 ${field.claimKey} 的人工证据重绑没有形成唯一证据集合`);
+  }
+  return createHeadlineClaim({
+    claimKey: field.claimKey,
+    type: field.type,
+    ordinal: field.ordinal,
+    statement: field.submittedValue,
+    originalStatement: field.submittedValue,
+    language: "zh-CN",
+    verificationStatus: "partially_supported",
+    citations,
+    generator: "review",
+    generatorVersion: MANUAL_EVIDENCE_REBIND_GENERATOR_VERSION,
   });
 }
 
@@ -97,6 +215,7 @@ function reconcileHeadline(
   previous: Headline,
   submitted: Headline,
   manualConfirmationKeys: Set<string>,
+  editedClaimSupports: Map<string, ManualEditedClaimSupport>,
 ): Headline {
   validateSubmittedHeadline(previous, submitted);
   const previousPoints = previous.keyPoints ?? [];
@@ -139,12 +258,27 @@ function reconcileHeadline(
     throw new Error(`事件 ${previous.id} 存在重复的声明编号，修复前不能审核`);
   }
   const previousClaims = new Map(previousClaimList.map((claim) => [claim.claimKey, claim]));
+  const consumedSupportKeys = new Set<string>();
   const managedClaims = fields.map((field) => {
     const retained = previousClaims.get(field.claimKey);
-    return retained && !field.forceReview && field.previousValue === field.submittedValue
-      ? createHeadlineClaim({ ...structuredClone(retained), ordinal: field.ordinal })
-      : reviewClaim(field);
+    const changed = Boolean(field.forceReview || field.previousValue !== field.submittedValue);
+    const selectedSupport = editedClaimSupports.get(field.claimKey);
+    if (selectedSupport) {
+      consumedSupportKeys.add(field.claimKey);
+      return reviewClaimWithSelectedEvidence(field, previous, selectedSupport);
+    }
+    if (!changed) {
+      return retained
+        ? createHeadlineClaim({ ...structuredClone(retained), ordinal: field.ordinal })
+        : reviewClaim(field);
+    }
+    return reviewClaim(field);
   });
+  for (const claimKey of editedClaimSupports.keys()) {
+    if (!consumedSupportKeys.has(claimKey)) {
+      throw new Error(`人工证据重绑包含未使用的声明 ${claimKey}`);
+    }
+  }
   const isPageFieldClaim = (claimKey: string) => claimKey === "title"
     || claimKey === "summary"
     || claimKey === "market_impact"
@@ -246,13 +380,42 @@ export function reconcileReviewedBriefEvidence(
     keys.add(confirmation.claimKey);
     confirmationsByHeadline.set(confirmation.headlineId, keys);
   }
+  const editedSupportsByHeadline = new Map<string, Map<string, ManualEditedClaimSupport>>();
+  for (const support of options.manualEditedClaimSupports ?? []) {
+    if (!support
+      || support.method !== "manual_evidence_rebind"
+      || typeof support.headlineId !== "string"
+      || !support.headlineId.trim()
+      || typeof support.claimKey !== "string"
+      || !support.claimKey.trim()
+      || !Array.isArray(support.evidenceVersionIds)
+      || support.evidenceVersionIds.some((id) => typeof id !== "string" || !id.trim())
+      || typeof support.note !== "string"
+      || !support.note.trim()) {
+      throw new Error("人工证据重绑请求格式无效");
+    }
+    if (!previousById.has(support.headlineId)) {
+      throw new Error(`人工证据重绑包含未知事件 ${support.headlineId}`);
+    }
+    const claims = editedSupportsByHeadline.get(support.headlineId) ?? new Map();
+    if (claims.has(support.claimKey)) {
+      throw new Error(`声明 ${support.claimKey} 被重复提交人工证据重绑`);
+    }
+    claims.set(support.claimKey, structuredClone(support));
+    editedSupportsByHeadline.set(support.headlineId, claims);
+  }
   const submittedById = new Map(submitted.headlines.map((headline) => [headline.id, headline]));
   return {
     ...structuredClone(previous),
     headlines: previous.headlines.map((stored) => {
       const headline = submittedById.get(stored.id);
       if (!headline) throw new Error(`审核内容缺少事件 ${stored.id}，请重新载入最新草稿`);
-      return reconcileHeadline(stored, headline, confirmationsByHeadline.get(stored.id) ?? new Set());
+      return reconcileHeadline(
+        stored,
+        headline,
+        confirmationsByHeadline.get(stored.id) ?? new Set(),
+        editedSupportsByHeadline.get(stored.id) ?? new Map(),
+      );
     }),
   };
 }

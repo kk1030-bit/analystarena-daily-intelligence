@@ -40,6 +40,7 @@ const CLAIM_GENERATORS = new Set<HeadlineClaim["generator"]>([
   "collector", "deterministic", "ai", "review", "legacy",
 ]);
 export const MANUAL_REVIEW_GENERATOR_VERSION = "review-console/manual-semantic-confirmation/v1";
+export const MANUAL_EVIDENCE_REBIND_GENERATOR_VERSION = "review-console/manual-evidence-rebind/v1";
 const CAPTURE_SCOPES = new Set<SourceCaptureScope>([
   "rss_entry", "atom_entry", "detail_page", "reddit_post", "x_post", "pdf", "legacy_metadata",
 ]);
@@ -848,10 +849,11 @@ export function createHeadlineClaim(input: HeadlineClaimDraft): HeadlineClaim {
   }
   if (input.generator === "review"
     && (input.verificationStatus === "supported" || input.verificationStatus === "partially_supported")
-    && input.generatorVersion !== MANUAL_REVIEW_GENERATOR_VERSION) {
+    && input.generatorVersion !== MANUAL_REVIEW_GENERATOR_VERSION
+    && input.generatorVersion !== MANUAL_EVIDENCE_REBIND_GENERATOR_VERSION) {
     fail(
       "INVALID_CLAIM",
-      `publishable review claims must use ${MANUAL_REVIEW_GENERATOR_VERSION}`,
+      "publishable review claims must use a registered manual review generator version",
     );
   }
   return {
@@ -1084,11 +1086,12 @@ export function validateHeadlineEvidence(headline: Headline): HeadlineEvidenceVa
     }
     if (claim.generator === "review"
       && (claim.verificationStatus === "supported" || claim.verificationStatus === "partially_supported")
-      && claim.generatorVersion !== MANUAL_REVIEW_GENERATOR_VERSION) {
+      && claim.generatorVersion !== MANUAL_REVIEW_GENERATOR_VERSION
+      && claim.generatorVersion !== MANUAL_EVIDENCE_REBIND_GENERATOR_VERSION) {
       issues.push(issue(
         headline,
         "REVIEW_CONFIRMATION_INVALID",
-        "publishable review claim does not carry the manual semantic confirmation generator version",
+        "publishable review claim does not carry a registered manual review generator version",
         claimLocation,
       ));
     }

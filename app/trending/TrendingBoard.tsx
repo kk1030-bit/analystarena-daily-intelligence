@@ -29,6 +29,7 @@ import { resolveSignalHeadline, signalMetricLabel, signalStrength, socialSignalI
 import { categoryDisplayNames, sourceDisplayName } from "@/lib/terms";
 import { formatBeijingMinute, resolveHeadlineTimestamp, timestampLabel } from "@/lib/time";
 import type { Category, DailyBrief, TimestampKind } from "@/lib/types";
+import type { LiveBriefFallback, LiveBriefResult } from "@/lib/live-brief";
 
 type BoardTab = "all" | "finance" | "technology";
 
@@ -140,7 +141,17 @@ function matchesTab(item: TrendingItem, tab: BoardTab): boolean {
   return true;
 }
 
-export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; contextBatch: string }) {
+export function TrendingBoard({
+  brief,
+  contextBatch,
+  fallback,
+  errorCode,
+}: {
+  brief: DailyBrief;
+  contextBatch: string;
+  fallback: LiveBriefFallback;
+  errorCode?: LiveBriefResult["errorCode"];
+}) {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<BoardTab>("all");
   const [batch, setBatch] = useState(0);
@@ -156,6 +167,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
   }, [batch, filtered]);
   const lead = items[0];
   const updatedAt = formatBeijingMinute(brief.generatedAt);
+  const stale = fallback !== "none";
 
   function refreshPage() {
     startRefresh(() => router.replace(`/trending?refresh=${Date.now()}`, { scroll: false }));
@@ -189,7 +201,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
           <div><Activity size={15} /><span>榜单项目</span><b>{items.length} 个热点</b></div>
           <div><Bot size={15} /><span>分析方式</span><b>动态事件排序</b></div>
           <div><Globe2 size={15} /><span>自动翻译</span><b>简体中文</b></div>
-          <p><i /> 每十分钟更新资料</p>
+          <p><i /> {stale ? "实时采集失败，当前不是实时资料" : "每十分钟更新资料"}</p>
         </div>
       </aside>
 
@@ -198,7 +210,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
           <Link className="mobile-brand" href="/"><Radar size={20} /><span>AnalystArena</span></Link>
           <div className="breadcrumb"><span>热点中心</span><b>/</b><strong>今日榜单</strong></div>
           <div className="topbar-actions">
-            <span className="mode-badge mode-live"><Activity size={12} /> 动态热搜</span>
+            <span className={`mode-badge ${stale ? "mode-demo" : "mode-live"}`}><Activity size={12} /> {stale ? "历史快照 · 非实时" : "动态热搜"}</span>
             <Link className="secondary-button" href="/"><Newspaper size={16} />返回日报</Link>
             <button className="primary-button" type="button" onClick={refreshPage} disabled={isRefreshing}>
               <RefreshCw size={16} className={isRefreshing ? "is-spinning" : ""} />{isRefreshing ? "更新中..." : "刷新榜单"}
@@ -207,6 +219,12 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
         </header>
 
         <div className="trending-wrap">
+          {stale && <div className="trending-stale-warning" role="status">
+            <strong>实时采集暂不可用，以下不是实时榜单。</strong>
+            <span>当前显示最近一份已发布日报的冻结资料；内容时间为 {updatedAt}（北京时间）。请勿把排名理解为此刻热度。</span>
+            {brief.warning && <small>{brief.warning}</small>}
+            {errorCode && <code>{errorCode}</code>}
+          </div>}
           <section className="trending-hero">
             <div>
               <span><Flame size={15} /> 今日热点先看</span>
@@ -215,7 +233,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
             <div className="trending-hero-note">
               <strong>把市场今天正在关注的事情放到最前面</strong>
               <p>综合新闻重要性、发布时间、跨来源数量与讨论热度；榜单不是搜索次数的简单堆叠。</p>
-              <div><Clock3 size={14} />榜单更新时间：{updatedAt}（北京时间）</div>
+              <div><Clock3 size={14} />{stale ? "冻结内容时间" : "榜单更新时间"}：{updatedAt}（北京时间）</div>
             </div>
           </section>
 
@@ -232,7 +250,7 @@ export function TrendingBoard({ brief, contextBatch }: { brief: DailyBrief; cont
           <div className="trending-content-grid">
             <section className="hot-board" aria-labelledby="hot-board-title">
               <header className="hot-board-header">
-                <div><span>实时榜单</span><h2 id="hot-board-title">今日热搜</h2></div>
+                <div><span>{stale ? "最近可用快照" : "实时榜单"}</span><h2 id="hot-board-title">{stale ? "历史热点参考" : "今日热搜"}</h2></div>
                 <button type="button" onClick={() => setBatch((value) => value + 1)}><RotateCw size={15} />换一批</button>
               </header>
               <div className="hot-tabs" role="tablist" aria-label="热搜榜分类">

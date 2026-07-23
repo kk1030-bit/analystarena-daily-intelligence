@@ -45,13 +45,71 @@ const migrationRows = await raw.query<{ id: string }>(`
   SELECT id FROM schema_migrations WHERE id = '20260721_event_history.sql'
 `);
 assert.equal(migrationRows.rowCount, 1);
-const legacySnapshot = await raw.query<{ payload: DailyBrief }>(`
-  SELECT payload FROM brief_snapshots WHERE stream = 'legacy' AND batch_key = $1
+const legacySnapshot = await raw.query<{ id: string; payload: DailyBrief; actor_type: string }>(`
+  SELECT id, payload, actor_type
+  FROM brief_snapshots
+  WHERE stream = 'legacy' AND batch_key = $1
 `, [`daily-brief:${legacyId}`]);
 assert.equal(legacySnapshot.rowCount, 1);
 assert.equal(legacySnapshot.rows[0].payload.date, legacyDate);
+assert.equal(legacySnapshot.rows[0].actor_type, "legacy");
 assert.ok(legacySnapshot.rows[0].payload.headlines.every((headline) => headline.id.startsWith("evt_legacy_")));
 assert.equal((await raw.query("SELECT COUNT(*)::integer AS count FROM event_versions WHERE run_id = $1", [legacyId])).rows[0].count, legacyBrief.headlines.length);
+assert.equal(
+  (await raw.query<{ current_snapshot_id: string }>(
+    "SELECT current_snapshot_id FROM daily_briefs WHERE id = $1",
+    [legacyId],
+  )).rows[0].current_snapshot_id,
+  legacySnapshot.rows[0].id,
+  "the 7/23 migration must bind a pre-migration daily brief to its exact legacy snapshot",
+);
+assert.equal(
+  (await raw.query<{ count: number }>(`
+    SELECT COUNT(*)::integer AS count
+    FROM event_versions
+    WHERE run_id = $1 AND actor_type = 'legacy'
+  `, [legacyId])).rows[0].count,
+  legacyBrief.headlines.length,
+  "event versions that predate actor auditing must be labelled legacy rather than system",
+);
+
+async function expectAdminActorAuditConstraint(
+  table: "event_versions" | "brief_snapshots",
+  immutableTrigger: "event_versions_immutable" | "brief_snapshots_immutable",
+  id: string,
+): Promise<void> {
+  await raw.query(`ALTER TABLE ${table} DISABLE TRIGGER ${immutableTrigger}`);
+  try {
+    const error = await raw.query(
+      `UPDATE ${table}
+       SET actor_type = 'admin', actor_id_hash = NULL
+       WHERE id = $1`,
+      [id],
+    ).then(() => undefined, (value: { code?: string }) => value);
+    assert.equal(
+      error?.code,
+      "23514",
+      `${table} must reject an admin actor without a pseudonymous id, reason, and request id`,
+    );
+  } finally {
+    await raw.query(`ALTER TABLE ${table} ENABLE TRIGGER ${immutableTrigger}`);
+  }
+}
+
+const legacyEventVersionId = (await raw.query<{ id: string }>(
+  "SELECT id FROM event_versions WHERE run_id = $1 ORDER BY version_number LIMIT 1",
+  [legacyId],
+)).rows[0].id;
+await expectAdminActorAuditConstraint(
+  "event_versions",
+  "event_versions_immutable",
+  legacyEventVersionId,
+);
+await expectAdminActorAuditConstraint(
+  "brief_snapshots",
+  "brief_snapshots_immutable",
+  legacySnapshot.rows[0].id,
+);
 
 const date = "2097-07-21";
 
@@ -170,7 +228,10 @@ assert.ok(concurrent.every((record) => record.brief.snapshot?.id === concurrent[
 assert.equal((await db.listBriefSnapshots(date)).length, 1);
 assert.equal((await db.listEventVersions(eventId)).length, 1);
 
-const second = brief(`${date}T01:20:00.000Z`, headline({ marketDirection: "bearish" }));
+// Concurrent writes do not have a deterministic lock-acquisition order. Give
+// both observations the same logical timestamp so this test exercises chain
+// serialization without manufacturing a time-reversing event/snapshot.
+const second = brief(`${date}T01:30:00.000Z`, headline({ marketDirection: "bearish" }));
 const third = brief(`${date}T01:30:00.000Z`, headline({ marketDirection: "neutral", directionConfidence: 55 }));
 await Promise.all([
   db.saveDraft(second, { stream: "shared", batchKey: "postgres-bucket-2" }),
@@ -277,13 +338,118 @@ await assert.rejects(
 );
 const currentDraft = await db.getBrief(concurrent[0].id);
 assert.equal(currentDraft?.status, "draft");
-const published = await db.publishBrief(concurrent[0].id, currentDraft!.brief, Buffer.from("frozen-pdf"), {
+assert.ok(currentDraft?.brief.snapshot?.id);
+const reviewedSnapshotId = currentDraft.brief.snapshot.id;
+const reviewedEvent = currentDraft.brief.snapshot.events[0];
+const reviewedHeadline = structuredClone(currentDraft.brief.headlines[0]);
+const alternateSnapshotId = snapshots.find((snapshot) => snapshot.id !== reviewedSnapshotId)?.id;
+assert.ok(alternateSnapshotId);
+await raw.query("UPDATE daily_briefs SET current_snapshot_id = $2 WHERE id = $1", [
+  currentDraft.id,
+  alternateSnapshotId,
+]);
+await assert.rejects(
+  () => db.publishBrief(currentDraft.id, currentDraft.brief, Buffer.from("split-pointer-pdf")),
+  (error: unknown) => error instanceof db.StaleBriefRevisionError,
+  "payload.snapshot.id and daily_briefs.current_snapshot_id must be one CAS pointer",
+);
+await raw.query("UPDATE daily_briefs SET current_snapshot_id = $2 WHERE id = $1", [
+  currentDraft.id,
+  reviewedSnapshotId,
+]);
+const beforeTamperedPublish = await raw.query<{ snapshots: number; runs: number; versions: number }>(`
+  SELECT
+    (SELECT COUNT(*)::integer FROM brief_snapshots) AS snapshots,
+    (SELECT COUNT(*)::integer FROM collection_runs) AS runs,
+    (SELECT COUNT(*)::integer FROM event_versions) AS versions
+`);
+await assert.rejects(
+  () => db.publishBrief(concurrent[0].id, {
+    ...structuredClone(currentDraft.brief),
+    headlines: currentDraft.brief.headlines.map((item: Headline, index: number) =>
+      index === 0 ? { ...item, summary: `${item.summary} tampered after review` } : item),
+  }, Buffer.from("tampered-pdf")),
+  (error: unknown) => error instanceof db.StaleBriefRevisionError,
+);
+const afterTamperedPublish = await raw.query<{ snapshots: number; runs: number; versions: number }>(`
+  SELECT
+    (SELECT COUNT(*)::integer FROM brief_snapshots) AS snapshots,
+    (SELECT COUNT(*)::integer FROM collection_runs) AS runs,
+    (SELECT COUNT(*)::integer FROM event_versions) AS versions
+`);
+assert.deepEqual(afterTamperedPublish.rows[0], beforeTamperedPublish.rows[0]);
+
+await db.persistBriefObservation({
+  ...structuredClone(currentDraft.brief),
+  id: undefined,
+  status: "draft",
+  storageMode: undefined,
+  snapshot: undefined,
+  generatedAt: `${date}T01:40:00.000Z`,
+  headlines: [{
+    ...reviewedHeadline,
+    marketDirection: reviewedHeadline.marketDirection === "mixed" ? "bearish" : "mixed",
+  }],
+}, {
+  stream: "shared",
+  batchKey: "postgres-between-review-and-publish",
+});
+const advancedHead = (await db.listEventVersions(reviewedEvent.eventId)).at(-1);
+assert.notEqual(
+  advancedHead?.id,
+  reviewedEvent.eventVersionId,
+  "fixture must advance the event head after the reviewed snapshot",
+);
+const beforePublishPromotion = await raw.query<{ snapshots: number; runs: number; versions: number }>(`
+  SELECT
+    (SELECT COUNT(*)::integer FROM brief_snapshots) AS snapshots,
+    (SELECT COUNT(*)::integer FROM collection_runs) AS runs,
+    (SELECT COUNT(*)::integer FROM event_versions) AS versions
+`);
+const published = await db.publishBrief(concurrent[0].id, {
+  ...structuredClone(currentDraft.brief),
+  id: "caller-metadata-is-ignored",
+  status: "published",
+  publishedAt: `${date}T01:45:00.000Z`,
+  storageMode: "memory",
+}, Buffer.from("frozen-pdf"), {
   stream: "publish",
   batchKey: "postgres-publish",
 });
 assert.equal(published.status, "published");
+assert.equal(published.brief.snapshot?.id, reviewedSnapshotId);
+assert.equal(published.brief.snapshot?.events[0].eventVersionId, reviewedEvent.eventVersionId);
+assert.equal(published.brief.headlines[0].marketDirection, reviewedHeadline.marketDirection);
+const afterPublishPromotion = await raw.query<{ snapshots: number; runs: number; versions: number }>(`
+  SELECT
+    (SELECT COUNT(*)::integer FROM brief_snapshots) AS snapshots,
+    (SELECT COUNT(*)::integer FROM collection_runs) AS runs,
+    (SELECT COUNT(*)::integer FROM event_versions) AS versions
+`);
+assert.deepEqual(
+  afterPublishPromotion.rows[0],
+  beforePublishPromotion.rows[0],
+  "publication must not create a collection run, snapshot, or event version",
+);
+const promotedRow = await raw.query<{
+  current_snapshot_id: string;
+  payload_snapshot_id: string;
+  snapshot_event_version_id: string;
+}>(`
+  SELECT daily.current_snapshot_id,
+         daily.payload->'snapshot'->>'id' AS payload_snapshot_id,
+         snapshot_event.event_version_id AS snapshot_event_version_id
+  FROM daily_briefs AS daily
+  JOIN brief_snapshot_events AS snapshot_event
+    ON snapshot_event.snapshot_id = daily.current_snapshot_id
+   AND snapshot_event.event_id = $2
+  WHERE daily.id = $1
+`, [published.id, reviewedEvent.eventId]);
+assert.equal(promotedRow.rows[0].current_snapshot_id, reviewedSnapshotId);
+assert.equal(promotedRow.rows[0].payload_snapshot_id, reviewedSnapshotId);
+assert.equal(promotedRow.rows[0].snapshot_event_version_id, reviewedEvent.eventVersionId);
 const frozenPayload = JSON.stringify(published.brief);
-await db.persistBriefObservation(brief(`${date}T01:40:00.000Z`, headline({ marketDirection: "mixed" })), {
+await db.persistBriefObservation(brief(`${date}T01:50:00.000Z`, headline({ marketDirection: "neutral" })), {
   stream: "shared",
   batchKey: "postgres-after-publish",
 });

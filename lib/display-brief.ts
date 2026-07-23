@@ -14,7 +14,7 @@ export function selectDisplayBrief(
   today: BriefRecord | null,
   latestPublished: BriefRecord | null,
 ): DisplayBriefSelection {
-  if (today) return { brief: today.brief, origin: today.status };
+  if (today?.status === "published") return { brief: today.brief, origin: "published" };
   if (latestPublished) return { brief: latestPublished.brief, origin: "published" };
   return { brief: demoBrief, origin: "demo" };
 }

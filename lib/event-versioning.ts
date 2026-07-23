@@ -327,6 +327,21 @@ export function eventVersionMaterial(headline: Headline): EventVersionMaterial {
 
 export function mergeRetainedEvidence(previous: Headline | undefined, incoming: Headline): Headline {
   if (!previous) return structuredClone(incoming);
+  const evidenceIdentity = (item: { sourceDocumentId?: string; id: string }) =>
+    `${item.sourceDocumentId ?? ""}\u0000${item.id}`;
+  const mergeEvidence = <T extends { sourceDocumentId?: string; id: string }>(
+    preferred: T[] | undefined,
+    fallback: T[] | undefined,
+  ): T[] | undefined => {
+    if (!preferred?.length) return fallback?.map((item) => structuredClone(item));
+    const preferredIds = new Set(preferred.map(evidenceIdentity));
+    return [
+      ...preferred.map((item) => structuredClone(item)),
+      ...(fallback ?? [])
+        .filter((item) => !preferredIds.has(evidenceIdentity(item)))
+        .map((item) => structuredClone(item)),
+    ];
+  };
   const isManagedPageClaim = (claimKey: string) => claimKey === "title"
     || claimKey === "summary"
     || claimKey === "market_impact"
@@ -362,7 +377,16 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
       result[existingIndex] = {
         ...fallback,
         ...preferred,
-        evidence: preferred.evidence ?? fallback.evidence,
+        // A collector may rediscover the same source while temporarily
+        // failing to extract its evidence. Both `undefined` and an empty
+        // projection mean "no new evidence observed", not authorization to
+        // erase immutable evidence. Explicit removals are applied later from
+        // an audited EvidenceRetractionRequest.
+        // A non-empty collector projection can still be partial. Preserve
+        // omitted immutable evidence items while allowing a new version of the
+        // same evidence anchor to replace its predecessor. Actual removals are
+        // applied only from scoped EvidenceRetractionRequests below this merge.
+        evidence: mergeEvidence(preferred.evidence, fallback.evidence),
         capture: preferred.capture ?? fallback.capture,
       };
     }
@@ -385,7 +409,20 @@ export function mergeRetainedEvidence(previous: Headline | undefined, incoming: 
         // not resurrect stale evidence from the previous event version.
         return incoming.claims === undefined || !isManagedPageClaim(claim.claimKey);
       }),
-      ...(incoming.claims ?? []),
+      ...(incoming.claims ?? []).map((claim) => {
+        const prior = previous.claims?.find((candidate) =>
+          candidate.claimKey === claim.claimKey);
+        const sameAssertion = prior
+          && prior.type === claim.type
+          && prior.statement === claim.statement
+          && prior.originalStatement === claim.originalStatement;
+        return prior && sameAssertion
+          ? {
+              ...claim,
+              citations: mergeEvidence(claim.citations, prior.citations) ?? [],
+            }
+          : claim;
+      }),
     ].map((claim) => structuredClone(claim)).sort((left, right) => left.ordinal - right.ordinal || left.claimKey.localeCompare(right.claimKey)),
     crossSourceCount: new Set(sources.map((source) => source.type)).size,
   };

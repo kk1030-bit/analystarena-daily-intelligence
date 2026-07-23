@@ -3,7 +3,7 @@
 > Canonical task（正式任務）：[GitHub Issue #12](https://github.com/kk1030-bit/analystarena-daily-intelligence/issues/12)<br>
 > Execution branch（執行分支）：`agent/auditable-brief-0721-0726`<br>
 > Period（期間）：2026-07-21 至 2026-07-26<br>
-> Current status（目前狀態）：7/22 已完成 Render migration、真實重採集、人工審核、正式發布、PDF 與歷史歸檔驗收；下一項為 7/23 What Changed。
+> Current status（目前狀態）：7/22 已完成正式站驗收；7/23 What Changed 的資料模型、比較器與發布權威核驗已實作，正在進行最終 PostgreSQL 回歸、部署與正式站驗證，尚未標記完成。
 
 ## 使用方式
 
@@ -49,7 +49,7 @@ gantt
 |---|---|---|---|
 | 7/21 | 資料庫底座 | 建立穩定事件 ID、事件版本、前一版本關聯；每次實際觸發的十分鐘更新不再覆蓋舊資料 | 已完成 |
 | 7/22 | 來源證據鏈 | 同時保存原始發布時間、採集時間、網址、內容雜湊、引用片段及可驗證定位 | 已完成（正式站驗收） |
-| 7/23 | What Changed | 自動比較上一版本，標記首次出現、新增證據、數字變動、方向與排名變化 | 待執行 |
+| 7/23 | What Changed | 自動比較上一版本，標記首次出現、新增證據、數字變動、方向與排名變化 | 進行中（已實作，待最終驗證） |
 | 7/24 | 投資判斷 | 結構化記錄營收／獲利／估值／風險影響、利好與利空標的、原判斷與新判斷 | 待執行 |
 | 7/25 | 網頁及 PDF | 每則市場頭條呈現「新增資訊、來源、判斷影響、待驗證問題」四區塊；PDF 包含全部頭條 | 待執行 |
 | 7/26 | 驗收部署 | 測試十分鐘更新、歷史版本、來源連結、PDF、人工審核及 Render 正式站 | 待執行 |
@@ -76,9 +76,17 @@ gantt
   - [x] 功能提交：`03aa498`、`18e41f6`、`e51362c`；Migration：`db/migrations/20260722_source_evidence_v2.sql`、`db/migrations/20260722_source_observation_evidence_time.sql`、`db/migrations/20260722_zz_snapshot_claim_presentations.sql`。
   - [x] Render 正式資料庫 migration、真實來源重採集、人工審核、正式發布、PDF 與歷史歸檔驗收。
 - [ ] **7/23｜前後版本比較與 What Changed**
-  - 分辨首次發現、新增／移除證據、數字變動、方向變化、排名變化。
-  - 沒有上一版本時只顯示「首次發現」。
-  - 保存上一版、當前版、改變原因與比較演算法版本。
+  - [x] 事件內容差異與快照排名差異分表保存；排名、時效分及版面變化不建立新的事件內容版本。
+  - [x] 同時建立 `previous_observation` 與 `previous_published` 雙基線：前者比較同日上一個實際快照，供營運監測；後者比較上一份已發布日報的凍結快照，供投資人閱讀。
+  - [x] 精確分辨 `first_seen`、`entered` 與 `reentered`：資料庫沒有任何歷史觀察時才是首次發現；基線沒有但更早曾出現時只能標記重新進榜，不捏造內容變化。
+  - [x] 分辨證據新增、證據修訂、claim 支持關係變化、數字變動、方向建立／改變及排名上升／下降；每個 change item 保存 before、after、reason code、證據版本及內容 hash。
+  - [x] 暫時沒有抓到來源不視為證據移除；只有綁定確切事件版本、evidence version、原因及審計 actor 的明確撤回請求，才可建立新版本並顯示證據撤回。
+  - [x] 數字只從有精確證據支持的原始 claim 提取，保存主體、指標、期間、數值、單位、幣別、原文偏移、parser version 及證據版本；日期、型號或缺少單位的數字不猜測為可比較財務數值。
+  - [x] 比較演算法固定為 `what-changed/v1`，源碼實作 SHA-256 為 `f510adc0e7a9f8987d9ea5bba2e0a886e764745a0b7eed9ea2f20ad7bbe2c01c`；測試會重算該 hash，輸入、結果與每個差異項均保存 hash，不允許事後覆寫。
+  - [x] 遷移前版本只標記 `legacy_unverified`，不回填推測性的證據、數字、方向或排名差異。
+  - [x] 發布前從 PostgreSQL 重新載入兩個比較端點並重算；缺少權威比較、payload 與權威結果不一致或內部 hash／端點不完整時 fail closed，不得繞過證據閘門。
+  - [x] 人工審核與明確證據撤回若建立新事件版本，版本保存 `actor_type`、服務端 keyed-HMAC `actor_id_hash`、修改原因及 request ID；即使事件內容未變，審核快照仍保存操作者。發布以同一事務保存精確快照 hash、PDF SHA-256 與同一組審計欄位，不保存管理員明文憑證。
+  - [ ] 最終驗證：隔離 PostgreSQL migration／不可變 trigger／雙基線／撤回／發布篡改回歸，全套 TypeScript、ESLint、build 與 Render 正式站驗收。
 - [ ] **7/24｜Thesis Impact 與待驗證問題**
   - 結構化保存營收、獲利、估值、風險與催化劑影響。
   - 保存原判斷、新判斷、利好／利空標的與影響機制。

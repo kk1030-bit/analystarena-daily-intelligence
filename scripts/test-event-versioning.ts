@@ -2,14 +2,18 @@ import assert from "node:assert/strict";
 import { demoBrief } from "../lib/demo-data";
 import { createStableEventIdentity, mergeRetainedEvidence } from "../lib/event-versioning";
 import { ensureRawStoryIdentity } from "../lib/source-identity";
+import { createSourceEvidence } from "../lib/source-evidence";
 import type { DailyBrief, Headline, RawStory, SourceLink } from "../lib/types";
 
 delete process.env.DATABASE_URL;
 
 const {
+  getBrief,
+  getPublishedPdf,
   listBriefSnapshots,
   listEventVersions,
   persistBriefObservation,
+  publishBrief,
   saveDraft,
   StaleBriefRevisionError,
   updateDraft,
@@ -117,6 +121,35 @@ const currentWire: SourceLink = {
   sourceDocumentVersionId: "00000000-0000-4000-8000-000000000001",
   sourceObservationId: "obs_current_feed_identity",
 };
+const retainedEvidence = createSourceEvidence({
+  sourceDocumentId: currentWire.sourceDocumentId!,
+  sourceDocumentVersionId: currentWire.sourceDocumentVersionId!,
+  versionId: "10000000-0000-4000-8000-000000000001",
+  anchorKey: "test:description",
+  quoteOriginal: "Customers increased Blackwell orders.",
+  locator: {
+    kind: "feed_field",
+    feedUrl: "https://wire.example.com/feed.xml",
+    entryId: "nvda-blackwell",
+    field: "description",
+    fieldPath: "/rss/channel/item/description",
+  },
+  locatorStatus: "exact",
+  directness: "direct",
+  captureScope: "rss_entry",
+  extractionMethod: "test-fixture",
+  extractorVersion: "v1",
+  capturedAt: `${date}T01:05:00.000Z`,
+});
+const emptyEvidenceMerged = mergeRetainedEvidence(
+  headline({ sources: [{ ...currentWire, evidence: [retainedEvidence] }] }),
+  headline({ sources: [{ ...currentWire, evidence: [] }] }),
+);
+assert.equal(
+  emptyEvidenceMerged.sources[0].evidence?.[0].versionId,
+  retainedEvidence.versionId,
+  "an empty collector evidence projection must retain the exact prior evidence version",
+);
 const aliasMerged = mergeRetainedEvidence(
   headline({ sources: [legacyWire, currentWire, secondWire] }),
   headline({ sources: [{ ...currentWire, url: `${wire.url}&utm_campaign=recapture` }] }),
@@ -163,6 +196,14 @@ const firstBrief = brief(`${date}T01:10:00.000Z`, headline());
 const firstRecord = await saveDraft(firstBrief, { stream: "shared", batchKey: "event-version-test-1" });
 const eventId = firstRecord.brief.headlines[0].id;
 assert.match(eventId, /^evt_[a-f0-9]{32}$/);
+assert.equal(firstRecord.brief.headlines[0].whatChanged?.status, "first_seen");
+assert.equal(firstRecord.brief.headlines[0].whatChanged?.operational.presence, "first_seen");
+assert.equal(firstRecord.brief.headlines[0].whatChanged?.investor.presence, "first_seen");
+assert.equal(
+  firstRecord.brief.headlines[0].whatChanged?.items.every((item) => item.kind === "first_seen"),
+  true,
+  "a first observation must not manufacture evidence, direction, number, or rank deltas",
+);
 let snapshots = await listBriefSnapshots(date);
 assert.equal(snapshots.length, 1);
 assert.equal(snapshots[0].previousSnapshotId, undefined);
@@ -193,6 +234,13 @@ const translatedBrief = brief(`${date}T01:20:00.000Z`, headline({
 }));
 const translatedRecord = await saveDraft(translatedBrief, { stream: "shared", batchKey: "event-version-test-2" });
 assert.equal(translatedRecord.brief.headlines[0].id, eventId);
+assert.equal(translatedRecord.brief.headlines[0].whatChanged?.operational.status, "changed");
+assert.equal(translatedRecord.brief.headlines[0].whatChanged?.status, "changed");
+assert.deepEqual(
+  translatedRecord.brief.headlines[0].whatChanged?.items.map((item) => item.kind),
+  ["rank_down"],
+  "reusing v1 may report the real rank movement but must not repeat its intrinsic first-seen marker",
+);
 versions = await listEventVersions(eventId);
 assert.equal(versions.length, 1, "presentation/rank changes must not create an event-state version");
 snapshots = await listBriefSnapshots(date);
@@ -211,6 +259,12 @@ const evidenceBrief = brief(`${date}T01:30:00.000Z`, headline({
 }));
 const evidenceRecord = await saveDraft(evidenceBrief, { stream: "shared", batchKey: "event-version-test-3" });
 assert.equal(evidenceRecord.brief.headlines[0].id, eventId, "primary-source change must not fork the event");
+assert.equal(evidenceRecord.brief.headlines[0].whatChanged?.operational.status, "changed");
+assert.ok(
+  evidenceRecord.brief.headlines[0].whatChanged?.operational.items.some((item) =>
+    item.kind === "direction_changed"),
+  "the exact v1→v2 direction transition must be retained",
+);
 versions = await listEventVersions(eventId);
 assert.equal(versions.length, 2);
 assert.equal(versions[1].versionNumber, 2);
@@ -227,6 +281,12 @@ const partialRecord = await saveDraft(partialBrief, { stream: "shared", batchKey
 assert.equal(partialRecord.brief.headlines[0].id, eventId);
 assert.equal(partialRecord.brief.headlines[0].sources.length, 2, "historical evidence must be retained");
 assert.equal((await listEventVersions(eventId)).length, 2);
+assert.equal(partialRecord.brief.headlines[0].whatChanged?.operational.status, "unchanged");
+assert.equal(
+  partialRecord.brief.headlines[0].whatChanged?.operational.items.length,
+  0,
+  "reusing v2 must not replay its earlier evidence or direction changes",
+);
 
 // No shared URL: a high-confidence original-language match still reuses the
 // permanent event ID; the new source becomes evidence v3.
@@ -335,5 +395,61 @@ await assert.rejects(
   () => persistBriefObservation(evidenceBrief, { stream: "shared", batchKey: "event-version-test-8" }),
   /reused with different brief content/,
 );
+
+// Publishing promotes the exact reviewed snapshot. It must neither ingest the
+// submitted payload again nor follow an event head that advances after review.
+const reviewed = await getBrief(firstRecord.id);
+assert.ok(reviewed?.brief.snapshot?.id);
+const reviewedSnapshotId = reviewed.brief.snapshot.id;
+const reviewedEvent = reviewed.brief.snapshot.events[0];
+const snapshotsBeforeAdvance = (await listBriefSnapshots(date)).length;
+const tampered = {
+  ...structuredClone(reviewed.brief),
+  headlines: reviewed.brief.headlines.map((item, index) =>
+    index === 0 ? { ...item, summary: `${item.summary} tampered after review` } : item),
+};
+await assert.rejects(
+  () => publishBrief(reviewed.id, tampered, Buffer.from("tampered-pdf")),
+  (error: unknown) => error instanceof StaleBriefRevisionError,
+);
+assert.equal((await listBriefSnapshots(date)).length, snapshotsBeforeAdvance);
+
+const reviewedHeadline = reviewed.brief.headlines[0];
+await persistBriefObservation({
+  ...structuredClone(reviewed.brief),
+  id: undefined,
+  status: "draft",
+  storageMode: undefined,
+  snapshot: undefined,
+  generatedAt: `${date}T02:40:00.000Z`,
+  headlines: [{
+    ...reviewedHeadline,
+    marketDirection: reviewedHeadline.marketDirection === "bearish" ? "bullish" : "bearish",
+  }],
+}, {
+  stream: "shared",
+  batchKey: "event-version-between-review-and-publish",
+});
+const snapshotsAfterAdvance = (await listBriefSnapshots(date)).length;
+assert.equal(snapshotsAfterAdvance, snapshotsBeforeAdvance + 1);
+assert.notEqual(
+  (await listEventVersions(reviewedEvent.eventId)).at(-1)?.id,
+  reviewedEvent.eventVersionId,
+  "fixture must advance the event head after the reviewed snapshot",
+);
+
+const published = await publishBrief(reviewed.id, {
+  ...structuredClone(reviewed.brief),
+  id: "caller-metadata-is-ignored",
+  status: "published",
+  publishedAt: `${date}T02:45:00.000Z`,
+  storageMode: "postgres",
+}, Buffer.from("reviewed-snapshot-pdf"));
+assert.equal(published.status, "published");
+assert.equal(published.brief.snapshot?.id, reviewedSnapshotId);
+assert.equal(published.brief.snapshot?.events[0].eventVersionId, reviewedEvent.eventVersionId);
+assert.equal(published.brief.headlines[0].marketDirection, reviewedHeadline.marketDirection);
+assert.equal((await listBriefSnapshots(date)).length, snapshotsAfterAdvance, "publish must not create a snapshot");
+assert.equal((await getPublishedPdf(reviewed.id))?.pdf.toString(), "reviewed-snapshot-pdf");
 
 console.log("event identity, immutable snapshot, and version-chain tests passed");

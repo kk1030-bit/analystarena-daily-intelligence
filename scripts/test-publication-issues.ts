@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { demoBrief } from "../lib/demo-data";
+import { publicationEvidenceIssues } from "../lib/publication-evidence";
 import { normalizePublicationIssues } from "../lib/publication-issues";
 
 const malicious = '<img src=x onerror="alert(1)">';
@@ -30,5 +32,21 @@ assert.ok(!issues[0].message.includes("\u0000"), "control characters must be rem
 assert.equal(issues[1].headlineRank, undefined);
 assert.equal(issues[1].message.length, 600);
 assert.deepEqual(normalizePublicationIssues({ issues: [] }), []);
+
+const untranslated = {
+  ...structuredClone(demoBrief),
+  translationEnabled: false,
+};
+const translationIssues = publicationEvidenceIssues(untranslated)
+  .filter((item) => item.code === "TRANSLATION_INCOMPLETE");
+assert.equal(
+  translationIssues.length,
+  untranslated.headlines.length,
+  "every headline in a snapshot without completed Simplified-Chinese translation must block publication",
+);
+assert.ok(
+  translationIssues.every((item) => item.claimKey === "translation" && Boolean(item.headlineId)),
+  "translation publication issues must identify the affected headline",
+);
 
 console.log("publication issue normalization tests passed");

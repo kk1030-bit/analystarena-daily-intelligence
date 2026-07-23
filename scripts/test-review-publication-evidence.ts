@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import { mergeRetainedEvidence } from "../lib/event-versioning";
 import { publicationEvidenceIssues } from "../lib/publication-evidence";
-import { reconcileReviewedBriefEvidence } from "../lib/review-evidence";
+import {
+  defaultMaintainedEvidenceVersionIds,
+  reconcileReviewedBriefEvidence,
+  reviewedClaimRetainsCitationRelationship,
+} from "../lib/review-evidence";
 import {
   createEvidenceCitation,
   createHeadlineClaim,
   createSourceEvidence,
+  MANUAL_EVIDENCE_REBIND_GENERATOR_VERSION,
   MANUAL_REVIEW_GENERATOR_VERSION,
 } from "../lib/source-evidence";
 import type {
@@ -186,6 +191,186 @@ assert.deepEqual(editedPoint?.citations, [], "an edited assertion must lose its 
 assert.ok(
   issueCodes(edited).includes("important_information:0:CLAIM_PENDING"),
   "an edited assertion must block publication until it is re-evidenced",
+);
+
+// A reviewer may publish edited wording only by explicitly selecting exact
+// immutable evidence versions from the previous claim. This is a rebind, not a
+// silent inheritance of every old citation.
+const manuallyRebound = reconcileReviewedBriefEvidence(clean, editedSubmission, {
+  manualEditedClaimSupports: [{
+    headlineId: clean.headlines[0].id,
+    claimKey: "important_information:0",
+    evidenceVersionIds: [EVIDENCE_VERSION_ID],
+    method: "manual_evidence_rebind",
+    note: "已核对原文，数字与期间均直接支持改写后的文字。",
+  }],
+});
+const reboundPoint = manuallyRebound.headlines[0].claims?.find((claim) =>
+  claim.claimKey === "important_information:0");
+assert.equal(reboundPoint?.statement, editedSubmission.headlines[0].keyPoints?.[0]);
+assert.equal(reboundPoint?.generator, "review");
+assert.equal(reboundPoint?.generatorVersion, MANUAL_EVIDENCE_REBIND_GENERATOR_VERSION);
+assert.equal(reboundPoint?.verificationStatus, "partially_supported");
+assert.deepEqual(reboundPoint?.citations.map((citation) => citation.versionId), [EVIDENCE_VERSION_ID]);
+assert.ok(
+  !issueCodes(manuallyRebound).includes("important_information:0:CLAIM_PENDING"),
+  "an exact manual evidence rebind must clear only the pending-claim blocker",
+);
+assert.throws(
+  () => reconcileReviewedBriefEvidence(clean, editedSubmission, {
+    manualEditedClaimSupports: [{
+      headlineId: clean.headlines[0].id,
+      claimKey: "important_information:0",
+      evidenceVersionIds: ["00000000-0000-4000-8000-000000000099"],
+      method: "manual_evidence_rebind",
+      note: "伪造证据版本不能通过。",
+    }],
+  }),
+  /不属于当前事件的精确证据/,
+  "a review client cannot bind an unrelated evidence UUID to edited wording",
+);
+
+const unusedEvidence = exactEvidence({
+  versionId: "evv_review_gate_official_release_supplement_v1",
+  anchorKey: "rss:release-2026-07-22:supplement",
+  quoteOriginal: "补充材料确认新指引为 130 亿美元。",
+  locator: {
+    kind: "feed_field",
+    feedUrl: "https://investor.example.com/releases.xml",
+    entryId: "release-2026-07-22",
+    field: "content",
+    fieldPath: "rss.channel.item[0].content",
+  },
+});
+const eventWithUnusedEvidence = structuredClone(clean);
+eventWithUnusedEvidence.headlines[0].sources[0].evidence?.push(unusedEvidence);
+const editedWithUnusedEvidence = structuredClone(eventWithUnusedEvidence);
+editedWithUnusedEvidence.headlines[0].keyPoints![0] =
+  "补充材料确认新指引为 130 亿美元。";
+const reboundToUnusedEvidence = reconcileReviewedBriefEvidence(
+  eventWithUnusedEvidence,
+  editedWithUnusedEvidence,
+  {
+    manualEditedClaimSupports: [{
+      headlineId: eventWithUnusedEvidence.headlines[0].id,
+      claimKey: "important_information:0",
+      evidenceVersionIds: [unusedEvidence.versionId!],
+      method: "manual_evidence_rebind",
+      note: "改绑到同一事件中此前未被该声明使用的精确补充材料。",
+    }],
+  },
+);
+assert.deepEqual(
+  reboundToUnusedEvidence.headlines[0].claims
+    ?.find((claim) => claim.claimKey === "important_information:0")
+    ?.citations.map((citation) => citation.versionId),
+  [unusedEvidence.versionId],
+  "manual review may bind exact evidence already stored on the same event even if the old claim did not cite it",
+);
+
+const contradictoryEvidence = exactEvidence({
+  versionId: "evv_review_gate_official_release_contradiction_v1",
+  anchorKey: "rss:release-2026-07-22:contradiction",
+  quoteOriginal: "公司同时提示最终收入可能低于指引。",
+});
+const maintenanceIndirectEvidence = exactEvidence({
+  versionId: "evv_review_gate_official_release_indirect_v1",
+  anchorKey: "rss:release-2026-07-22:indirect",
+  quoteOriginal: "分析师转述公司可能调整指引。",
+  directness: "indirect",
+});
+const mixedRelationshipHeadline = exactHighImpactHeadline();
+mixedRelationshipHeadline.sources[0].evidence?.push(
+  contradictoryEvidence,
+  maintenanceIndirectEvidence,
+);
+const mixedTitleClaim = mixedRelationshipHeadline.claims?.find((claim) =>
+  claim.claimKey === "title");
+assert.ok(mixedTitleClaim);
+mixedTitleClaim.citations = [
+  ...mixedTitleClaim.citations,
+  createEvidenceCitation(contradictoryEvidence, {
+    relation: "contradicts",
+    confidence: 1,
+    order: 1,
+  }),
+  createEvidenceCitation(maintenanceIndirectEvidence, {
+    relation: "supports",
+    confidence: 0.7,
+    order: 2,
+  }),
+];
+assert.deepEqual(
+  defaultMaintainedEvidenceVersionIds(mixedRelationshipHeadline, mixedTitleClaim),
+  [EVIDENCE_VERSION_ID],
+  "evidence maintenance must preselect only the old exact, direct support relationship",
+);
+const explicitContradictionRebind = reconcileReviewedBriefEvidence(
+  {
+    ...exactBrief(),
+    headlines: [mixedRelationshipHeadline],
+  },
+  {
+    ...exactBrief(),
+    headlines: [structuredClone(mixedRelationshipHeadline)],
+  },
+  {
+    manualEditedClaimSupports: [{
+      headlineId: mixedRelationshipHeadline.id,
+      claimKey: "title",
+      evidenceVersionIds: [contradictoryEvidence.versionId!],
+      method: "manual_evidence_rebind",
+      note: "审核人主动选择该精确原文作为新版标题的支持证据。",
+    }],
+  },
+);
+const reboundTitleClaim = explicitContradictionRebind.headlines[0].claims?.find((claim) =>
+  claim.claimKey === "title");
+assert.equal(reboundTitleClaim?.citations[0].relation, "supports");
+assert.equal(
+  reviewedClaimRetainsCitationRelationship(
+    reboundTitleClaim,
+    mixedTitleClaim.citations[1],
+  ),
+  false,
+  "changing an old contradiction into support must be audited as removal plus explicit rebind",
+);
+
+const unchangedCitationRemoved = reconcileReviewedBriefEvidence(clean, structuredClone(clean), {
+  manualEditedClaimSupports: [{
+    headlineId: clean.headlines[0].id,
+    claimKey: "title",
+    evidenceVersionIds: [],
+    method: "manual_evidence_rebind",
+    note: "原有标题引用不支持当前判断，先撤下并保留为待确认。",
+  }],
+});
+const titleWithoutSupport = unchangedCitationRemoved.headlines[0].claims
+  ?.find((claim) => claim.claimKey === "title");
+assert.equal(titleWithoutSupport?.verificationStatus, "pending_confirmation");
+assert.deepEqual(titleWithoutSupport?.citations, []);
+
+const addedPointSubmission = structuredClone(eventWithUnusedEvidence);
+addedPointSubmission.headlines[0].keyPoints?.push("补充材料确认新指引为 130 亿美元。");
+const addedPointWithEvidence = reconcileReviewedBriefEvidence(
+  eventWithUnusedEvidence,
+  addedPointSubmission,
+  {
+    manualEditedClaimSupports: [{
+      headlineId: eventWithUnusedEvidence.headlines[0].id,
+      claimKey: "important_information:1",
+      evidenceVersionIds: [unusedEvidence.versionId!],
+      method: "manual_evidence_rebind",
+      note: "新增重点逐字对应同一事件的补充材料。",
+    }],
+  },
+);
+assert.equal(
+  addedPointWithEvidence.headlines[0].claims
+    ?.find((claim) => claim.claimKey === "important_information:1")
+    ?.verificationStatus,
+  "partially_supported",
+  "a newly added key point can be repaired by selecting exact evidence from the same event",
 );
 
 const previousTitleClaim = clean.headlines[0].claims?.find((claim) => claim.claimKey === "title");

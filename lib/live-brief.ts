@@ -7,7 +7,6 @@ import {
   type PersistBriefOptions,
 } from "./db";
 import { buildLiveBrief, type BuildBriefOptions } from "./pipeline";
-import { beijingDateKey } from "./time";
 import type { DailyBrief } from "./types";
 
 export type LiveBriefFallback = "none" | "draft" | "published";
@@ -99,21 +98,9 @@ export function normalizeLiveBriefContext(value?: string): LiveBriefContext {
 
 async function getPersistentFallback(): Promise<LiveBriefResult | null> {
   // Production fallback must survive process restarts and instance changes.
-  // Do not silently substitute the development-only in-memory database.
+  // Do not silently substitute the development-only in-memory database or an
+  // unreviewed draft on an anonymous investor-facing preview.
   if (storageMode() !== "postgres") return null;
-
-  const today = await getBriefByDate(beijingDateKey()).catch(() => null);
-  if (today) {
-    const fallback = today.status === "draft" ? "draft" : "published";
-    return {
-      brief: {
-        ...structuredClone(today.brief),
-        warning: mergeWarnings(today.brief.warning, STALE_LIVE_BRIEF_WARNING),
-      },
-      fallback,
-      errorCode: "LIVE_BRIEF_COLLECTION_FAILED",
-    };
-  }
 
   const published = await getLatestPublished().catch(() => null);
   if (!published) return null;

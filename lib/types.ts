@@ -168,6 +168,152 @@ export interface HeadlineClaim {
   generatorVersion: string;
 }
 
+export type WhatChangedStatus =
+  | "first_seen"
+  | "changed"
+  | "unchanged"
+  | "legacy_unverified"
+  | "comparison_unavailable";
+
+export type WhatChangedKind =
+  | "first_seen"
+  | "evidence_added"
+  | "evidence_removed"
+  | "evidence_revised"
+  | "claim_support_added"
+  | "claim_support_removed"
+  | "claim_support_changed"
+  | "claim_relation_added"
+  | "claim_relation_removed"
+  | "claim_relation_changed"
+  | "numeric_changed"
+  | "direction_established"
+  | "direction_changed"
+  | "claim_changed"
+  | "state_changed"
+  | "rank_up"
+  | "rank_down"
+  | "entered"
+  | "reentered";
+
+export type WhatChangedValue = Record<string, unknown>;
+
+export interface WhatChangedItem {
+  id: string;
+  ordinal: number;
+  kind: WhatChangedKind;
+  subjectKey: string;
+  reasonCode: string;
+  summary: string;
+  before?: WhatChangedValue;
+  after?: WhatChangedValue;
+  evidenceVersionIds: string[];
+  changeHash: string;
+}
+
+export interface NumericFact {
+  factKey: string;
+  claimKey: string;
+  metricKey: string;
+  subjectKey: string;
+  periodKey: string;
+  value: string;
+  unit: string;
+  currency?: string;
+  scale: string;
+  rawToken: string;
+  startOffset: number;
+  endOffset: number;
+  originalText: string;
+  parserVersion: string;
+  comparisonStatus: "comparable" | "uncomparable";
+  comparisonReason: string;
+  evidenceVersionIds: string[];
+}
+
+export type EvidenceRetractionReason =
+  | "source_retracted"
+  | "invalid_locator"
+  | "duplicate"
+  | "review_rejected"
+  | "superseded";
+
+export interface EvidenceRetractionRequest {
+  requestId: string;
+  eventId: string;
+  fromEventVersionId: string;
+  evidenceItemId: string;
+  evidenceVersionId: string;
+  claimKey?: string;
+  /** Exact relationship removed from the previous claim version. */
+  citationRelation?: EvidenceSupportRelation;
+  reasonCode: EvidenceRetractionReason;
+  reasonNote: string;
+  replacementEvidenceVersionId?: string;
+}
+
+export interface EventVersionComparison {
+  eventId: string;
+  previousVersionId?: string;
+  currentVersionId: string;
+  status: Extract<WhatChangedStatus, "first_seen" | "changed" | "legacy_unverified" | "comparison_unavailable">;
+  algorithmVersion: string;
+  inputHash: string;
+  resultHash: string;
+  comparedAt: string;
+  summary: string;
+  items: WhatChangedItem[];
+}
+
+export type WhatChangedBaselineKind = "previous_observation" | "previous_published";
+export type SnapshotEventPresence =
+  | "first_seen"
+  | "continued"
+  | "entered"
+  | "reentered"
+  | "no_baseline";
+export type SnapshotRankMovement = "up" | "down" | "unchanged" | "not_comparable";
+
+export interface SnapshotEventChange {
+  currentSnapshotId: string;
+  eventId: string;
+  currentEventVersionId: string;
+  baselineKind: WhatChangedBaselineKind;
+  /** Exact contextual baseline, even when that snapshot did not contain this event. */
+  baselineSnapshotId?: string;
+  /** Exact baseline event version when the contextual baseline contained this event. */
+  baselineEventVersionId?: string;
+  /** Earlier same-event observation used only to distinguish entered from reentered. */
+  historicalObservationSnapshotId?: string;
+  presence: SnapshotEventPresence;
+  previousRank?: number;
+  currentRank: number;
+  rankDelta?: number;
+  rankMovement: SnapshotRankMovement;
+  status: WhatChangedStatus;
+  algorithmVersion: string;
+  inputHash: string;
+  resultHash: string;
+  comparedAt: string;
+  summary: string;
+  items: WhatChangedItem[];
+}
+
+export interface WhatChangedProjection {
+  schemaVersion: "what-changed/v1";
+  algorithmVersion: string;
+  status: WhatChangedStatus;
+  summary: string;
+  /** Investor-facing comparison against the immediately preceding published brief. */
+  investor: SnapshotEventChange;
+  /** Ten-minute/review comparison against the preceding observation of this event. */
+  operational: SnapshotEventChange;
+  /** Intrinsic adjacent event-version transition, retained even when a later snapshot reuses it. */
+  latestVersion: EventVersionComparison;
+  items: WhatChangedItem[];
+  resultHash: string;
+}
+
 export interface SourceLink {
   name: string;
   type: SourceType;
@@ -259,6 +405,7 @@ export interface Headline {
   sentiment: Sentiment;
   sources: SourceLink[];
   claims?: HeadlineClaim[];
+  whatChanged?: WhatChangedProjection;
 }
 
 export interface MarketHeat {
@@ -417,6 +564,12 @@ export interface EventVersionRecord {
   observedAt: string;
   runId: string;
   headline: Headline;
+  comparison?: EventVersionComparison;
+  numericFacts?: NumericFact[];
+  actorType?: "system" | "admin" | "legacy";
+  actorIdHash?: string;
+  changeReason?: string;
+  requestId?: string;
   createdAt: string;
 }
 
@@ -435,9 +588,10 @@ export interface BriefSnapshotEventRecord {
   crossSourceCount?: number;
   matchMethod: EventMatchMethod;
   matchConfidence: number;
+  changes?: SnapshotEventChange[];
 }
 
-export type BriefSnapshotEventProjection = Omit<BriefSnapshotEventRecord, "snapshotId">;
+export type BriefSnapshotEventProjection = Omit<BriefSnapshotEventRecord, "snapshotId" | "changes">;
 
 export interface BriefSnapshotRecord {
   id: string;
@@ -451,6 +605,10 @@ export interface BriefSnapshotRecord {
   payloadHash: string;
   brief: DailyBrief;
   createdAt: string;
+  actorType?: "system" | "admin" | "legacy";
+  actorIdHash?: string;
+  actionReason?: string;
+  actionRequestId?: string;
   events: BriefSnapshotEventRecord[];
 }
 

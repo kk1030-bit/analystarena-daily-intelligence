@@ -19,6 +19,7 @@ export interface PublicationEvidenceIssue {
     | "CLAIM_PENDING"
     | "CITATION_MISSING"
     | "CITATION_VERSION_MISSING"
+    | "TRANSLATION_INCOMPLETE"
     | "EVIDENCE_INVALID";
 }
 
@@ -106,6 +107,14 @@ function claimIssues(
 export function publicationEvidenceIssues(brief: DailyBrief): PublicationEvidenceIssue[] {
   return brief.headlines.flatMap((headline) => {
     const issues: PublicationEvidenceIssue[] = [];
+    if (brief.translationEnabled !== true) {
+      issues.push(issue(
+        headline,
+        "translation",
+        "TRANSLATION_INCOMPLETE",
+        "简体中文自动翻译尚未完整完成，必须先保存严格翻译后的审核快照",
+      ));
+    }
     const sources = Array.isArray(headline.sources) ? headline.sources : [];
     if (!sources.length) {
       issues.push(issue(headline, "source", "SOURCE_MISSING", "事件没有任何可核对的来源"));

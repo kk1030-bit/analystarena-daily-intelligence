@@ -36,7 +36,10 @@ function liveHeaders(
 
 export async function GET() {
   const selected = await getDisplayBrief();
-  return NextResponse.json(await localizeBriefContent(selected.brief), {
+  // The anonymous canonical endpoint must expose the same immutable payload
+  // that was reviewed, published and rendered into the archived PDF. Any
+  // translation or enrichment here would create a fourth, unaudited version.
+  return NextResponse.json(selected.brief, {
     headers: {
       "Cache-Control": "no-store",
       "X-AnalystArena-Origin": selected.origin,

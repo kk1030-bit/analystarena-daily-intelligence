@@ -1,6 +1,5 @@
 import { getDisplayBrief } from "@/lib/display-brief";
 import { getLiveBriefContextBrief, normalizeLiveBriefContext } from "@/lib/live-brief";
-import { localizeBriefContent } from "@/lib/translation";
 import { SignalExplorer } from "./SignalExplorer";
 
 export const dynamic = "force-dynamic";
@@ -14,10 +13,10 @@ export default async function SignalsPage({ searchParams }: { searchParams: Prom
     try {
       brief = await getLiveBriefContextBrief(contextBatch);
     } catch {
-      brief = await localizeBriefContent((await getDisplayBrief()).brief);
+      brief = (await getDisplayBrief()).brief;
     }
   } else {
-    brief = await localizeBriefContent((await getDisplayBrief()).brief);
+    brief = (await getDisplayBrief()).brief;
   }
   const legacyFilter = !signal && !filter && (platform === "reddit" || platform === "x") ? platform : undefined;
   return <SignalExplorer brief={brief} initialPlatform={platform} initialFilter={filter ?? legacyFilter} initialEvidence={evidence} initialSignal={signal} context={isTrendingContext ? "trending" : undefined} contextBatch={contextBatch} />;

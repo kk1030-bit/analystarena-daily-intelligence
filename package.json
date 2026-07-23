@@ -10,9 +10,10 @@
     "build": "next build",
     "start": "next start",
     "test": "npm run build",
-    "test:brief": "tsx scripts/test-time.ts && tsx scripts/test-display-brief.ts && tsx scripts/test-live-brief.ts && tsx scripts/test-source-identity.ts && tsx scripts/test-source-evidence.ts && tsx scripts/test-source-observation-binding.ts && tsx scripts/test-feed-evidence.ts && tsx scripts/test-social-evidence.ts && tsx scripts/test-remote-social-ingestion.ts && tsx scripts/test-review-publication-evidence.ts && tsx scripts/test-publication-issues.ts && tsx scripts/test-event-versioning.ts && tsx scripts/test-translation.ts && tsx scripts/test-market-direction.ts && tsx scripts/test-collector-routing.ts && tsx scripts/test-publish-review-gate.ts && tsx scripts/test-pdf-preview-route.ts && tsx scripts/test-publish-pdf-layout.ts",
+    "test:brief": "tsx scripts/test-time.ts && tsx scripts/test-display-brief.ts && tsx scripts/test-live-brief.ts && tsx scripts/test-source-identity.ts && tsx scripts/test-source-evidence.ts && tsx scripts/test-source-observation-binding.ts && tsx scripts/test-feed-evidence.ts && tsx scripts/test-social-evidence.ts && tsx scripts/test-remote-social-ingestion.ts && tsx scripts/test-review-publication-evidence.ts && tsx scripts/test-publication-issues.ts && tsx scripts/test-event-versioning.ts && tsx scripts/test-what-changed.ts && tsx scripts/test-what-changed-implementation-hash.ts && tsx scripts/test-auth-audit.ts && tsx scripts/test-translation.ts && tsx scripts/test-market-direction.ts && tsx scripts/test-collector-routing.ts && tsx scripts/test-publish-review-gate.ts && tsx scripts/test-pdf-preview-route.ts && tsx scripts/test-publish-pdf-layout.ts",
     "test:events:postgres": "tsx scripts/test-event-versioning-postgres.ts",
     "test:evidence:postgres": "tsx scripts/test-source-evidence-postgres.ts",
+    "test:what-changed:postgres": "tsx scripts/test-what-changed-postgres.ts",
     "test:stocks": "tsx scripts/test-request-json.ts && tsx scripts/test-stock-payload.ts && tsx scripts/test-stock-db.ts && tsx scripts/test-equity-impact.ts && tsx scripts/test-stock-routes.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },

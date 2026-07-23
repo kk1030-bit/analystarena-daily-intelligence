@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   adminConfigured,
+  auditConfigured,
   isAdminRequest,
   redditSearchConfigured,
   stockSearchConfigured,
@@ -24,6 +25,7 @@ export async function GET(request: Request) {
   const ready = database.ok
     && database.mode === "postgres"
     && adminConfigured()
+    && auditConfigured()
     && cronConfigured
     && redditSearchConfigured()
     && stockSearchConfigured();
@@ -37,6 +39,7 @@ export async function GET(request: Request) {
     translationEnabled: true,
     translationLanguage: "zh-CN",
     adminConfigured: adminConfigured(),
+    auditConfigured: auditConfigured(),
     cronConfigured,
     redditSearchApiConfigured: redditSearchConfigured(),
     stockSearchApiConfigured: stockSearchConfigured(),

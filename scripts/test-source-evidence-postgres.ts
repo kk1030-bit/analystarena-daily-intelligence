@@ -557,6 +557,7 @@ assert.equal(
 assert.deepEqual(await db.verifyBriefEvidenceAuthority(translatedSave.brief), []);
 
 const reversedSources = structuredClone(saved.brief);
+reversedSources.generatedAt = `${date}T04:10:00.000Z`;
 reversedSources.headlines[0].sources.reverse();
 const versionCountBeforeReorderedSave = (await db.listEventVersions(eventId)).length;
 const reorderedSave = await db.saveDraft(reversedSources, {

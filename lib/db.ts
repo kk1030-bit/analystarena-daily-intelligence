@@ -1,14 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { Pool, type PoolClient } from "pg";
 import {
   aliasesForHeadline,
-  briefPayloadHash,
+  canonicalJson,
   createStableEventIdentity,
   eventVersionMaterial,
   findSemanticEvent,
   mergeRetainedEvidence,
+  stableHash,
 } from "./event-versioning";
 import { ensureRawStoryIdentity } from "./source-identity";
 import {
@@ -24,6 +25,15 @@ import {
   sha256ExactUtf8,
   validateHeadlineEvidence,
 } from "./source-evidence";
+import {
+  compareEventBaseline,
+  compareEventVersions,
+  compareSnapshotEvent,
+  extractNumericFacts,
+  projectWhatChanged,
+  WHAT_CHANGED_ALGORITHM_VERSION,
+  WHAT_CHANGED_IMPLEMENTATION_HASH,
+} from "./what-changed";
 import type {
   BriefSnapshotEventRecord,
   BriefSnapshotEventProjection,
@@ -35,9 +45,13 @@ import type {
   DailyBrief,
   EventMatchMethod,
   EventRecord,
+  EvidenceRetractionRequest,
   EventVersionRecord,
+  EventVersionComparison,
   Headline,
+  NumericFact,
   RawStory,
+  SnapshotEventChange,
   SourceCapture,
   SourceEvidence,
   SourceLink,
@@ -51,6 +65,7 @@ import type {
   StockSyncPayload,
   StockSyncRun,
   TimestampKind,
+  WhatChangedProjection,
 } from "./types";
 
 export interface SaveSourceStoriesResult {
@@ -67,10 +82,12 @@ interface DatabaseRow {
   updated_at: string | Date;
   published_at: string | Date | null;
   has_pdf: boolean;
+  current_snapshot_id: string | null;
 }
 
 interface MemoryEntry extends BriefRecord {
   pdf?: Buffer;
+  currentSnapshotId: string;
 }
 
 interface MemoryEventEntry extends EventRecord {
@@ -96,6 +113,27 @@ interface MemorySourceDocument {
     story: RawStory;
     collectedAt: string;
   }>;
+}
+
+interface MemoryEvidenceRetraction {
+  request: EvidenceRetractionRequest;
+  requestHash: string;
+  toEventVersionId: string;
+  actorType: "system" | "admin";
+  actorIdHash: string;
+  requestedAt: string;
+}
+
+interface MemoryPublicationAudit {
+  briefId: string;
+  snapshotId: string;
+  snapshotPayloadHash: string;
+  pdfSha256: string;
+  actorType: "system" | "admin";
+  actorIdHash?: string;
+  actionReason?: string;
+  requestId?: string;
+  publishedAt: string;
 }
 
 interface RedditDatabaseRow {
@@ -137,6 +175,10 @@ interface BriefSnapshotRow {
   previous_snapshot_id: string | null;
   payload_hash: string;
   payload: DailyBrief | string;
+  actor_type: BriefSnapshotRecord["actorType"] | null;
+  actor_id_hash: string | null;
+  action_reason: string | null;
+  action_request_id: string | null;
   created_at: string | Date;
 }
 
@@ -159,6 +201,10 @@ interface EventDatabaseRow {
   version_observed_at: string | Date | null;
   version_run_id: string | null;
   version_payload: { headline?: Headline } | string | null;
+  version_actor_type: EventVersionRecord["actorType"] | null;
+  version_actor_id_hash: string | null;
+  version_change_reason: string | null;
+  version_request_id: string | null;
   version_created_at: string | Date | null;
 }
 
@@ -174,6 +220,10 @@ interface EventVersionRow {
   observed_at: string | Date;
   run_id: string;
   payload: EventVersionPayload | string;
+  actor_type: EventVersionRecord["actorType"] | null;
+  actor_id_hash: string | null;
+  change_reason: string | null;
+  request_id: string | null;
   created_at: string | Date;
 }
 
@@ -207,6 +257,72 @@ interface BriefSnapshotClaimPresentationRow {
   ordinal: number;
   statement: string;
   language: string;
+}
+
+interface EventVersionComparisonRow {
+  event_id: string;
+  current_version_id: string;
+  previous_version_id: string | null;
+  status: EventVersionComparison["status"];
+  algorithm_version: string;
+  input_hash: string;
+  result_hash: string;
+  summary: string;
+  compared_at: string | Date;
+}
+
+interface WhatChangedItemRow {
+  item_id: string;
+  ordinal: number;
+  kind: SnapshotEventChange["items"][number]["kind"];
+  subject_key: string;
+  reason_code: string;
+  summary: string;
+  before_value: Record<string, unknown> | string | null;
+  after_value: Record<string, unknown> | string | null;
+  evidence_version_ids: string[] | string;
+  change_hash: string;
+}
+
+interface NumericFactRow {
+  fact_key: string;
+  claim_key: string;
+  metric_key: string;
+  subject_key: string;
+  period_key: string;
+  value_canonical: string;
+  unit: string;
+  currency: string | null;
+  scale: string;
+  raw_token: string;
+  start_offset: number;
+  end_offset: number;
+  original_text: string;
+  parser_version: string;
+  comparison_status: NumericFact["comparisonStatus"];
+  comparison_reason: string;
+  evidence_version_ids: string[] | string | null;
+}
+
+interface SnapshotEventChangeRow {
+  current_snapshot_id: string;
+  event_id: string;
+  current_event_version_id: string;
+  baseline_kind: SnapshotEventChange["baselineKind"];
+  baseline_snapshot_id: string | null;
+  baseline_event_version_id: string | null;
+  historical_observation_snapshot_id: string | null;
+  presence: SnapshotEventChange["presence"];
+  previous_rank: number | null;
+  current_rank: number;
+  rank_delta: number | null;
+  rank_movement: SnapshotEventChange["rankMovement"];
+  status: SnapshotEventChange["status"];
+  algorithm_version: string;
+  input_hash: string;
+  result_hash: string;
+  summary: string;
+  compared_at: string | Date;
 }
 
 interface StockProfileRow {
@@ -269,6 +385,8 @@ declare global {
   var __analystArenaSourceDocumentMemory: Map<string, MemorySourceDocument> | undefined;
   var __analystArenaCollectionRunMemory: Map<string, CollectionRunRecord> | undefined;
   var __analystArenaBriefSnapshotMemory: Map<string, BriefSnapshotRecord> | undefined;
+  var __analystArenaEvidenceRetractionMemory: Map<string, MemoryEvidenceRetraction> | undefined;
+  var __analystArenaPublicationAuditMemory: Map<string, MemoryPublicationAudit> | undefined;
 }
 
 const memory = globalThis.__analystArenaMemory ?? new Map<string, MemoryEntry>();
@@ -291,6 +409,12 @@ const collectionRunMemory = globalThis.__analystArenaCollectionRunMemory ?? new 
 globalThis.__analystArenaCollectionRunMemory = collectionRunMemory;
 const briefSnapshotMemory = globalThis.__analystArenaBriefSnapshotMemory ?? new Map<string, BriefSnapshotRecord>();
 globalThis.__analystArenaBriefSnapshotMemory = briefSnapshotMemory;
+const evidenceRetractionMemory = globalThis.__analystArenaEvidenceRetractionMemory
+  ?? new Map<string, MemoryEvidenceRetraction>();
+globalThis.__analystArenaEvidenceRetractionMemory = evidenceRetractionMemory;
+const publicationAuditMemory = globalThis.__analystArenaPublicationAuditMemory
+  ?? new Map<string, MemoryPublicationAudit>();
+globalThis.__analystArenaPublicationAuditMemory = publicationAuditMemory;
 
 export function storageMode(): "postgres" | "memory" {
   return process.env.DATABASE_URL ? "postgres" : "memory";
@@ -463,7 +587,14 @@ async function ensureSchema(): Promise<void> {
 
 function dateOnly(value: string | Date): string {
   if (typeof value === "string") return value.slice(0, 10);
-  return value.toISOString().slice(0, 10);
+  // node-postgres materializes a PostgreSQL DATE at local midnight. Converting
+  // that value through UTC can move Beijing/Taipei deployments to the previous
+  // calendar day, so DATE values must be read from their local date fields.
+  return [
+    value.getFullYear().toString().padStart(4, "0"),
+    (value.getMonth() + 1).toString().padStart(2, "0"),
+    value.getDate().toString().padStart(2, "0"),
+  ].join("-");
 }
 
 function iso(value: string | Date): string {
@@ -473,7 +604,10 @@ function iso(value: string | Date): string {
 function validIsoOrNow(value?: string): string {
   if (!value) return new Date().toISOString();
   const parsed = new Date(value);
-  return Number.isNaN(parsed.valueOf()) ? new Date().toISOString() : parsed.toISOString();
+  if (Number.isNaN(parsed.valueOf())) {
+    throw new TypeError(`Invalid observation timestamp: ${value}`);
+  }
+  return parsed.toISOString();
 }
 
 function collectionRunKey(stream: BriefSnapshotStream, batchKey: string): string {
@@ -532,6 +666,10 @@ function rowToBriefSnapshot(row: BriefSnapshotRow, events: BriefSnapshotEventRec
     payloadHash: row.payload_hash,
     brief: payload,
     createdAt: iso(row.created_at),
+    actorType: row.actor_type ?? undefined,
+    actorIdHash: row.actor_id_hash ?? undefined,
+    actionReason: row.action_reason ?? undefined,
+    actionRequestId: row.action_request_id ?? undefined,
     events,
   };
 }
@@ -575,7 +713,108 @@ function rowToEventVersion(row: EventVersionRow): EventVersionRecord {
     observedAt: iso(row.observed_at),
     runId: row.run_id,
     headline,
+    actorType: row.actor_type ?? undefined,
+    actorIdHash: row.actor_id_hash ?? undefined,
+    changeReason: row.change_reason ?? undefined,
+    requestId: row.request_id ?? undefined,
     createdAt: iso(row.created_at),
+  };
+}
+
+function jsonObject(value: Record<string, unknown> | string | null): Record<string, unknown> | undefined {
+  if (value === null) return undefined;
+  return typeof value === "string" ? JSON.parse(value) as Record<string, unknown> : value;
+}
+
+function postgresTextArray(value: string[] | string | null | undefined): string[] {
+  if (Array.isArray(value)) return value;
+  if (!value || value === "{}") return [];
+  return value
+    .replace(/^\{|\}$/g, "")
+    .split(",")
+    .map((item) => item.replace(/^"|"$/g, ""))
+    .filter(Boolean);
+}
+
+function rowToWhatChangedItem(row: WhatChangedItemRow) {
+  return {
+    id: row.item_id,
+    ordinal: row.ordinal,
+    kind: row.kind,
+    subjectKey: row.subject_key,
+    reasonCode: row.reason_code,
+    summary: row.summary,
+    before: jsonObject(row.before_value),
+    after: jsonObject(row.after_value),
+    evidenceVersionIds: postgresTextArray(row.evidence_version_ids),
+    changeHash: row.change_hash,
+  };
+}
+
+function rowToEventVersionComparison(
+  row: EventVersionComparisonRow,
+  items: ReturnType<typeof rowToWhatChangedItem>[],
+): EventVersionComparison {
+  return {
+    eventId: row.event_id,
+    previousVersionId: row.previous_version_id ?? undefined,
+    currentVersionId: row.current_version_id,
+    status: row.status,
+    algorithmVersion: row.algorithm_version,
+    inputHash: row.input_hash,
+    resultHash: row.result_hash,
+    comparedAt: iso(row.compared_at),
+    summary: row.summary,
+    items,
+  };
+}
+
+function rowToNumericFact(row: NumericFactRow): NumericFact {
+  return {
+    factKey: row.fact_key,
+    claimKey: row.claim_key,
+    metricKey: row.metric_key,
+    subjectKey: row.subject_key,
+    periodKey: row.period_key,
+    value: row.value_canonical,
+    unit: row.unit,
+    currency: row.currency ?? undefined,
+    scale: row.scale,
+    rawToken: row.raw_token,
+    startOffset: row.start_offset,
+    endOffset: row.end_offset,
+    originalText: row.original_text,
+    parserVersion: row.parser_version,
+    comparisonStatus: row.comparison_status,
+    comparisonReason: row.comparison_reason,
+    evidenceVersionIds: postgresTextArray(row.evidence_version_ids),
+  };
+}
+
+function rowToSnapshotEventChange(
+  row: SnapshotEventChangeRow,
+  items: ReturnType<typeof rowToWhatChangedItem>[],
+): SnapshotEventChange {
+  return {
+    currentSnapshotId: row.current_snapshot_id,
+    eventId: row.event_id,
+    currentEventVersionId: row.current_event_version_id,
+    baselineKind: row.baseline_kind,
+    baselineSnapshotId: row.baseline_snapshot_id ?? undefined,
+    baselineEventVersionId: row.baseline_event_version_id ?? undefined,
+    historicalObservationSnapshotId: row.historical_observation_snapshot_id ?? undefined,
+    presence: row.presence,
+    previousRank: row.previous_rank ?? undefined,
+    currentRank: row.current_rank,
+    rankDelta: row.rank_delta ?? undefined,
+    rankMovement: row.rank_movement,
+    status: row.status,
+    algorithmVersion: row.algorithm_version,
+    inputHash: row.input_hash,
+    resultHash: row.result_hash,
+    comparedAt: iso(row.compared_at),
+    summary: row.summary,
+    items,
   };
 }
 
@@ -1561,12 +1800,72 @@ export interface PersistBriefOptions {
   stream?: BriefSnapshotStream;
   batchKey?: string;
   observedAt?: string;
+  actor?: {
+    type: "system" | "admin";
+    /** Keyed-HMAC pseudonymous actor identifier; never pass a credential itself. */
+    idHash?: string;
+    reason?: string;
+    requestId?: string;
+  };
+  evidenceRetractions?: EvidenceRetractionRequest[];
+}
+
+type NormalizedPersistBriefOptions =
+  Required<Pick<PersistBriefOptions, "stream" | "batchKey" | "observedAt">>
+  & {
+    actor: NonNullable<PersistBriefOptions["actor"]>;
+    evidenceRetractions: EvidenceRetractionRequest[];
+  };
+
+function normalizeActor(actor: PersistBriefOptions["actor"]): NonNullable<PersistBriefOptions["actor"]> {
+  const normalized = actor ?? { type: "system" as const };
+  if (normalized.idHash && !/^[0-9a-f]{64}$/.test(normalized.idHash)) {
+    throw new TypeError("actor.idHash must be a lowercase SHA-256 digest");
+  }
+  if (normalized.type === "admin"
+    && (!normalized.idHash || !normalized.reason?.trim() || !normalized.requestId?.trim())) {
+    throw new TypeError(
+      "admin changes require a pseudonymous actor hash, explicit reason, and server request ID",
+    );
+  }
+  return {
+    ...normalized,
+    reason: normalized.reason?.trim(),
+    requestId: normalized.requestId?.trim(),
+  };
+}
+
+function groupEvidenceRetractions(
+  options: NormalizedPersistBriefOptions,
+): Map<string, EvidenceRetractionRequest[]> {
+  if (!options.evidenceRetractions.length) return new Map();
+  if (!options.actor.idHash || !options.actor.reason?.trim()) {
+    throw new TypeError("evidence retractions require an identified actor and an explicit audit reason");
+  }
+  const seen = new Set<string>();
+  const grouped = new Map<string, EvidenceRetractionRequest[]>();
+  for (const request of options.evidenceRetractions) {
+    if (Boolean(request.claimKey) !== Boolean(request.citationRelation)
+      || (request.citationRelation !== undefined
+        && !["supports", "contradicts", "context"].includes(request.citationRelation))) {
+      throw new TypeError(
+        `retraction ${request.requestId} must pair a claim key with one exact citation relation`,
+      );
+    }
+    if (seen.has(request.requestId)) {
+      throw new TypeError(`duplicate evidence retraction request ID: ${request.requestId}`);
+    }
+    seen.add(request.requestId);
+    const requests = grouped.get(request.eventId) ?? [];
+    requests.push(structuredClone(request));
+    grouped.set(request.eventId, requests);
+  }
+  return grouped;
 }
 
 type DailyBriefWrite =
   | { kind: "save_draft" }
-  | { kind: "update_draft"; id: string; expectedSnapshotId?: string }
-  | { kind: "publish"; id: string; pdf: Buffer; expectedSnapshotId?: string };
+  | { kind: "update_draft"; id: string; expectedSnapshotId?: string };
 
 interface PersistBriefResult {
   snapshot: BriefSnapshotRecord;
@@ -1595,6 +1894,246 @@ function latestMemoryEventVersion(entry: MemoryEventEntry): EventVersionRecord |
   return entry.versions.at(-1);
 }
 
+function latestMemoryObservation(
+  eventId: string,
+  boundary: { date: string; maximumSameDateSequence: number },
+): BriefSnapshotEventRecord | undefined {
+  return [...briefSnapshotMemory.values()]
+    .filter((snapshot) =>
+      snapshot.date < boundary.date
+      || (
+        snapshot.date === boundary.date
+        && snapshot.sequenceNumber <= boundary.maximumSameDateSequence
+      ))
+    .sort((left, right) => right.date.localeCompare(left.date)
+      || right.sequenceNumber - left.sequenceNumber)
+    .flatMap((snapshot) => snapshot.events)
+    .find((event) => event.eventId === eventId);
+}
+
+function previousPublishedMemorySnapshot(date: string): BriefSnapshotRecord | undefined {
+  const record = [...memory.values()]
+    .filter((entry) => entry.status === "published" && entry.date < date)
+    .sort((left, right) => right.date.localeCompare(left.date))[0];
+  const snapshotId = record?.brief.snapshot?.id;
+  return snapshotId ? briefSnapshotMemory.get(snapshotId) : undefined;
+}
+
+function latestPublishedMemoryObservation(
+  eventId: string,
+  beforeDate: string,
+): BriefSnapshotEventRecord | undefined {
+  for (const record of [...memory.values()]
+    .filter((entry) => entry.status === "published" && entry.date < beforeDate)
+    .sort((left, right) => right.date.localeCompare(left.date))) {
+    const snapshotId = record.brief.snapshot?.id;
+    const event = snapshotId
+      ? briefSnapshotMemory.get(snapshotId)?.events.find((candidate) => candidate.eventId === eventId)
+      : undefined;
+    if (event) return event;
+  }
+  return undefined;
+}
+
+function withoutDerivedWhatChanged(headline: Headline): Headline {
+  const sanitized = structuredClone(headline);
+  delete sanitized.whatChanged;
+  return sanitized;
+}
+
+function applyEvidenceRetractions(
+  previous: EventVersionRecord | undefined,
+  current: Headline,
+  requests: EvidenceRetractionRequest[],
+): { headline: Headline; applied: EvidenceRetractionRequest[] } {
+  if (!requests.length) return { headline: current, applied: [] };
+  if (!previous) {
+    throw new EvidenceIntegrityError(requests.map((request) => ({
+      code: "RETRACTION_PREVIOUS_VERSION_REQUIRED",
+      message: `Retraction ${request.requestId} requires an existing event version`,
+      headlineId: current.id,
+    })));
+  }
+
+  const headline = structuredClone(current);
+  const applied: EvidenceRetractionRequest[] = [];
+  for (const request of requests) {
+    if (!request.requestId.trim() || !request.reasonNote.trim()) {
+      throw new EvidenceIntegrityError([{
+        code: "RETRACTION_REASON_REQUIRED",
+        message: "Evidence retractions require a stable request ID and non-empty reason",
+        headlineId: current.id,
+      }]);
+    }
+    if (request.eventId !== current.id || request.fromEventVersionId !== previous.id) {
+      throw new EvidenceIntegrityError([{
+        code: "RETRACTION_VERSION_MISMATCH",
+        message: `Retraction ${request.requestId} does not target the exact previous event version`,
+        headlineId: current.id,
+      }]);
+    }
+    const previousEvidence = previous.headline.sources
+      .flatMap((source) => source.evidence ?? [])
+      .find((evidence) =>
+        evidence.id === request.evidenceItemId
+        && evidence.versionId === request.evidenceVersionId);
+    if (!previousEvidence) {
+      throw new EvidenceIntegrityError([{
+        code: "RETRACTION_EVIDENCE_MISSING",
+        message: `Retraction ${request.requestId} targets evidence outside the previous event version`,
+        headlineId: current.id,
+      }]);
+    }
+    let previousCitationRelation: EvidenceRetractionRequest["citationRelation"];
+    if (request.claimKey) {
+      const claim = previous.headline.claims?.find((candidate) => candidate.claimKey === request.claimKey);
+      const citations = claim?.citations.filter((candidate) =>
+        candidate.id === request.evidenceItemId
+        && candidate.versionId === request.evidenceVersionId
+        && candidate.relation === request.citationRelation) ?? [];
+      if (!claim || citations.length !== 1) {
+        throw new EvidenceIntegrityError([{
+          code: "RETRACTION_CLAIM_SUPPORT_MISSING",
+          message: `Retraction ${request.requestId} does not target one exact ${request.citationRelation} relationship for ${request.claimKey}`,
+          headlineId: current.id,
+        }]);
+      }
+      previousCitationRelation = citations[0].relation;
+    }
+
+    if (!request.claimKey) {
+      headline.sources = headline.sources.map((source) => ({
+        ...source,
+        evidence: source.evidence?.filter((evidence) =>
+          evidence.id !== request.evidenceItemId
+          || evidence.versionId !== request.evidenceVersionId),
+      }));
+    }
+    headline.claims = headline.claims?.map((claim) => {
+      if (request.claimKey && claim.claimKey !== request.claimKey) return claim;
+      const citations = claim.citations.filter((citation) =>
+        citation.id !== request.evidenceItemId
+        || citation.versionId !== request.evidenceVersionId
+        || (
+          request.claimKey
+          && citation.relation !== previousCitationRelation
+        ));
+      if (citations.length === claim.citations.length) return claim;
+      const lostPublishableSupport = !citations.some((citation) =>
+        citation.relation === "supports"
+        && citation.confidence > 0
+        && citation.locatorStatus !== "unavailable"
+        && citation.directness !== "unavailable");
+      return {
+        ...claim,
+        citations: citations.map((citation, order) => ({ ...citation, order })),
+        verificationStatus: lostPublishableSupport
+          ? "pending_confirmation" as const
+          : claim.verificationStatus,
+      };
+    });
+
+    if (request.replacementEvidenceVersionId) {
+      const replacement = headline.sources
+        .flatMap((source) => source.evidence ?? [])
+        .find((evidence) => evidence.versionId === request.replacementEvidenceVersionId);
+      if (!replacement) {
+        throw new EvidenceIntegrityError([{
+          code: "RETRACTION_REPLACEMENT_MISSING",
+          message: `Replacement ${request.replacementEvidenceVersionId} is not part of the new event version`,
+          headlineId: current.id,
+        }]);
+      }
+      if (request.claimKey) {
+        const replacementSupport = headline.claims
+          ?.find((claim) => claim.claimKey === request.claimKey)
+          ?.citations.some((citation) =>
+            citation.relation === "supports"
+            && citation.id === replacement.id
+            && citation.versionId === replacement.versionId
+            && citation.sourceDocumentId === replacement.sourceDocumentId
+            && citation.sourceDocumentVersionId === replacement.sourceDocumentVersionId);
+        if (!replacementSupport) {
+          throw new EvidenceIntegrityError([{
+            code: "RETRACTION_REPLACEMENT_SUPPORT_MISSING",
+            message: `Replacement ${request.replacementEvidenceVersionId} is not exact support for ${request.claimKey}`,
+            headlineId: current.id,
+          }]);
+        }
+      }
+    }
+    applied.push(structuredClone(request));
+  }
+  return { headline, applied };
+}
+
+function changeItemClaimKey(
+  item: EventVersionComparison["items"][number],
+): string | undefined {
+  for (const value of [item.before, item.after]) {
+    if (value && typeof value.claimKey === "string" && value.claimKey.trim()) {
+      return value.claimKey;
+    }
+  }
+  return undefined;
+}
+
+function retractionAuthorizesChangeItem(
+  request: EvidenceRetractionRequest,
+  item: EventVersionComparison["items"][number],
+): boolean {
+  if (!item.evidenceVersionIds.includes(request.evidenceVersionId)) return false;
+  if (request.claimKey) {
+    const relation = item.before && typeof item.before.relation === "string"
+      ? item.before.relation
+      : item.kind === "claim_support_removed" || item.kind === "claim_support_changed"
+        ? "supports"
+        : undefined;
+    return (
+      item.kind === "claim_support_removed"
+      || item.kind === "claim_support_changed"
+      || item.kind === "claim_relation_removed"
+      || item.kind === "claim_relation_changed"
+    )
+      && changeItemClaimKey(item) === request.claimKey
+      && relation === request.citationRelation;
+  }
+  return item.kind === "evidence_removed"
+    || item.kind === "evidence_revised"
+    || item.kind === "claim_support_removed"
+    || item.kind === "claim_support_changed"
+    || item.kind === "claim_relation_removed"
+    || item.kind === "claim_relation_changed";
+}
+
+function assertRetractionScope(
+  comparison: EventVersionComparison,
+  requests: EvidenceRetractionRequest[],
+): void {
+  const removalItems = comparison.items.filter((item) =>
+    item.kind === "evidence_removed"
+    || item.kind === "claim_support_removed"
+    || item.kind === "claim_relation_removed");
+  const unauthorized = removalItems.filter((item) => !requests.some((request) =>
+    retractionAuthorizesChangeItem(request, item)));
+  if (unauthorized.length) {
+    throw new EvidenceIntegrityError(unauthorized.map((item) => ({
+      code: "UNAUTHORIZED_EVIDENCE_REMOVAL",
+      message: `Change item ${item.id} removes evidence without a matching scoped retraction`,
+      headlineId: comparison.eventId,
+    })));
+  }
+  const unused = requests.filter((request) => !comparison.items.some((item) =>
+    retractionAuthorizesChangeItem(request, item)));
+  if (unused.length) {
+    throw new EvidenceIntegrityError(unused.map((request) => ({
+      code: "RETRACTION_CHANGE_ITEM_BINDING_MISSING",
+      message: `Retraction ${request.requestId} did not authorize an exact evidence change item`,
+      headlineId: request.eventId,
+    })));
+  }
+}
+
 function remapBriefRelations(brief: DailyBrief, idMap: Map<string, string>, headlines: Headline[]): DailyBrief {
   const remapTopic = (topic: DailyBrief["socialBuzz"]["reddit"][number]) => ({
     ...structuredClone(topic),
@@ -1611,21 +2150,39 @@ function remapBriefRelations(brief: DailyBrief, idMap: Map<string, string>, head
 }
 
 function snapshotPayloadHash(brief: DailyBrief): string {
-  return briefPayloadHash(brief.headlines, {
-    date: brief.date,
-    marketHeat: brief.marketHeat,
-    socialBuzz: brief.socialBuzz,
-    watchlist: brief.watchlist,
+  const reviewedPayload: Partial<DailyBrief> = structuredClone(brief);
+  delete reviewedPayload.id;
+  delete reviewedPayload.status;
+  delete reviewedPayload.publishedAt;
+  delete reviewedPayload.storageMode;
+  delete reviewedPayload.snapshot;
+  return stableHash({
+    schema: "brief-snapshot-payload/v2",
+    payload: reviewedPayload,
+  });
+}
+
+function persistenceInputHash(
+  brief: DailyBrief,
+  options: NormalizedPersistBriefOptions,
+): string {
+  return stableHash({
+    schema: "brief-persistence-input/v1",
+    brief: snapshotPayloadHash(brief),
+    actor: options.actor,
+    evidenceRetractions: [...options.evidenceRetractions]
+      .sort((left, right) => left.requestId.localeCompare(right.requestId)),
   });
 }
 
 async function persistBriefObservationMemory(
   brief: DailyBrief,
-  options: Required<Pick<PersistBriefOptions, "stream" | "batchKey" | "observedAt">>,
+  options: NormalizedPersistBriefOptions,
   dailyWrite?: DailyBriefWrite,
 ): Promise<PersistBriefResult> {
   const runKey = collectionRunKey(options.stream, options.batchKey);
-  const inputHash = snapshotPayloadHash(brief);
+  const inputHash = persistenceInputHash(brief, options);
+  const generatedAt = validIsoOrNow(brief.generatedAt);
   const existingRun = collectionRunMemory.get(runKey);
   if (existingRun?.status === "success") {
     if (existingRun.inputHash && existingRun.inputHash !== inputHash) {
@@ -1639,7 +2196,7 @@ async function persistBriefObservationMemory(
     return { snapshot: structuredClone(existingSnapshot), record: record ? cloneMemory(record) : undefined };
   }
 
-  if (dailyWrite?.kind === "update_draft" || dailyWrite?.kind === "publish") {
+  if (dailyWrite?.kind === "update_draft") {
     const current = memory.get(dailyWrite.id);
     if (!current) throw new Error("Daily brief not found");
     if (current.status !== "draft") throw new Error("Published daily briefs are immutable");
@@ -1658,6 +2215,7 @@ async function persistBriefObservationMemory(
   const aliasBackup = structuredClone([...eventAliasMemory.entries()]);
   const runBackup = structuredClone([...collectionRunMemory.entries()]);
   const snapshotBackup = structuredClone([...briefSnapshotMemory.entries()]);
+  const retractionBackup = structuredClone([...evidenceRetractionMemory.entries()]);
 
   const startedAt = new Date().toISOString();
   const run: CollectionRunRecord = existingRun
@@ -1676,11 +2234,15 @@ async function persistBriefObservationMemory(
 
   try {
     const usedEventIds = new Set<string>();
+    const pendingRetractions = groupEvidenceRetractions(options);
+    const appliedRetractionIds = new Set<string>();
     const idMap = new Map<string, string>();
     const stableHeadlines: Headline[] = [];
     const observations: BriefSnapshotEventRecord[] = [];
+    const versionsByEvent = new Map<string, EventVersionRecord>();
 
-    for (const incoming of brief.headlines) {
+    for (const incomingCandidate of brief.headlines) {
+      const incoming = withoutDerivedWhatChanged(incomingCandidate);
       const aliases = aliasesForHeadline(incoming);
       const aliasEventIds = new Set(aliases
         .map((alias) => eventAliasMemory.get(`${alias.type}:${alias.key}`)?.eventId)
@@ -1733,7 +2295,21 @@ async function persistBriefObservationMemory(
       usedEventIds.add(entry.id);
 
       const previousVersion = latestMemoryEventVersion(entry);
-      const stableHeadline = mergeRetainedEvidence(previousVersion?.headline, { ...structuredClone(incoming), id: entry.id });
+      if (previousVersion
+        && Date.parse(options.observedAt) < Date.parse(previousVersion.observedAt)) {
+        throw new EvidenceIntegrityError([{
+          code: "EVENT_OBSERVATION_TIME_REGRESSION",
+          message: `Observation ${options.observedAt} precedes event version ${previousVersion.id} at ${previousVersion.observedAt}`,
+          headlineId: entry.id,
+        }]);
+      }
+      let stableHeadline = mergeRetainedEvidence(previousVersion?.headline, { ...structuredClone(incoming), id: entry.id });
+      const retractionResult = applyEvidenceRetractions(
+        previousVersion,
+        stableHeadline,
+        pendingRetractions.get(entry.id) ?? [],
+      );
+      stableHeadline = retractionResult.headline;
       const material = eventVersionMaterial(stableHeadline);
       let version = previousVersion;
       if (!version || version.contentHash !== material.versionHash) {
@@ -1750,9 +2326,48 @@ async function persistBriefObservationMemory(
           observedAt: options.observedAt,
           runId: run.id,
           headline: structuredClone(stableHeadline),
+          actorType: options.actor.type,
+          actorIdHash: options.actor.idHash,
+          changeReason: options.actor.reason,
+          requestId: options.actor.requestId,
           createdAt,
         };
+        const numericFacts = extractNumericFacts(stableHeadline);
+        version.numericFacts = numericFacts;
+        version.comparison = compareEventVersions(previousVersion, version, {
+          previous: previousVersion?.numericFacts ?? (
+            previousVersion ? extractNumericFacts(previousVersion.headline) : undefined
+          ),
+          current: numericFacts,
+        });
+        assertRetractionScope(version.comparison, retractionResult.applied);
         entry.versions.push(version);
+      }
+      if (retractionResult.applied.length && version === previousVersion) {
+        throw new EvidenceIntegrityError(retractionResult.applied.map((request) => ({
+          code: "RETRACTION_DID_NOT_CREATE_VERSION",
+          message: `Retraction ${request.requestId} did not change the immutable event material`,
+          headlineId: entry!.id,
+        })));
+      }
+      for (const request of retractionResult.applied) {
+        const requestHash = stableHash(request);
+        const existingRetraction = evidenceRetractionMemory.get(request.requestId);
+        if (existingRetraction) {
+          if (existingRetraction.requestHash !== requestHash) {
+            throw new Error(`Retraction request ${request.requestId} was reused with different content`);
+          }
+          throw new Error(`Retraction request ${request.requestId} was already applied`);
+        }
+        evidenceRetractionMemory.set(request.requestId, {
+          request: structuredClone(request),
+          requestHash,
+          toEventVersionId: version.id,
+          actorType: options.actor.type,
+          actorIdHash: options.actor.idHash!,
+          requestedAt: options.observedAt,
+        });
+        appliedRetractionIds.add(request.requestId);
       }
       entry.canonicalTitle = incoming.sources.find((source) => source.originalTitle)?.originalTitle ?? entry.canonicalTitle;
       entry.category = incoming.category;
@@ -1779,6 +2394,7 @@ async function persistBriefObservationMemory(
       }
 
       idMap.set(incoming.id, entry.id);
+      versionsByEvent.set(entry.id, version);
       stableHeadlines.push(stableHeadline);
       observations.push({
         snapshotId: "",
@@ -1795,14 +2411,123 @@ async function persistBriefObservationMemory(
         matchConfidence,
       });
     }
+    if (appliedRetractionIds.size !== options.evidenceRetractions.length) {
+      const missing = options.evidenceRetractions
+        .filter((request) => !appliedRetractionIds.has(request.requestId));
+      throw new EvidenceIntegrityError(missing.map((request) => ({
+        code: "RETRACTION_EVENT_NOT_IN_SNAPSHOT",
+        message: `Retraction ${request.requestId} did not resolve to a current snapshot event`,
+        headlineId: request.eventId,
+      })));
+    }
 
     const previous = [...briefSnapshotMemory.values()]
       .filter((snapshot) => snapshot.date === brief.date)
       .sort((left, right) => right.sequenceNumber - left.sequenceNumber)[0];
+    if (previous && Date.parse(generatedAt) < Date.parse(previous.generatedAt)) {
+      throw new EvidenceIntegrityError([{
+        code: "SNAPSHOT_GENERATED_TIME_REGRESSION",
+        message: `Snapshot time ${generatedAt} precedes same-date snapshot ${previous.id} at ${previous.generatedAt}`,
+        headlineId: brief.headlines[0]?.id ?? "brief",
+      }]);
+    }
     const sequenceNumber = (previous?.sequenceNumber ?? 0) + 1;
     const snapshotId = randomUUID();
     const persistedAt = new Date().toISOString();
-    let stableBrief = remapBriefRelations(brief, idMap, stableHeadlines);
+    const previousPublished = previousPublishedMemorySnapshot(brief.date);
+    const finalizedObservations: BriefSnapshotEventRecord[] = [];
+    const projectedHeadlines = stableHeadlines.map((headline, index) => {
+      const baseObservation = observations[index];
+      const currentObservation: BriefSnapshotEventRecord = {
+        ...baseObservation,
+        snapshotId,
+      };
+      const currentVersion = versionsByEvent.get(headline.id);
+      if (!currentVersion) throw new Error(`Missing current event version for ${headline.id}`);
+      const allVersions = eventMemory.get(headline.id)?.versions ?? [];
+      const intrinsicComparison = currentVersion.comparison ?? compareEventVersions(
+        currentVersion.previousVersionId
+          ? allVersions.find((candidate) => candidate.id === currentVersion.previousVersionId)
+          : undefined,
+        currentVersion,
+        {
+          previous: currentVersion.previousVersionId
+            ? allVersions.find((candidate) => candidate.id === currentVersion.previousVersionId)?.numericFacts
+            : undefined,
+          current: currentVersion.numericFacts,
+        },
+      );
+      const historicalObservation = latestMemoryObservation(headline.id, {
+        date: brief.date,
+        maximumSameDateSequence: previous?.sequenceNumber ?? 0,
+      });
+      const isFirstSeen = !historicalObservation
+        && currentVersion.versionNumber === 1
+        && !currentVersion.previousVersionId;
+      const operationalBaseline = previous?.events.find((event) => event.eventId === headline.id);
+      const operationalPreviousVersion = operationalBaseline
+        ? allVersions.find((candidate) => candidate.id === operationalBaseline.eventVersionId)
+        : undefined;
+      const operationalContent = operationalBaseline
+        && operationalPreviousVersion
+        && operationalPreviousVersion.id !== currentVersion.id
+        ? compareEventBaseline(operationalPreviousVersion, currentVersion, {
+            previous: operationalPreviousVersion.numericFacts,
+            current: currentVersion.numericFacts,
+          })
+        : undefined;
+      const operational = compareSnapshotEvent({
+        baselineKind: "previous_observation",
+        baselineSnapshotId: previous?.id,
+        baselineEvent: operationalBaseline,
+        historicalObservation: operationalBaseline ? undefined : historicalObservation,
+        current: currentObservation,
+        currentSnapshotId: snapshotId,
+        comparedAt: options.observedAt,
+        isFirstSeen,
+        legacyUnverified: intrinsicComparison.status === "legacy_unverified",
+        contentComparison: operationalContent,
+      });
+
+      const investorBaseline = previousPublished?.events.find((event) => event.eventId === headline.id);
+      const investorHistorical = investorBaseline
+        ? undefined
+        : latestPublishedMemoryObservation(headline.id, brief.date);
+      const investorPreviousVersion = investorBaseline
+        ? allVersions.find((candidate) => candidate.id === investorBaseline.eventVersionId)
+        : undefined;
+      const investorContent = investorBaseline
+        && investorPreviousVersion
+        && investorPreviousVersion.id !== currentVersion.id
+        ? compareEventBaseline(investorPreviousVersion, currentVersion, {
+            previous: investorPreviousVersion.numericFacts,
+            current: currentVersion.numericFacts,
+          })
+        : undefined;
+      const investor = compareSnapshotEvent({
+        baselineKind: "previous_published",
+        baselineSnapshotId: previousPublished?.id,
+        baselineEvent: investorBaseline,
+        historicalObservation: investorBaseline ? undefined : investorHistorical,
+        current: currentObservation,
+        currentSnapshotId: snapshotId,
+        comparedAt: options.observedAt,
+        isFirstSeen,
+        legacyUnverified: intrinsicComparison.status === "legacy_unverified",
+        contentComparison: investorContent,
+      });
+      const whatChanged = projectWhatChanged({
+        investor,
+        operational,
+        latestVersion: intrinsicComparison,
+      });
+      finalizedObservations.push({
+        ...currentObservation,
+        changes: [operational, investor],
+      });
+      return { ...headline, whatChanged };
+    });
+    let stableBrief = remapBriefRelations(brief, idMap, projectedHeadlines);
     const payloadHash = snapshotPayloadHash(stableBrief);
     stableBrief = {
       ...stableBrief,
@@ -1815,7 +2540,7 @@ async function persistBriefObservationMemory(
         previousSnapshotId: previous?.id,
         payloadHash,
         persistedAt,
-        events: observations.map(snapshotEventProjection),
+        events: finalizedObservations.map(snapshotEventProjection),
       },
     };
     const snapshot: BriefSnapshotRecord = {
@@ -1825,12 +2550,16 @@ async function persistBriefObservationMemory(
       batchKey: options.batchKey,
       sequenceNumber,
       date: brief.date,
-      generatedAt: validIsoOrNow(brief.generatedAt),
+      generatedAt,
       previousSnapshotId: previous?.id,
       payloadHash,
       brief: structuredClone(stableBrief),
       createdAt: persistedAt,
-      events: observations.map((observation) => ({ ...observation, snapshotId })),
+      actorType: options.actor.type,
+      actorIdHash: options.actor.idHash,
+      actionReason: options.actor.reason,
+      actionRequestId: options.actor.requestId,
+      events: finalizedObservations,
     };
     let record: BriefRecord | undefined;
     if (dailyWrite?.kind === "save_draft") {
@@ -1843,6 +2572,7 @@ async function persistBriefObservationMemory(
           date: stableBrief.date,
           status: "draft",
           brief: { ...structuredClone(stableBrief), id, status: "draft", storageMode: "memory" },
+          currentSnapshotId: snapshotId,
           createdAt: existing?.createdAt ?? persistedAt,
           updatedAt: persistedAt,
           hasPdf: false,
@@ -1859,25 +2589,8 @@ async function persistBriefObservationMemory(
         throw new StaleBriefRevisionError("The daily brief changed after it was opened; reload before saving");
       }
       entry.brief = { ...structuredClone(stableBrief), id: entry.id, status: "draft", storageMode: "memory" };
+      entry.currentSnapshotId = snapshotId;
       entry.updatedAt = persistedAt;
-      memory.set(entry.id, entry);
-      record = cloneMemory(entry);
-    } else if (dailyWrite?.kind === "publish") {
-      const entry = memory.get(dailyWrite.id);
-      if (!entry) throw new Error("Daily brief not found");
-      if (entry.status !== "draft") throw new Error("Only a draft can be published");
-      entry.status = "published";
-      entry.publishedAt = persistedAt;
-      entry.updatedAt = persistedAt;
-      entry.pdf = dailyWrite.pdf;
-      entry.hasPdf = true;
-      entry.brief = {
-        ...structuredClone(stableBrief),
-        id: entry.id,
-        status: "published",
-        publishedAt: persistedAt,
-        storageMode: "memory",
-      };
       memory.set(entry.id, entry);
       record = cloneMemory(entry);
     }
@@ -1895,6 +2608,8 @@ async function persistBriefObservationMemory(
     for (const [key, value] of runBackup) collectionRunMemory.set(key, value);
     briefSnapshotMemory.clear();
     for (const [key, value] of snapshotBackup) briefSnapshotMemory.set(key, value);
+    evidenceRetractionMemory.clear();
+    for (const [key, value] of retractionBackup) evidenceRetractionMemory.set(key, value);
     collectionRunMemory.set(runKey, {
       ...run,
       status: "failed",
@@ -1909,7 +2624,8 @@ async function persistBriefObservationMemory(
 async function loadSnapshotByRun(client: PoolClient, runId: string): Promise<BriefSnapshotRecord | null> {
   const snapshotResult = await client.query<BriefSnapshotRow>(`
     SELECT id, run_id, stream, batch_key, sequence_number, brief_date, generated_at,
-           previous_snapshot_id, payload_hash, payload, created_at
+           previous_snapshot_id, payload_hash, payload, actor_type, actor_id_hash,
+           action_reason, action_request_id, created_at
     FROM brief_snapshots WHERE run_id = $1
   `, [runId]);
   const row = snapshotResult.rows[0];
@@ -1920,21 +2636,32 @@ async function loadSnapshotByRun(client: PoolClient, runId: string): Promise<Bri
            match_method, match_confidence
     FROM brief_snapshot_events WHERE snapshot_id = $1 ORDER BY rank ASC
   `, [row.id]);
-  return rowToBriefSnapshot(row, eventResult.rows.map(rowToSnapshotEvent));
+  const events: BriefSnapshotEventRecord[] = [];
+  for (const eventRow of eventResult.rows) {
+    const event = rowToSnapshotEvent(eventRow);
+    events.push({
+      ...event,
+      changes: await loadSnapshotEventChanges(client, row.id, event.eventId),
+    });
+  }
+  return rowToBriefSnapshot(row, events);
 }
 
 async function loadLatestEventVersion(client: PoolClient, eventId: string, lock = false): Promise<EventVersionRecord | undefined> {
   const result = await client.query<EventVersionRow>(`
     SELECT id, event_id, version_number, previous_version_id, content_hash,
            evidence_hash, state_hash, presentation_hash, observed_at, run_id,
-           payload, created_at
+           payload, actor_type, actor_id_hash, change_reason, request_id,
+           created_at
     FROM event_versions
     WHERE event_id = $1
     ORDER BY version_number DESC
     LIMIT 1
     ${lock ? "FOR UPDATE" : ""}
   `, [eventId]);
-  return result.rows[0] ? rowToEventVersion(result.rows[0]) : undefined;
+  return result.rows[0]
+    ? await loadEventVersionAudit(client, rowToEventVersion(result.rows[0]))
+    : undefined;
 }
 
 async function loadDailyRecordForWrite(
@@ -1953,6 +2680,115 @@ async function loadDailyRecordForWrite(
         FROM daily_briefs WHERE id = $1 ${lock ? "FOR UPDATE" : ""}
       `, [write.id]);
   return result.rows[0] ? rowToRecord(result.rows[0]) : null;
+}
+
+async function loadEventVersionById(
+  client: PoolClient | Pool,
+  eventId: string,
+  versionId: string,
+): Promise<EventVersionRecord | undefined> {
+  const result = await client.query<EventVersionRow>(`
+    SELECT id, event_id, version_number, previous_version_id, content_hash,
+           evidence_hash, state_hash, presentation_hash, observed_at, run_id,
+           payload, actor_type, actor_id_hash, change_reason, request_id,
+           created_at
+    FROM event_versions
+    WHERE event_id = $1 AND id = $2
+  `, [eventId, versionId]);
+  return result.rows[0]
+    ? await loadEventVersionAudit(client, rowToEventVersion(result.rows[0]))
+    : undefined;
+}
+
+async function loadSnapshotEvent(
+  client: PoolClient | Pool,
+  snapshotId: string | undefined,
+  eventId: string,
+): Promise<BriefSnapshotEventRecord | undefined> {
+  if (!snapshotId) return undefined;
+  const result = await client.query<BriefSnapshotEventRow>(`
+    SELECT snapshot_id, event_id, event_version_id, rank, ranking_score,
+           freshness_score, impact, confidence, mentions, cross_source_count,
+           match_method, match_confidence
+    FROM brief_snapshot_events
+    WHERE snapshot_id = $1 AND event_id = $2
+  `, [snapshotId, eventId]);
+  return result.rows[0] ? rowToSnapshotEvent(result.rows[0]) : undefined;
+}
+
+async function loadLatestSnapshotObservation(
+  client: PoolClient | Pool,
+  eventId: string,
+  beforeDate: string,
+  maximumSameDateSequence: number,
+  createdAsOf?: string,
+): Promise<BriefSnapshotEventRecord | undefined> {
+  const result = await client.query<BriefSnapshotEventRow>(`
+    SELECT observation.snapshot_id, observation.event_id,
+           observation.event_version_id, observation.rank,
+           observation.ranking_score, observation.freshness_score,
+           observation.impact, observation.confidence, observation.mentions,
+           observation.cross_source_count, observation.match_method,
+           observation.match_confidence
+    FROM brief_snapshot_events AS observation
+    JOIN brief_snapshots AS snapshot ON snapshot.id = observation.snapshot_id
+    WHERE observation.event_id = $1
+      AND (
+        snapshot.brief_date < $2
+        OR (
+          snapshot.brief_date = $2
+          AND snapshot.sequence_number <= $3
+        )
+      )
+      AND ($4::timestamptz IS NULL OR snapshot.created_at <= $4::timestamptz)
+    ORDER BY snapshot.brief_date DESC, snapshot.sequence_number DESC
+    LIMIT 1
+  `, [eventId, beforeDate, maximumSameDateSequence, createdAsOf ?? null]);
+  return result.rows[0] ? rowToSnapshotEvent(result.rows[0]) : undefined;
+}
+
+async function loadPreviousPublishedSnapshotId(
+  client: PoolClient | Pool,
+  date: string,
+  publishedAsOf?: string,
+): Promise<string | undefined> {
+  const result = await client.query<{ current_snapshot_id: string }>(`
+    SELECT current_snapshot_id
+    FROM daily_briefs
+    WHERE status = 'published'
+      AND brief_date < $1
+      AND current_snapshot_id IS NOT NULL
+      AND ($2::timestamptz IS NULL OR published_at <= $2::timestamptz)
+    ORDER BY brief_date DESC
+    LIMIT 1
+  `, [date, publishedAsOf ?? null]);
+  return result.rows[0]?.current_snapshot_id;
+}
+
+async function loadLatestPublishedObservation(
+  client: PoolClient | Pool,
+  eventId: string,
+  beforeDate: string,
+  publishedAsOf?: string,
+): Promise<BriefSnapshotEventRecord | undefined> {
+  const result = await client.query<BriefSnapshotEventRow>(`
+    SELECT observation.snapshot_id, observation.event_id,
+           observation.event_version_id, observation.rank,
+           observation.ranking_score, observation.freshness_score,
+           observation.impact, observation.confidence, observation.mentions,
+           observation.cross_source_count, observation.match_method,
+           observation.match_confidence
+    FROM daily_briefs AS brief
+    JOIN brief_snapshot_events AS observation
+      ON observation.snapshot_id = brief.current_snapshot_id
+    WHERE brief.status = 'published'
+      AND brief.brief_date < $2
+      AND ($3::timestamptz IS NULL OR brief.published_at <= $3::timestamptz)
+      AND observation.event_id = $1
+    ORDER BY brief.brief_date DESC
+    LIMIT 1
+  `, [eventId, beforeDate, publishedAsOf ?? null]);
+  return result.rows[0] ? rowToSnapshotEvent(result.rows[0]) : undefined;
 }
 
 export class EvidenceIntegrityError extends Error {
@@ -2084,20 +2920,394 @@ async function persistHeadlineEvidenceRelations(
   }
 }
 
+async function persistEventVersionAudit(
+  client: PoolClient,
+  comparison: EventVersionComparison,
+  numericFacts: NumericFact[],
+): Promise<void> {
+  await client.query(`
+    INSERT INTO event_version_comparisons (
+      event_id, current_version_id, previous_version_id, status,
+      algorithm_version, input_hash, result_hash, summary, compared_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+  `, [
+    comparison.eventId,
+    comparison.currentVersionId,
+    comparison.previousVersionId ?? null,
+    comparison.status,
+    comparison.algorithmVersion,
+    comparison.inputHash,
+    comparison.resultHash,
+    comparison.summary,
+    comparison.comparedAt,
+  ]);
+
+  for (const item of comparison.items) {
+    await client.query(`
+      INSERT INTO event_version_change_items (
+        event_id, current_version_id, algorithm_version, item_id, ordinal,
+        kind, subject_key, reason_code, summary, before_value, after_value,
+        evidence_version_ids, change_hash
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb,
+        $12::uuid[], $13
+      )
+    `, [
+      comparison.eventId,
+      comparison.currentVersionId,
+      comparison.algorithmVersion,
+      item.id,
+      item.ordinal,
+      item.kind,
+      item.subjectKey,
+      item.reasonCode,
+      item.summary,
+      item.before === undefined ? null : JSON.stringify(item.before),
+      item.after === undefined ? null : JSON.stringify(item.after),
+      item.evidenceVersionIds,
+      item.changeHash,
+    ]);
+  }
+
+  for (const fact of numericFacts) {
+    await client.query(`
+      INSERT INTO event_version_numeric_facts (
+        event_id, event_version_id, fact_key, claim_key, metric_key,
+        subject_key, period_key, value_numeric, value_canonical, unit,
+        currency, scale, raw_token, start_offset, end_offset, original_text,
+        parser_version, comparison_status, comparison_reason
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8::numeric, $8, $9,
+        $10, $11, $12, $13, $14, $15, $16, $17, $18
+      )
+    `, [
+      comparison.eventId,
+      comparison.currentVersionId,
+      fact.factKey,
+      fact.claimKey,
+      fact.metricKey,
+      fact.subjectKey,
+      fact.periodKey,
+      fact.value,
+      fact.unit,
+      fact.currency ?? null,
+      fact.scale,
+      fact.rawToken,
+      fact.startOffset,
+      fact.endOffset,
+      fact.originalText,
+      fact.parserVersion,
+      fact.comparisonStatus,
+      fact.comparisonReason,
+    ]);
+
+    for (const evidenceVersionId of fact.evidenceVersionIds) {
+      const inserted = await client.query(`
+        INSERT INTO event_version_numeric_fact_evidence (
+          event_id, event_version_id, fact_key, claim_id, claim_key,
+          evidence_item_id, evidence_version_id, relation
+        )
+        SELECT
+          link.event_id, link.event_version_id, $3, link.claim_id,
+          link.claim_key, link.evidence_item_id, link.evidence_version_id,
+          link.relation
+        FROM claim_evidence_links AS link
+        WHERE link.event_id = $1
+          AND link.event_version_id = $2
+          AND link.claim_key = $4
+          AND link.evidence_version_id = $5
+          AND link.relation = 'supports'
+      `, [
+        comparison.eventId,
+        comparison.currentVersionId,
+        fact.factKey,
+        fact.claimKey,
+        evidenceVersionId,
+      ]);
+      if (inserted.rowCount !== 1) {
+        throw new EvidenceIntegrityError([{
+          code: "NUMERIC_FACT_EVIDENCE_MISMATCH",
+          message: `Numeric fact ${fact.factKey} is not bound to exact supporting evidence ${evidenceVersionId}`,
+          headlineId: comparison.eventId,
+        }]);
+      }
+    }
+  }
+}
+
+async function persistRetractionChangeItemBindings(
+  client: PoolClient,
+  request: EvidenceRetractionRequest,
+  currentVersionId: string,
+): Promise<void> {
+  const inserted = await client.query(`
+    INSERT INTO event_version_change_item_retractions (
+      event_id, current_version_id, algorithm_version, item_id,
+      request_id, evidence_version_id
+    )
+    SELECT
+      item.event_id, item.current_version_id, item.algorithm_version,
+      item.item_id, $3, $4
+    FROM event_version_change_items AS item
+    WHERE item.event_id = $1
+      AND item.current_version_id = $2
+      AND item.kind IN (
+        'evidence_removed', 'claim_support_removed',
+        'evidence_revised', 'claim_support_changed',
+        'claim_relation_removed', 'claim_relation_changed'
+      )
+      AND $4::uuid = ANY(item.evidence_version_ids)
+      AND (
+        $5::text IS NULL
+        OR (
+          item.kind IN (
+            'claim_support_removed', 'claim_support_changed',
+            'claim_relation_removed', 'claim_relation_changed'
+          )
+          AND COALESCE(
+            item.before_value->>'claimKey',
+            item.after_value->>'claimKey'
+          ) = $5
+          AND COALESCE(
+            item.before_value->>'relation',
+            CASE
+              WHEN item.kind IN ('claim_support_removed', 'claim_support_changed')
+              THEN 'supports'
+              ELSE NULL
+            END
+          ) = $6
+        )
+      )
+    ON CONFLICT DO NOTHING
+  `, [
+    request.eventId,
+    currentVersionId,
+    request.requestId,
+    request.evidenceVersionId,
+    request.claimKey ?? null,
+    request.citationRelation ?? null,
+  ]);
+  if (!inserted.rowCount) {
+    throw new EvidenceIntegrityError([{
+      code: "RETRACTION_CHANGE_ITEM_BINDING_MISSING",
+      message: `Retraction ${request.requestId} did not create an exact evidence change item`,
+      headlineId: request.eventId,
+    }]);
+  }
+}
+
+async function assertWhatChangedAlgorithmRegistry(client: PoolClient): Promise<void> {
+  const expectedConfig = {
+    schema: "what-changed/v1",
+    evidence: "exact-event-and-claim-relation-bindings",
+    numbers: "original-claim-explicit-unit-v1",
+    direction: "explicit-market-direction",
+    rankDelta: "previous-current",
+    baselines: ["previous_observation", "previous_published"],
+  };
+  const result = await client.query<{
+    implementation_hash: string;
+    config: Record<string, unknown> | string;
+  }>(`
+    SELECT implementation_hash, config
+    FROM comparison_algorithms
+    WHERE version = $1
+  `, [WHAT_CHANGED_ALGORITHM_VERSION]);
+  const row = result.rows[0];
+  const config = row
+    ? (typeof row.config === "string" ? JSON.parse(row.config) as Record<string, unknown> : row.config)
+    : undefined;
+  if (row?.implementation_hash !== WHAT_CHANGED_IMPLEMENTATION_HASH
+    || canonicalJson(config) !== canonicalJson(expectedConfig)) {
+    throw new Error(
+      `What Changed algorithm registry mismatch for ${WHAT_CHANGED_ALGORITHM_VERSION}`,
+    );
+  }
+}
+
+async function persistSnapshotEventChange(
+  client: PoolClient,
+  change: SnapshotEventChange,
+  historicalObservation?: BriefSnapshotEventRecord,
+): Promise<void> {
+  await client.query(`
+    INSERT INTO brief_snapshot_event_changes (
+      current_snapshot_id, event_id, current_event_version_id, baseline_kind,
+      baseline_snapshot_id, baseline_event_id, baseline_event_version_id,
+      historical_observation_snapshot_id, historical_observation_event_id,
+      historical_observation_event_version_id, presence, previous_rank,
+      current_rank, rank_delta, rank_movement, status, algorithm_version,
+      input_hash, result_hash, summary, compared_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+      $15, $16, $17, $18, $19, $20, $21
+    )
+  `, [
+    change.currentSnapshotId,
+    change.eventId,
+    change.currentEventVersionId,
+    change.baselineKind,
+    change.baselineSnapshotId ?? null,
+    change.baselineEventVersionId ? change.eventId : null,
+    change.baselineEventVersionId ?? null,
+    historicalObservation?.snapshotId ?? null,
+    historicalObservation?.eventId ?? null,
+    historicalObservation?.eventVersionId ?? null,
+    change.presence,
+    change.previousRank ?? null,
+    change.currentRank,
+    change.rankDelta ?? null,
+    change.rankMovement,
+    change.status,
+    change.algorithmVersion,
+    change.inputHash,
+    change.resultHash,
+    change.summary,
+    change.comparedAt,
+  ]);
+
+  for (const item of change.items) {
+    await client.query(`
+      INSERT INTO brief_snapshot_event_change_items (
+        current_snapshot_id, event_id, baseline_kind, algorithm_version,
+        item_id, ordinal, kind, subject_key, reason_code, summary,
+        before_value, after_value, evidence_version_ids, change_hash
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11::jsonb, $12::jsonb, $13::uuid[], $14
+      )
+    `, [
+      change.currentSnapshotId,
+      change.eventId,
+      change.baselineKind,
+      change.algorithmVersion,
+      item.id,
+      item.ordinal,
+      item.kind,
+      item.subjectKey,
+      item.reasonCode,
+      item.summary,
+      item.before === undefined ? null : JSON.stringify(item.before),
+      item.after === undefined ? null : JSON.stringify(item.after),
+      item.evidenceVersionIds,
+      item.changeHash,
+    ]);
+  }
+}
+
+async function loadEventVersionAudit(
+  client: PoolClient | Pool,
+  version: EventVersionRecord,
+): Promise<EventVersionRecord> {
+  const comparisonResult = await client.query<EventVersionComparisonRow>(`
+    SELECT event_id, current_version_id, previous_version_id, status,
+           algorithm_version, input_hash, result_hash, summary, compared_at
+    FROM event_version_comparisons
+    WHERE event_id = $1 AND current_version_id = $2
+    ORDER BY created_at DESC
+    LIMIT 1
+  `, [version.eventId, version.id]);
+  const comparisonRow = comparisonResult.rows[0];
+  let comparison: EventVersionComparison | undefined;
+  if (comparisonRow) {
+    const itemRows = await client.query<WhatChangedItemRow>(`
+      SELECT item_id, ordinal, kind, subject_key, reason_code, summary,
+             before_value, after_value, evidence_version_ids, change_hash
+      FROM event_version_change_items
+      WHERE event_id = $1 AND current_version_id = $2
+        AND algorithm_version = $3
+      ORDER BY ordinal
+    `, [version.eventId, version.id, comparisonRow.algorithm_version]);
+    comparison = rowToEventVersionComparison(
+      comparisonRow,
+      itemRows.rows.map(rowToWhatChangedItem),
+    );
+  }
+  const factRows = await client.query<NumericFactRow>(`
+    SELECT fact.fact_key, fact.claim_key, fact.metric_key, fact.subject_key,
+           fact.period_key, fact.value_canonical, fact.unit, fact.currency,
+           fact.scale, fact.raw_token, fact.start_offset, fact.end_offset,
+           fact.original_text, fact.parser_version, fact.comparison_status,
+           fact.comparison_reason,
+           COALESCE(
+             array_agg(binding.evidence_version_id::text)
+               FILTER (WHERE binding.evidence_version_id IS NOT NULL),
+             '{}'
+           ) AS evidence_version_ids
+    FROM event_version_numeric_facts AS fact
+    LEFT JOIN event_version_numeric_fact_evidence AS binding
+      ON binding.event_id = fact.event_id
+     AND binding.event_version_id = fact.event_version_id
+     AND binding.fact_key = fact.fact_key
+    WHERE fact.event_id = $1 AND fact.event_version_id = $2
+    GROUP BY
+      fact.fact_key, fact.claim_key, fact.metric_key, fact.subject_key,
+      fact.period_key, fact.value_canonical, fact.unit, fact.currency,
+      fact.scale, fact.raw_token, fact.start_offset, fact.end_offset,
+      fact.original_text, fact.parser_version, fact.comparison_status,
+      fact.comparison_reason
+    ORDER BY fact.fact_key
+  `, [version.eventId, version.id]);
+  return {
+    ...version,
+    comparison,
+    numericFacts: factRows.rows.map(rowToNumericFact),
+  };
+}
+
+async function loadSnapshotEventChanges(
+  client: PoolClient | Pool,
+  snapshotId: string,
+  eventId: string,
+): Promise<SnapshotEventChange[]> {
+  const rows = await client.query<SnapshotEventChangeRow>(`
+    SELECT current_snapshot_id, event_id, current_event_version_id,
+           baseline_kind, baseline_snapshot_id, baseline_event_version_id,
+           historical_observation_snapshot_id, presence, previous_rank,
+           current_rank, rank_delta, rank_movement, status,
+           algorithm_version, input_hash, result_hash, summary, compared_at
+    FROM brief_snapshot_event_changes
+    WHERE current_snapshot_id = $1 AND event_id = $2
+    ORDER BY baseline_kind
+  `, [snapshotId, eventId]);
+  const changes: SnapshotEventChange[] = [];
+  for (const row of rows.rows) {
+    const itemRows = await client.query<WhatChangedItemRow>(`
+      SELECT item_id, ordinal, kind, subject_key, reason_code, summary,
+             before_value, after_value, evidence_version_ids, change_hash
+      FROM brief_snapshot_event_change_items
+      WHERE current_snapshot_id = $1 AND event_id = $2
+        AND baseline_kind = $3 AND algorithm_version = $4
+      ORDER BY ordinal
+    `, [snapshotId, eventId, row.baseline_kind, row.algorithm_version]);
+    changes.push(rowToSnapshotEventChange(row, itemRows.rows.map(rowToWhatChangedItem)));
+  }
+  return changes;
+}
+
 async function persistBriefObservationPostgres(
   brief: DailyBrief,
-  options: Required<Pick<PersistBriefOptions, "stream" | "batchKey" | "observedAt">>,
+  options: NormalizedPersistBriefOptions,
   dailyWrite?: DailyBriefWrite,
 ): Promise<PersistBriefResult> {
   await ensureSchema();
   const client = await pool().connect();
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
-  const inputHash = snapshotPayloadHash(brief);
+  const inputHash = persistenceInputHash(brief, options);
+  const generatedAt = validIsoOrNow(brief.generatedAt);
   let activeRunId: string = runId;
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext('analystarena_event_observation'))");
+    // Acquire the visibility boundary before reading any historical snapshot.
+    // The snapshot INSERT trigger holds the same lock through COMMIT, while
+    // publication takes it before verification. This makes comparison inputs
+    // follow commit-visible order instead of transaction start or insert time.
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext('analystarena_snapshot_visibility'))",
+    );
+    await assertWhatChangedAlgorithmRegistry(client);
     const existingRunResult = await client.query<CollectionRunRow>(`
       SELECT id, stream, batch_key, status, brief_date, input_hash,
              started_at, completed_at, error_code, error_detail
@@ -2132,16 +3342,16 @@ async function persistBriefObservationPostgres(
     }
 
     const currentRecord = dailyWrite ? await loadDailyRecordForWrite(client, dailyWrite, brief.date, true) : null;
-    if ((dailyWrite?.kind === "update_draft" || dailyWrite?.kind === "publish") && !currentRecord) {
+    if (dailyWrite?.kind === "update_draft" && !currentRecord) {
       throw new Error("Daily brief not found");
     }
-    if ((dailyWrite?.kind === "update_draft" || dailyWrite?.kind === "publish") && currentRecord?.status !== "draft") {
+    if (dailyWrite?.kind === "update_draft" && currentRecord?.status !== "draft") {
       throw new Error("Published daily briefs are immutable");
     }
-    const expectedSnapshotId = dailyWrite?.kind === "update_draft" || dailyWrite?.kind === "publish"
+    const expectedSnapshotId = dailyWrite?.kind === "update_draft"
       ? dailyWrite.expectedSnapshotId
       : undefined;
-    if ((dailyWrite?.kind === "update_draft" || dailyWrite?.kind === "publish")
+    if (dailyWrite?.kind === "update_draft"
       && currentRecord?.brief.snapshot?.id && !expectedSnapshotId) {
       throw new StaleBriefRevisionError("A snapshot revision is required before saving or publishing");
     }
@@ -2177,6 +3387,10 @@ async function persistBriefObservationPostgres(
              v.observed_at AS version_observed_at,
              v.run_id AS version_run_id,
              v.payload AS version_payload,
+             v.actor_type AS version_actor_type,
+             v.actor_id_hash AS version_actor_id_hash,
+             v.change_reason AS version_change_reason,
+             v.request_id AS version_request_id,
              v.created_at AS version_created_at
       FROM events e
       LEFT JOIN LATERAL (
@@ -2193,11 +3407,15 @@ async function persistBriefObservationPostgres(
     }));
 
     const usedEventIds = new Set<string>();
+    const pendingRetractions = groupEvidenceRetractions(options);
+    const appliedRetractionIds = new Set<string>();
     const idMap = new Map<string, string>();
     const stableHeadlines: Headline[] = [];
     const pendingObservations: Omit<BriefSnapshotEventRecord, "snapshotId">[] = [];
+    const versionsByEvent = new Map<string, EventVersionRecord>();
 
-    for (const incoming of brief.headlines) {
+    for (const incomingCandidate of brief.headlines) {
+      const incoming = withoutDerivedWhatChanged(incomingCandidate);
       const aliases = aliasesForHeadline(incoming);
       const aliasEventIds = new Set(aliases
         .map((alias) => aliasEventMap.get(`${alias.type}:${alias.key}`))
@@ -2242,6 +3460,10 @@ async function persistBriefObservationPostgres(
                     NULL::text AS version_presentation_hash,
                     NULL::timestamptz AS version_observed_at,
                     NULL::uuid AS version_run_id, NULL::jsonb AS version_payload,
+                    NULL::text AS version_actor_type,
+                    NULL::text AS version_actor_id_hash,
+                    NULL::text AS version_change_reason,
+                    NULL::text AS version_request_id,
                     NULL::timestamptz AS version_created_at
         `, [
           identity.id,
@@ -2264,7 +3486,21 @@ async function persistBriefObservationPostgres(
 
       await client.query("SELECT id FROM events WHERE id = $1 FOR UPDATE", [state.event.id]);
       const previousVersion = await loadLatestEventVersion(client, state.event.id, true);
-      const stableHeadline = mergeRetainedEvidence(previousVersion?.headline, { ...structuredClone(incoming), id: state.event.id });
+      if (previousVersion
+        && Date.parse(options.observedAt) < Date.parse(previousVersion.observedAt)) {
+        throw new EvidenceIntegrityError([{
+          code: "EVENT_OBSERVATION_TIME_REGRESSION",
+          message: `Observation ${options.observedAt} precedes event version ${previousVersion.id} at ${previousVersion.observedAt}`,
+          headlineId: state.event.id,
+        }]);
+      }
+      let stableHeadline = mergeRetainedEvidence(previousVersion?.headline, { ...structuredClone(incoming), id: state.event.id });
+      const retractionResult = applyEvidenceRetractions(
+        previousVersion,
+        stableHeadline,
+        pendingRetractions.get(state.event.id) ?? [],
+      );
+      stableHeadline = retractionResult.headline;
       const material = eventVersionMaterial(stableHeadline);
       let version = previousVersion;
       if (!version || version.contentHash !== material.versionHash) {
@@ -2274,11 +3510,16 @@ async function persistBriefObservationPostgres(
           INSERT INTO event_versions (
             id, event_id, version_number, previous_version_id,
             content_hash, evidence_hash, state_hash, presentation_hash,
-            observed_at, run_id, payload
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+            observed_at, run_id, payload, actor_type, actor_id_hash,
+            change_reason, request_id
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
+            $12, $13, $14, $15
+          )
           RETURNING id, event_id, version_number, previous_version_id,
                     content_hash, evidence_hash, state_hash, presentation_hash,
-                    observed_at, run_id, payload, created_at
+                    observed_at, run_id, payload, actor_type, actor_id_hash,
+                    change_reason, request_id, created_at
         `, [
           versionId,
           state.event.id,
@@ -2291,9 +3532,101 @@ async function persistBriefObservationPostgres(
           options.observedAt,
           activeRunId,
           JSON.stringify(material.payload),
+          options.actor.type,
+          options.actor.idHash ?? null,
+          options.actor.reason ?? null,
+          options.actor.requestId ?? null,
         ]);
         version = rowToEventVersion(insertedVersion.rows[0]);
         await persistHeadlineEvidenceRelations(client, state.event.id, version.id, stableHeadline);
+        const numericFacts = extractNumericFacts(stableHeadline);
+        const comparison = compareEventVersions(previousVersion, version, {
+          previous: previousVersion?.numericFacts,
+          current: numericFacts,
+        });
+        assertRetractionScope(comparison, retractionResult.applied);
+        await persistEventVersionAudit(client, comparison, numericFacts);
+        version = { ...version, comparison, numericFacts };
+      }
+      if (retractionResult.applied.length && version === previousVersion) {
+        throw new EvidenceIntegrityError(retractionResult.applied.map((request) => ({
+          code: "RETRACTION_DID_NOT_CREATE_VERSION",
+          message: `Retraction ${request.requestId} did not change the immutable event material`,
+          headlineId: state!.event.id,
+        })));
+      }
+      for (const request of retractionResult.applied) {
+        const requestHash = stableHash(request);
+        const existing = await client.query<{ request_hash: string }>(`
+          SELECT request_hash FROM evidence_retraction_requests
+          WHERE request_id = $1
+        `, [request.requestId]);
+        if (existing.rows[0]) {
+          if (existing.rows[0].request_hash !== requestHash) {
+            throw new Error(`Retraction request ${request.requestId} was reused with different content`);
+          }
+          throw new Error(`Retraction request ${request.requestId} was already applied`);
+        }
+        const insertedRetraction = await client.query(`
+          INSERT INTO evidence_retraction_requests (
+            request_id, request_hash, event_id, from_event_version_id,
+            to_event_version_id, evidence_item_id, evidence_version_id,
+            claim_id, claim_key, citation_relation, reason_code, reason_note,
+            replacement_evidence_version_id, actor_type, actor_id_hash,
+            applied_run_id, requested_at
+          )
+          SELECT
+            $1, $2, evidence.event_id, evidence.event_version_id,
+            $5, evidence.evidence_item_id, evidence.evidence_version_id,
+            claim.id, $8, $9, $10, $11, $12, $13, $14, $15, $16
+          FROM event_version_evidence AS evidence
+          LEFT JOIN claim_evidence_links AS claim_link
+            ON claim_link.event_id = evidence.event_id
+           AND claim_link.event_version_id = evidence.event_version_id
+           AND claim_link.claim_key = $8
+           AND claim_link.relation = $9
+           AND claim_link.evidence_item_id = evidence.evidence_item_id
+           AND claim_link.evidence_version_id = evidence.evidence_version_id
+          LEFT JOIN event_claims AS claim
+            ON claim.event_id = claim_link.event_id
+           AND claim.event_version_id = claim_link.event_version_id
+           AND claim.id = claim_link.claim_id
+           AND claim.claim_key = claim_link.claim_key
+          WHERE evidence.event_id = $3
+            AND evidence.event_version_id = $4
+            AND evidence.evidence_item_id = $6
+            AND evidence.evidence_version_id = $7
+            AND (
+              ($8::text IS NULL AND $9::text IS NULL)
+              OR claim.id IS NOT NULL
+            )
+        `, [
+          request.requestId,
+          requestHash,
+          request.eventId,
+          request.fromEventVersionId,
+          version.id,
+          request.evidenceItemId,
+          request.evidenceVersionId,
+          request.claimKey ?? null,
+          request.citationRelation ?? null,
+          request.reasonCode,
+          request.reasonNote,
+          request.replacementEvidenceVersionId ?? null,
+          options.actor.type,
+          options.actor.idHash!,
+          activeRunId,
+          options.observedAt,
+        ]);
+        if (insertedRetraction.rowCount !== 1) {
+          throw new EvidenceIntegrityError([{
+            code: "RETRACTION_AUTHORITY_MISMATCH",
+            message: `Retraction ${request.requestId} does not match PostgreSQL evidence authority`,
+            headlineId: state.event.id,
+          }]);
+        }
+        await persistRetractionChangeItemBindings(client, request, version.id);
+        appliedRetractionIds.add(request.requestId);
       }
 
       await client.query(`
@@ -2325,6 +3658,7 @@ async function persistBriefObservationPostgres(
       }
 
       idMap.set(incoming.id, state.event.id);
+      versionsByEvent.set(state.event.id, version);
       stableHeadlines.push(stableHeadline);
       pendingObservations.push({
         eventId: state.event.id,
@@ -2340,9 +3674,22 @@ async function persistBriefObservationPostgres(
         matchConfidence,
       });
     }
+    if (appliedRetractionIds.size !== options.evidenceRetractions.length) {
+      const missing = options.evidenceRetractions
+        .filter((request) => !appliedRetractionIds.has(request.requestId));
+      throw new EvidenceIntegrityError(missing.map((request) => ({
+        code: "RETRACTION_EVENT_NOT_IN_SNAPSHOT",
+        message: `Retraction ${request.requestId} did not resolve to a current snapshot event`,
+        headlineId: request.eventId,
+      })));
+    }
 
-    const previousResult = await client.query<{ id: string; sequence_number: number }>(`
-      SELECT id, sequence_number FROM brief_snapshots
+    const previousResult = await client.query<{
+      id: string;
+      sequence_number: number;
+      generated_at: string | Date;
+    }>(`
+      SELECT id, sequence_number, generated_at FROM brief_snapshots
       WHERE brief_date = $1
       ORDER BY sequence_number DESC
       LIMIT 1
@@ -2350,9 +3697,108 @@ async function persistBriefObservationPostgres(
     `, [brief.date]);
     const previousSnapshotId = previousResult.rows[0]?.id;
     const sequenceNumber = (previousResult.rows[0]?.sequence_number ?? 0) + 1;
+    if (previousResult.rows[0]
+      && Date.parse(generatedAt) < Date.parse(iso(previousResult.rows[0].generated_at))) {
+      throw new EvidenceIntegrityError([{
+        code: "SNAPSHOT_GENERATED_TIME_REGRESSION",
+        message: `Snapshot time ${generatedAt} precedes same-date snapshot ${previousSnapshotId}`,
+        headlineId: brief.headlines[0]?.id ?? "brief",
+      }]);
+    }
     const snapshotId = randomUUID();
     const persistedAt = new Date().toISOString();
-    let stableBrief = remapBriefRelations(brief, idMap, stableHeadlines);
+    const previousPublishedSnapshotId = await loadPreviousPublishedSnapshotId(client, brief.date);
+    const finalizedObservations: BriefSnapshotEventRecord[] = [];
+    const historicalByChange = new Map<string, BriefSnapshotEventRecord>();
+    const projectedHeadlines: Headline[] = [];
+    for (const [index, headline] of stableHeadlines.entries()) {
+      const currentObservation: BriefSnapshotEventRecord = {
+        ...pendingObservations[index],
+        snapshotId,
+      };
+      const currentVersion = versionsByEvent.get(headline.id);
+      if (!currentVersion?.comparison) {
+        throw new Error(`Event version ${currentObservation.eventVersionId} has no immutable comparison`);
+      }
+      const historicalObservation = await loadLatestSnapshotObservation(
+        client,
+        headline.id,
+        brief.date,
+        sequenceNumber - 1,
+      );
+      const isFirstSeen = !historicalObservation
+        && currentVersion.versionNumber === 1
+        && !currentVersion.previousVersionId;
+
+      const operationalBaseline = await loadSnapshotEvent(client, previousSnapshotId, headline.id);
+      const operationalPreviousVersion = operationalBaseline
+        && operationalBaseline.eventVersionId !== currentVersion.id
+        ? await loadEventVersionById(client, headline.id, operationalBaseline.eventVersionId)
+        : undefined;
+      const operationalContent = operationalPreviousVersion
+        ? compareEventBaseline(operationalPreviousVersion, currentVersion, {
+            previous: operationalPreviousVersion.numericFacts,
+            current: currentVersion.numericFacts,
+          })
+        : undefined;
+      const operationalHistorical = operationalBaseline ? undefined : historicalObservation;
+      const operational = compareSnapshotEvent({
+        baselineKind: "previous_observation",
+        baselineSnapshotId: previousSnapshotId,
+        baselineEvent: operationalBaseline,
+        historicalObservation: operationalHistorical,
+        current: currentObservation,
+        currentSnapshotId: snapshotId,
+        comparedAt: options.observedAt,
+        isFirstSeen,
+        legacyUnverified: currentVersion.comparison.status === "legacy_unverified",
+        contentComparison: operationalContent,
+      });
+      if (operationalHistorical) {
+        historicalByChange.set(`${headline.id}:previous_observation`, operationalHistorical);
+      }
+
+      const investorBaseline = await loadSnapshotEvent(client, previousPublishedSnapshotId, headline.id);
+      const investorPreviousVersion = investorBaseline
+        && investorBaseline.eventVersionId !== currentVersion.id
+        ? await loadEventVersionById(client, headline.id, investorBaseline.eventVersionId)
+        : undefined;
+      const investorContent = investorPreviousVersion
+        ? compareEventBaseline(investorPreviousVersion, currentVersion, {
+            previous: investorPreviousVersion.numericFacts,
+            current: currentVersion.numericFacts,
+          })
+        : undefined;
+      const investorHistorical = investorBaseline
+        ? undefined
+        : await loadLatestPublishedObservation(client, headline.id, brief.date);
+      const investor = compareSnapshotEvent({
+        baselineKind: "previous_published",
+        baselineSnapshotId: previousPublishedSnapshotId,
+        baselineEvent: investorBaseline,
+        historicalObservation: investorHistorical,
+        current: currentObservation,
+        currentSnapshotId: snapshotId,
+        comparedAt: options.observedAt,
+        isFirstSeen,
+        legacyUnverified: currentVersion.comparison.status === "legacy_unverified",
+        contentComparison: investorContent,
+      });
+      if (investorHistorical) {
+        historicalByChange.set(`${headline.id}:previous_published`, investorHistorical);
+      }
+      const whatChanged = projectWhatChanged({
+        investor,
+        operational,
+        latestVersion: currentVersion.comparison,
+      });
+      finalizedObservations.push({
+        ...currentObservation,
+        changes: [operational, investor],
+      });
+      projectedHeadlines.push({ ...headline, whatChanged });
+    }
+    let stableBrief = remapBriefRelations(brief, idMap, projectedHeadlines);
     const payloadHash = snapshotPayloadHash(stableBrief);
     stableBrief = {
       ...stableBrief,
@@ -2365,14 +3811,18 @@ async function persistBriefObservationPostgres(
         previousSnapshotId,
         payloadHash,
         persistedAt,
-        events: pendingObservations.map((observation) => structuredClone(observation)),
+        events: finalizedObservations.map(snapshotEventProjection),
       },
     };
     await client.query(`
       INSERT INTO brief_snapshots (
         id, run_id, stream, batch_key, sequence_number, brief_date, generated_at,
-        previous_snapshot_id, payload_hash, payload
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+        previous_snapshot_id, payload_hash, payload, actor_type, actor_id_hash,
+        action_reason, action_request_id, created_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
+        $11, $12, $13, $14, clock_timestamp()
+      )
     `, [
       snapshotId,
       activeRunId,
@@ -2380,12 +3830,16 @@ async function persistBriefObservationPostgres(
       options.batchKey,
       sequenceNumber,
       brief.date,
-      validIsoOrNow(brief.generatedAt),
+      generatedAt,
       previousSnapshotId ?? null,
       payloadHash,
       JSON.stringify(stableBrief),
+      options.actor.type,
+      options.actor.idHash ?? null,
+      options.actor.reason ?? null,
+      options.actor.requestId ?? null,
     ]);
-    if (pendingObservations.length) {
+    if (finalizedObservations.length) {
       await client.query(`
         INSERT INTO brief_snapshot_events (
           snapshot_id, event_id, event_version_id, rank, ranking_score,
@@ -2402,7 +3856,7 @@ async function persistBriefObservationPostgres(
           confidence INTEGER, mentions INTEGER, cross_source_count INTEGER,
           match_method TEXT, match_confidence NUMERIC
         )
-      `, [snapshotId, JSON.stringify(pendingObservations.map((observation) => ({
+      `, [snapshotId, JSON.stringify(finalizedObservations.map((observation) => ({
         event_id: observation.eventId,
         event_version_id: observation.eventVersionId,
         rank: observation.rank,
@@ -2416,8 +3870,17 @@ async function persistBriefObservationPostgres(
         match_confidence: observation.matchConfidence,
       })))]);
     }
+    for (const observation of finalizedObservations) {
+      for (const change of observation.changes ?? []) {
+        await persistSnapshotEventChange(
+          client,
+          change,
+          historicalByChange.get(`${observation.eventId}:${change.baselineKind}`),
+        );
+      }
+    }
     const snapshotEventVersions = new Map(
-      pendingObservations.map((observation) => [observation.eventId, observation.eventVersionId]),
+      finalizedObservations.map((observation) => [observation.eventId, observation.eventVersionId]),
     );
     const claimPresentations = stableBrief.headlines.flatMap((headline) => {
       const eventVersionId = snapshotEventVersions.get(headline.id);
@@ -2488,41 +3951,26 @@ async function persistBriefObservationPostgres(
     if (dailyWrite?.kind === "save_draft") {
       const dailyId = currentRecord?.id ?? randomUUID();
       const saved = await client.query<DatabaseRow>(`
-        INSERT INTO daily_briefs (id, brief_date, status, payload)
-        VALUES ($1, $2, 'draft', $3::jsonb)
+        INSERT INTO daily_briefs (id, brief_date, status, payload, current_snapshot_id)
+        VALUES ($1, $2, 'draft', $3::jsonb, $4)
         ON CONFLICT (brief_date) DO UPDATE
           SET payload = EXCLUDED.payload, status = 'draft', pdf_data = NULL,
-              published_at = NULL, updated_at = NOW()
+              published_at = NULL, current_snapshot_id = EXCLUDED.current_snapshot_id,
+              updated_at = NOW()
           WHERE daily_briefs.status <> 'published'
         RETURNING *, (pdf_data IS NOT NULL) AS has_pdf
-      `, [dailyId, stableBrief.date, JSON.stringify(stableBrief)]);
+      `, [dailyId, stableBrief.date, JSON.stringify(stableBrief), snapshotId]);
       if (saved.rows[0]) record = rowToRecord(saved.rows[0]);
       else record = await loadDailyRecordForWrite(client, dailyWrite, brief.date) ?? undefined;
     } else if (dailyWrite?.kind === "update_draft") {
       const updated = await client.query<DatabaseRow>(`
-        UPDATE daily_briefs SET payload = $2::jsonb, updated_at = NOW()
+        UPDATE daily_briefs
+        SET payload = $2::jsonb, current_snapshot_id = $3, updated_at = NOW()
         WHERE id = $1 AND status = 'draft'
         RETURNING *, (pdf_data IS NOT NULL) AS has_pdf
-      `, [dailyWrite.id, JSON.stringify(stableBrief)]);
+      `, [dailyWrite.id, JSON.stringify(stableBrief), snapshotId]);
       if (!updated.rows[0]) throw new Error("Unable to update draft");
       record = rowToRecord(updated.rows[0]);
-    } else if (dailyWrite?.kind === "publish") {
-      const publishedPayload = {
-        ...stableBrief,
-        id: dailyWrite.id,
-        status: "published" as const,
-        publishedAt: persistedAt,
-        storageMode: "postgres" as const,
-      };
-      const published = await client.query<DatabaseRow>(`
-        UPDATE daily_briefs
-          SET status = 'published', payload = $2::jsonb, pdf_data = $3,
-              published_at = $4, updated_at = $4
-        WHERE id = $1 AND status = 'draft'
-        RETURNING *, (pdf_data IS NOT NULL) AS has_pdf
-      `, [dailyWrite.id, JSON.stringify(publishedPayload), dailyWrite.pdf, persistedAt]);
-      if (!published.rows[0]) throw new Error("Unable to publish draft");
-      record = rowToRecord(published.rows[0]);
     }
 
     await client.query(`
@@ -2544,7 +3992,7 @@ async function persistBriefObservationPostgres(
       payloadHash,
       brief: stableBrief,
       createdAt: persistedAt,
-      events: pendingObservations.map((observation) => ({ ...observation, snapshotId })),
+      events: finalizedObservations,
     };
     return { snapshot, record };
   } catch (error) {
@@ -2576,6 +4024,8 @@ export async function persistBriefObservation(
     stream,
     batchKey: safeBatchKey(brief, stream, options.batchKey),
     observedAt: validIsoOrNow(options.observedAt ?? brief.generatedAt),
+    actor: normalizeActor(options.actor),
+    evidenceRetractions: structuredClone(options.evidenceRetractions ?? []),
   };
   const result = storageMode() === "memory"
     ? await persistBriefObservationMemory(brief, normalized)
@@ -2599,7 +4049,8 @@ export async function listBriefSnapshots(date?: string, limit = 100): Promise<Br
   values.push(safeLimit);
   const result = await pool().query<BriefSnapshotRow>(`
     SELECT id, run_id, stream, batch_key, sequence_number, brief_date, generated_at,
-           previous_snapshot_id, payload_hash, payload, created_at
+           previous_snapshot_id, payload_hash, payload, actor_type, actor_id_hash,
+           action_reason, action_request_id, created_at
     FROM brief_snapshots ${where}
     ORDER BY sequence_number DESC LIMIT $${values.length}
   `, values);
@@ -2611,7 +4062,15 @@ export async function listBriefSnapshots(date?: string, limit = 100): Promise<Br
              match_method, match_confidence
       FROM brief_snapshot_events WHERE snapshot_id = $1 ORDER BY rank ASC
     `, [row.id]);
-    snapshots.push(rowToBriefSnapshot(row, events.rows.map(rowToSnapshotEvent)));
+    const mappedEvents: BriefSnapshotEventRecord[] = [];
+    for (const eventRow of events.rows) {
+      const event = rowToSnapshotEvent(eventRow);
+      mappedEvents.push({
+        ...event,
+        changes: await loadSnapshotEventChanges(pool(), row.id, event.eventId),
+      });
+    }
+    snapshots.push(rowToBriefSnapshot(row, mappedEvents));
   }
   return snapshots;
 }
@@ -2647,10 +4106,15 @@ export async function listEventVersions(eventId: string): Promise<EventVersionRe
   const result = await pool().query<EventVersionRow>(`
     SELECT id, event_id, version_number, previous_version_id, content_hash,
            evidence_hash, state_hash, presentation_hash, observed_at, run_id,
-           payload, created_at
+           payload, actor_type, actor_id_hash, change_reason, request_id,
+           created_at
     FROM event_versions WHERE event_id = $1 ORDER BY version_number ASC
   `, [eventId]);
-  return result.rows.map(rowToEventVersion);
+  const versions: EventVersionRecord[] = [];
+  for (const row of result.rows) {
+    versions.push(await loadEventVersionAudit(pool(), rowToEventVersion(row)));
+  }
+  return versions;
 }
 
 export async function saveDraft(
@@ -2662,6 +4126,8 @@ export async function saveDraft(
     stream,
     batchKey: safeBatchKey(brief, stream, options.batchKey),
     observedAt: validIsoOrNow(options.observedAt ?? brief.generatedAt),
+    actor: normalizeActor(options.actor),
+    evidenceRetractions: structuredClone(options.evidenceRetractions ?? []),
   };
   const result = storageMode() === "memory"
     ? await persistBriefObservationMemory(brief, normalized, { kind: "save_draft" })
@@ -2722,6 +4188,8 @@ export async function updateDraft(
     stream,
     batchKey: safeBatchKey(brief, stream, options.batchKey ?? `${id}:${brief.generatedAt}:${Date.now()}`),
     observedAt: validIsoOrNow(options.observedAt ?? new Date().toISOString()),
+    actor: normalizeActor(options.actor),
+    evidenceRetractions: structuredClone(options.evidenceRetractions ?? []),
   };
   const write: DailyBriefWrite = {
     kind: "update_draft",
@@ -2747,6 +4215,161 @@ function authorityIssue(headlineId: string, code: string, reason: string): Evide
 
 function dbOptionalIso(value: string | Date | null): string | null {
   return value ? new Date(value).toISOString() : null;
+}
+
+async function authoritativeWhatChangedProjection(
+  snapshotId: string,
+  eventId: string,
+  currentVersionId: string,
+): Promise<WhatChangedProjection> {
+  const snapshotBoundaryResult = await pool().query<{
+    brief_date: string | Date;
+    sequence_number: number;
+    previous_snapshot_id: string | null;
+    publication_boundary: string | Date | null;
+    snapshot_created_at: string | Date;
+  }>(`
+    SELECT snapshot.brief_date, snapshot.sequence_number,
+           snapshot.previous_snapshot_id,
+           audit.published_at AS publication_boundary,
+           snapshot.created_at AS snapshot_created_at
+    FROM brief_snapshots AS snapshot
+    LEFT JOIN brief_publication_audits AS audit
+      ON audit.snapshot_id = snapshot.id
+    WHERE snapshot.id = $1
+  `, [snapshotId]);
+  const snapshotBoundary = snapshotBoundaryResult.rows[0];
+  if (!snapshotBoundary) {
+    throw new Error(`Snapshot ${snapshotId} does not exist`);
+  }
+  const snapshotDate = dateOnly(snapshotBoundary.brief_date);
+  const publishedAsOf = snapshotBoundary.publication_boundary
+    ? iso(snapshotBoundary.publication_boundary)
+    : undefined;
+  const snapshotCreatedAsOf = iso(snapshotBoundary.snapshot_created_at);
+  const currentVersion = await loadEventVersionById(pool(), eventId, currentVersionId);
+  if (!currentVersion?.comparison) {
+    throw new Error(`Event version ${currentVersionId} has no comparison authority`);
+  }
+  if (currentVersion.comparison.status !== "legacy_unverified") {
+    const previousVersion = currentVersion.previousVersionId
+      ? await loadEventVersionById(pool(), eventId, currentVersion.previousVersionId)
+      : undefined;
+    const recomputed = compareEventVersions(previousVersion, currentVersion, {
+      previous: previousVersion?.numericFacts,
+      current: currentVersion.numericFacts,
+    });
+    if (canonicalEvidenceJson(recomputed) !== canonicalEvidenceJson(currentVersion.comparison)) {
+      throw new Error(`Event version ${currentVersionId} comparison cannot be recomputed`);
+    }
+  }
+
+  const storedChanges = await loadSnapshotEventChanges(pool(), snapshotId, eventId);
+  const changes = new Map(storedChanges.map((change) => [change.baselineKind, change]));
+  const recomputedChanges = new Map<SnapshotEventChange["baselineKind"], SnapshotEventChange>();
+  const currentEvent = await loadSnapshotEvent(pool(), snapshotId, eventId);
+  if (!currentEvent || currentEvent.eventVersionId !== currentVersionId) {
+    throw new Error(`Snapshot ${snapshotId} current event authority mismatch`);
+  }
+  const expectedOperationalBaselineId = snapshotBoundary.previous_snapshot_id ?? undefined;
+  const expectedPublishedBaselineId = await loadPreviousPublishedSnapshotId(
+    pool(),
+    snapshotDate,
+    publishedAsOf,
+  );
+  const expectedOperationalBaselineEvent = await loadSnapshotEvent(
+    pool(),
+    expectedOperationalBaselineId,
+    eventId,
+  );
+  const expectedOperationalHistorical = expectedOperationalBaselineEvent
+    ? undefined
+    : await loadLatestSnapshotObservation(
+        pool(),
+        eventId,
+        snapshotDate,
+        snapshotBoundary.sequence_number - 1,
+        snapshotCreatedAsOf,
+      );
+  const expectedPublishedBaselineEvent = await loadSnapshotEvent(
+    pool(),
+    expectedPublishedBaselineId,
+    eventId,
+  );
+  const expectedPublishedHistorical = expectedPublishedBaselineEvent
+    ? undefined
+    : await loadLatestPublishedObservation(
+        pool(),
+        eventId,
+        snapshotDate,
+        publishedAsOf,
+      );
+  const isFirstSeen = !expectedOperationalBaselineEvent
+    && !expectedOperationalHistorical
+    && currentVersion.versionNumber === 1
+    && !currentVersion.previousVersionId;
+  const legacyUnverified = currentVersion.comparison.status === "legacy_unverified";
+
+  for (const baselineKind of ["previous_observation", "previous_published"] as const) {
+    const stored = changes.get(baselineKind);
+    if (!stored) throw new Error(`Snapshot ${snapshotId} lacks ${baselineKind} comparison`);
+    const expectedBaselineSnapshotId = baselineKind === "previous_observation"
+      ? expectedOperationalBaselineId
+      : expectedPublishedBaselineId;
+    if (stored.baselineSnapshotId !== expectedBaselineSnapshotId) {
+      throw new Error(`Snapshot ${snapshotId} ${baselineKind} selected the wrong baseline snapshot`);
+    }
+    const baselineEvent = baselineKind === "previous_observation"
+      ? expectedOperationalBaselineEvent
+      : expectedPublishedBaselineEvent;
+    if ((baselineEvent?.eventVersionId ?? undefined) !== stored.baselineEventVersionId) {
+      throw new Error(`Snapshot ${snapshotId} ${baselineKind} endpoint mismatch`);
+    }
+    const historicalObservation = baselineKind === "previous_observation"
+      ? expectedOperationalHistorical
+      : expectedPublishedHistorical;
+    if (stored.historicalObservationSnapshotId !== historicalObservation?.snapshotId) {
+      throw new Error(
+        `Snapshot ${snapshotId} ${baselineKind} selected the wrong historical observation`,
+      );
+    }
+    const baselineVersion = baselineEvent
+      && baselineEvent.eventVersionId !== currentVersionId
+      ? await loadEventVersionById(pool(), eventId, baselineEvent.eventVersionId)
+      : undefined;
+    if (baselineEvent
+      && baselineEvent.eventVersionId !== currentVersionId
+      && !baselineVersion) {
+      throw new Error(`Snapshot ${snapshotId} ${baselineKind} event version is missing`);
+    }
+    const contentComparison = baselineVersion
+      ? compareEventBaseline(baselineVersion, currentVersion, {
+          previous: baselineVersion.numericFacts,
+          current: currentVersion.numericFacts,
+        })
+      : undefined;
+    const recomputed = compareSnapshotEvent({
+      baselineKind,
+      baselineSnapshotId: expectedBaselineSnapshotId,
+      baselineEvent,
+      historicalObservation,
+      current: currentEvent,
+      currentSnapshotId: snapshotId,
+      comparedAt: stored.comparedAt,
+      isFirstSeen,
+      legacyUnverified,
+      contentComparison,
+    });
+    if (canonicalEvidenceJson(recomputed) !== canonicalEvidenceJson(stored)) {
+      throw new Error(`Snapshot ${snapshotId} ${baselineKind} comparison cannot be recomputed`);
+    }
+    recomputedChanges.set(baselineKind, recomputed);
+  }
+  return projectWhatChanged({
+    investor: recomputedChanges.get("previous_published")!,
+    operational: recomputedChanges.get("previous_observation")!,
+    latestVersion: currentVersion.comparison,
+  });
 }
 
 /**
@@ -2856,7 +4479,8 @@ export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<E
     const eventVersionResult = await pool().query<EventVersionRow>(`
       SELECT id, event_id, version_number, previous_version_id, content_hash,
              evidence_hash, state_hash, presentation_hash, observed_at, run_id,
-             payload, created_at
+             payload, actor_type, actor_id_hash, change_reason, request_id,
+             created_at
       FROM event_versions
       WHERE event_id = $1 AND id = $2
     `, [headline.id, eventVersionId]);
@@ -2941,6 +4565,33 @@ export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<E
           "数据库事件版本载荷无法解析或无法重算权威哈希。",
         ));
       }
+    }
+    try {
+      const authoritativeWhatChanged = await authoritativeWhatChangedProjection(
+        snapshotId,
+        headline.id,
+        eventVersionId,
+      );
+      if (!headline.whatChanged) {
+        issues.push(authorityIssue(
+          headline.id,
+          "WHAT_CHANGED_AUTHORITY_MISSING",
+          "待发布事件缺少不可变的前后版本比较结果。",
+        ));
+      } else if (canonicalEvidenceJson(headline.whatChanged)
+        !== canonicalEvidenceJson(authoritativeWhatChanged)) {
+        issues.push(authorityIssue(
+          headline.id,
+          "WHAT_CHANGED_AUTHORITY_MISMATCH",
+          "待发布事件的上一版、当前版、变化原因或排名变化与数据库权威记录不一致。",
+        ));
+      }
+    } catch {
+      issues.push(authorityIssue(
+        headline.id,
+        "WHAT_CHANGED_INTERNAL_INTEGRITY_INVALID",
+        "数据库中的差异算法版本、比较端点或结果哈希无法由权威版本链重算。",
+      ));
     }
     const sourceRows = await pool().query<{
       source_observation_id: string;
@@ -3550,24 +5201,289 @@ export async function verifyBriefEvidenceAuthority(brief: DailyBrief): Promise<E
   return issues;
 }
 
+function publicationComparableBrief(brief: DailyBrief): string {
+  const reviewedContent = structuredClone(brief);
+  delete reviewedContent.id;
+  delete reviewedContent.status;
+  delete reviewedContent.publishedAt;
+  delete reviewedContent.storageMode;
+  return canonicalJson(reviewedContent);
+}
+
+function assertExactReviewedSnapshot(
+  submitted: DailyBrief,
+  authoritativeDraft: DailyBrief,
+  currentSnapshotId: string | null | undefined,
+): string {
+  const submittedSnapshotId = submitted.snapshot?.id;
+  const draftSnapshotId = authoritativeDraft.snapshot?.id;
+  if (!submittedSnapshotId || !draftSnapshotId || !currentSnapshotId) {
+    throw new StaleBriefRevisionError("A complete reviewed snapshot revision is required before publishing");
+  }
+  if (submittedSnapshotId !== draftSnapshotId || submittedSnapshotId !== currentSnapshotId) {
+    throw new StaleBriefRevisionError("The reviewed snapshot changed before publication; reload and review it again");
+  }
+  if (publicationComparableBrief(submitted) !== publicationComparableBrief(authoritativeDraft)) {
+    throw new StaleBriefRevisionError("The submitted publication payload is not the exact reviewed draft");
+  }
+  return submittedSnapshotId;
+}
+
+function publishedBriefFromDraft(
+  draft: DailyBrief,
+  id: string,
+  publishedAt: string,
+  mode: "memory" | "postgres",
+): DailyBrief {
+  return {
+    ...structuredClone(draft),
+    id,
+    status: "published",
+    publishedAt,
+    storageMode: mode,
+  };
+}
+
+function assertCurrentMemoryPublishedBaseline(snapshot: BriefSnapshotRecord): void {
+  const expected = previousPublishedMemorySnapshot(snapshot.date)?.id;
+  for (const headline of snapshot.brief.headlines) {
+    if (headline.whatChanged?.investor.baselineSnapshotId !== expected) {
+      throw new StaleBriefRevisionError(
+        "The previous published brief changed; rebuild and review What Changed before publishing",
+      );
+    }
+  }
+}
+
+async function assertCurrentPostgresPublishedBaseline(
+  client: PoolClient,
+  snapshotId: string,
+): Promise<void> {
+  const boundary = await client.query<{ brief_date: string | Date }>(`
+    SELECT brief_date FROM brief_snapshots WHERE id = $1
+  `, [snapshotId]);
+  if (!boundary.rows[0]) {
+    throw new StaleBriefRevisionError("The reviewed snapshot authority is missing");
+  }
+  const expected = await loadPreviousPublishedSnapshotId(
+    client,
+    dateOnly(boundary.rows[0].brief_date),
+  );
+  const endpoints = await client.query<{
+    event_id: string;
+    baseline_snapshot_id: string | null;
+  }>(`
+    SELECT observation.event_id, comparison.baseline_snapshot_id
+    FROM brief_snapshot_events AS observation
+    LEFT JOIN brief_snapshot_event_changes AS comparison
+      ON comparison.current_snapshot_id = observation.snapshot_id
+     AND comparison.event_id = observation.event_id
+     AND comparison.baseline_kind = 'previous_published'
+     AND comparison.algorithm_version = $2
+    WHERE observation.snapshot_id = $1
+  `, [snapshotId, WHAT_CHANGED_ALGORITHM_VERSION]);
+  if (!endpoints.rows.length
+    || endpoints.rows.some((row) => row.baseline_snapshot_id !== (expected ?? null))) {
+    throw new StaleBriefRevisionError(
+      "The previous published brief changed; rebuild and review What Changed before publishing",
+    );
+  }
+}
+
+function publishBriefMemory(
+  id: string,
+  brief: DailyBrief,
+  pdf: Buffer,
+  actor: NonNullable<PersistBriefOptions["actor"]>,
+): BriefRecord {
+  // The normalized actor is intentionally carried across the promotion
+  // boundary so the publication audit can be recorded without re-reading a
+  // credential or accepting an unvalidated actor shape.
+  void actor;
+  const entry = memory.get(id);
+  if (!entry) throw new Error("Daily brief not found");
+  if (entry.status !== "draft") throw new Error("Only a draft can be published");
+  const snapshotId = assertExactReviewedSnapshot(brief, entry.brief, entry.currentSnapshotId);
+  const snapshot = briefSnapshotMemory.get(snapshotId);
+  if (!snapshot
+    || snapshot.payloadHash !== entry.brief.snapshot?.payloadHash
+    || publicationComparableBrief(snapshot.brief)
+      !== publicationComparableBrief(entry.brief)) {
+    throw new StaleBriefRevisionError(
+      "The reviewed draft does not match its immutable snapshot authority",
+    );
+  }
+  assertCurrentMemoryPublishedBaseline(snapshot);
+  const latestPublishedAt = [...publicationAuditMemory.values()]
+    .map((audit) => Date.parse(audit.publishedAt))
+    .filter(Number.isFinite)
+    .reduce((latest, value) => Math.max(latest, value), Number.NEGATIVE_INFINITY);
+  const publishedAt = new Date(Math.max(
+    Date.now(),
+    Number.isFinite(latestPublishedAt) ? latestPublishedAt + 1 : Date.now(),
+  )).toISOString();
+
+  // No await occurs between checking the three snapshot pointers and replacing
+  // the record, so this is the memory backend's compare-and-swap boundary.
+  if (memory.get(id) !== entry
+    || entry.status !== "draft"
+    || entry.currentSnapshotId !== snapshotId
+    || entry.brief.snapshot?.id !== snapshotId) {
+    throw new StaleBriefRevisionError("The reviewed snapshot changed during publication");
+  }
+  const published: MemoryEntry = {
+    ...entry,
+    status: "published",
+    brief: publishedBriefFromDraft(entry.brief, id, publishedAt, "memory"),
+    publishedAt,
+    updatedAt: publishedAt,
+    pdf: Buffer.from(pdf),
+    hasPdf: true,
+    currentSnapshotId: snapshotId,
+  };
+  const publicationAudit: MemoryPublicationAudit = {
+    briefId: id,
+    snapshotId,
+    snapshotPayloadHash: snapshot.payloadHash,
+    pdfSha256: createHash("sha256").update(pdf).digest("hex"),
+    actorType: actor.type,
+    actorIdHash: actor.idHash,
+    actionReason: actor.reason,
+    requestId: actor.requestId,
+    publishedAt,
+  };
+  memory.set(id, published);
+  publicationAuditMemory.set(id, publicationAudit);
+  return cloneMemory(published);
+}
+
+async function publishBriefPostgres(
+  id: string,
+  brief: DailyBrief,
+  pdf: Buffer,
+  actor: NonNullable<PersistBriefOptions["actor"]>,
+): Promise<BriefRecord> {
+  await ensureSchema();
+  const client = await pool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext('analystarena_snapshot_visibility'))",
+    );
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext('analystarena_brief_publication'))",
+    );
+    const locked = await client.query<DatabaseRow>(`
+      SELECT *, (pdf_data IS NOT NULL) AS has_pdf
+      FROM daily_briefs
+      WHERE id = $1
+      FOR UPDATE
+    `, [id]);
+    const row = locked.rows[0];
+    if (!row) throw new Error("Daily brief not found");
+    if (row.status !== "draft") throw new Error("Only a draft can be published");
+
+    const draft = rowToRecord(row).brief;
+    const snapshotId = assertExactReviewedSnapshot(brief, draft, row.current_snapshot_id);
+    const snapshotAuthority = await client.query<{
+      payload_hash: string;
+      payload: DailyBrief | string;
+    }>(`
+      SELECT payload_hash, payload
+      FROM brief_snapshots
+      WHERE id = $1
+      FOR SHARE
+    `, [snapshotId]);
+    const snapshotRow = snapshotAuthority.rows[0];
+    if (!snapshotRow) {
+      throw new StaleBriefRevisionError("The reviewed snapshot authority is missing");
+    }
+    const snapshotBrief = typeof snapshotRow.payload === "string"
+      ? JSON.parse(snapshotRow.payload) as DailyBrief
+      : snapshotRow.payload;
+    if (snapshotRow.payload_hash !== draft.snapshot?.payloadHash
+      || snapshotPayloadHash(snapshotBrief) !== snapshotRow.payload_hash
+      || publicationComparableBrief(snapshotBrief)
+        !== publicationComparableBrief(draft)) {
+      throw new StaleBriefRevisionError(
+        "The reviewed draft does not match its immutable snapshot authority",
+      );
+    }
+    await assertCurrentPostgresPublishedBaseline(client, snapshotId);
+    const publicationClock = await client.query<{ published_at: string | Date }>(`
+      SELECT GREATEST(
+        clock_timestamp(),
+        COALESCE(
+          MAX(authority.published_at) + INTERVAL '1 millisecond',
+          '-infinity'::timestamptz
+        )
+      ) AS published_at
+      FROM (
+        SELECT audit.published_at
+        FROM brief_publication_audits AS audit
+        UNION ALL
+        SELECT existing.published_at
+        FROM daily_briefs AS existing
+        WHERE existing.status = 'published'
+          AND existing.id <> $1
+          AND existing.published_at IS NOT NULL
+      ) AS authority
+    `, [id]);
+    const publishedAt = iso(publicationClock.rows[0].published_at);
+    const publishedPayload = publishedBriefFromDraft(draft, id, publishedAt, "postgres");
+    const updated = await client.query<DatabaseRow>(`
+      UPDATE daily_briefs
+      SET status = 'published',
+          payload = $2::jsonb,
+          pdf_data = $3,
+          published_at = $4,
+          updated_at = $4,
+          current_snapshot_id = $5
+      WHERE id = $1
+        AND status = 'draft'
+        AND current_snapshot_id = $5
+      RETURNING *, (pdf_data IS NOT NULL) AS has_pdf
+    `, [id, JSON.stringify(publishedPayload), pdf, publishedAt, snapshotId]);
+    if (!updated.rows[0]) {
+      throw new StaleBriefRevisionError("The reviewed snapshot changed during publication");
+    }
+    await client.query(`
+      INSERT INTO brief_publication_audits (
+        brief_id, snapshot_id, snapshot_payload_hash, pdf_sha256,
+        actor_type, actor_id_hash, action_reason, request_id, published_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `, [
+      id,
+      snapshotId,
+      snapshotRow.payload_hash,
+      createHash("sha256").update(pdf).digest("hex"),
+      actor.type,
+      actor.idHash ?? null,
+      actor.reason ?? null,
+      actor.requestId ?? null,
+      publishedAt,
+    ]);
+    await client.query("COMMIT");
+    return rowToRecord(updated.rows[0]);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function publishBrief(
   id: string,
   brief: DailyBrief,
   pdf: Buffer,
   options: PersistBriefOptions = {},
 ): Promise<BriefRecord> {
-  const stream = options.stream ?? "publish";
-  const normalized = {
-    stream,
-    batchKey: safeBatchKey(brief, stream, options.batchKey ?? `${id}:${brief.generatedAt}:${Date.now()}`),
-    observedAt: validIsoOrNow(options.observedAt ?? new Date().toISOString()),
-  };
-  const write: DailyBriefWrite = { kind: "publish", id, pdf, expectedSnapshotId: brief.snapshot?.id };
+  const actor = normalizeActor(options.actor);
   const result = storageMode() === "memory"
-    ? await persistBriefObservationMemory(brief, normalized, write)
-    : await persistBriefObservationPostgres(brief, normalized, write);
-  if (!result.record) throw new Error("发布失败");
-  return result.record;
+    ? publishBriefMemory(id, brief, pdf, actor)
+    : await publishBriefPostgres(id, brief, pdf, actor);
+  return result;
 }
 
 export async function getPublishedPdf(id: string): Promise<{ pdf: Buffer; date: string } | null> {
