@@ -10,6 +10,7 @@
 | --- | --- |
 | 网站首页 | [analystarena-daily-intelligence.onrender.com](https://analystarena-daily-intelligence.onrender.com/) |
 | 今日热搜榜 | [/trending](https://analystarena-daily-intelligence.onrender.com/trending) |
+| ETFs 热门话题 | [/etf-topics](https://analystarena-daily-intelligence.onrender.com/etf-topics) |
 | 历史日报与 PDF | [/archive](https://analystarena-daily-intelligence.onrender.com/archive) |
 | 人工审核台（需要管理员凭证） | [/review](https://analystarena-daily-intelligence.onrender.com/review) |
 | Reddit 数据服务说明 | [/api/v1/reddit](https://analystarena-daily-intelligence.onrender.com/api/v1/reddit) |
@@ -109,6 +110,8 @@ npm run dev
 `.github/workflows/daily-brief.yml` 每天北京时间 07:00 在 GitHub Actions 先用 crawl4ai 采集文章全文（失败不阻塞日报），再执行 Playwright，把全文与 Reddit/X 素材一起传给 Render 生成草稿。请把与 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret；需要登录 X 搜索时，再加入 `X_AUTH_TOKEN`。
 
 `.github/workflows/sync-stocks.yml` 每天北京时间 05:30 使用 yfinance 更新美股主档与近三个月日线，再分批写入 Render。它同样使用 `CRON_SECRET`，可用 GitHub repository variable `STOCK_SYNC_ENDPOINT` 覆盖目标网址。
+
+`.github/workflows/etf-topics.yml` 每小时采集 Reddit ETF 社区的热门讨论并提交整点评审：选出流量最高的前五篇、翻译成简体中文并整理重点，入选帖持续追踪 24 小时（同时最多 120 篇）；每天北京时间 00:00 统整前一天为历史日报，每周一再统整 7 天为周报。完整设计见 [ETFs 热门话题](docs/etf-hot-topics.md)。
 
 Playwright 不直接运行在 Render，避免免费方案的内存被 Chromium 耗尽而重启服务。
 

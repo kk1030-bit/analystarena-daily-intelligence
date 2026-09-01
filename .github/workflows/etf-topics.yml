@@ -1,0 +1,29 @@
+name: Review ETF hot topics hourly
+
+on:
+  schedule:
+    # Every hour. The 16:07 UTC run lands just after 00:00 Beijing time, so it
+    # also consolidates the finished day (and, on Mondays, the finished week);
+    # any missed run self-heals on the next hourly review.
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: analystarena-etf-topics
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - name: Collect ETF subreddit hot posts and submit the hourly review
+        run: npx tsx scripts/run-etf-topics.ts

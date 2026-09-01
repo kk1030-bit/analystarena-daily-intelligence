@@ -11,6 +11,7 @@ import {
   ChevronRight,
   CircleDot,
   Clock3,
+  Coins,
   Download,
   ExternalLink,
   FileText,
@@ -701,6 +702,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
           <a href={liveTrendingHref(contextBatch)}><Flame size={17} />热搜榜</a>
           <a href={`/headlines${liveContextQuery(contextBatch)}`}><Newspaper size={17} />市场头条</a>
           <a href={`/signals${liveContextQuery(contextBatch)}`}><MessageCircle size={17} />社交媒体信号</a>
+          <a href="/etf-topics"><Coins size={17} />ETFs 热门话题</a>
           <a href="#watchlist"><CalendarDays size={17} />观察清单</a>
           <a href="/archive"><Search size={17} />历史日报</a>
           <a href="/review"><ShieldCheck size={17} />人工审核</a>
@@ -848,6 +850,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
         <a href={liveTrendingHref(contextBatch)}><Flame size={18} /><span>热搜</span></a>
         <a href={`/headlines${liveContextQuery(contextBatch)}`}><Newspaper size={18} /><span>头条</span></a>
         <a href={`/signals${liveContextQuery(contextBatch)}`}><MessageCircle size={18} /><span>信号</span></a>
+        <a href="/etf-topics"><Coins size={18} /><span>ETF</span></a>
         <a href="/archive"><Search size={18} /><span>历史</span></a>
       </nav>
     </div>
