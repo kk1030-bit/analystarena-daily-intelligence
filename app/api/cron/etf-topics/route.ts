@@ -9,6 +9,7 @@ import {
   type EtfNewTrackedInput,
   type EtfObservation,
 } from "@/lib/etf-db";
+import { collectEtfServerSide } from "@/lib/etf-reddit-server";
 import { buildEtfDailyDigest, buildEtfWeeklyDigest, enrichEtfPosts } from "@/lib/etf-summarize";
 import {
   etfBeijingDate,
@@ -61,7 +62,18 @@ export async function POST(request: Request) {
     const active = await getActiveEtfTracked(batch.observedAt);
     const activeById = new Map(active.map((post) => [post.id, post]));
 
-    const relevant = batch.posts.filter((post) => isEtfRelevant(post.subreddit, post.title, post.body));
+    // Reddit blocks some collector network paths (GitHub Actions IPs), so an
+    // empty remote batch triggers server-side collection before the review.
+    let posts = batch.posts;
+    let serverCollector: string | undefined;
+    if (!posts.length) {
+      const collected = await collectEtfServerSide(active.map((post) => post.url));
+      posts = validateEtfBatch({ observedAt: batch.observedAt, posts: collected.posts }).posts;
+      const status = collected.status;
+      serverCollector = `${status.backend ?? status.name}：${status.ok ? `${posts.length} 篇` : status.note ?? "失败"}`;
+    }
+
+    const relevant = posts.filter((post) => isEtfRelevant(post.subreddit, post.title, post.body));
     const selection = selectTopEtfPosts(relevant);
     const selectedIds = new Set(selection.map((post) => post.id));
 
@@ -100,7 +112,7 @@ export async function POST(request: Request) {
 
     // Selected posts and already-tracked posts seen this hour both get an
     // engagement observation; the relevance gate only guards new selections.
-    const observations: EtfObservation[] = batch.posts
+    const observations: EtfObservation[] = posts
       .filter((post) => selectedIds.has(post.id) || activeById.has(post.id))
       .map((post) => ({
         postId: post.id,
@@ -124,6 +136,7 @@ export async function POST(request: Request) {
       ok: true,
       storageMode: storageMode(),
       received: batch.posts.length,
+      ...(serverCollector ? { serverCollector, collectedServerSide: posts.length } : {}),
       skipped: batch.skipped,
       relevant: relevant.length,
       selected: selectionItems.length,

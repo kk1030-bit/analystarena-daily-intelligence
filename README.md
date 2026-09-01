@@ -103,6 +103,7 @@ npm run dev
 - `STOCK_SEARCH_API_TOKEN`：保护美股搜索与新闻关联美股接口；调用方使用 Bearer Token 或 `X-API-Key`。
 - `OPENAI_API_KEY`：启用 AI 摘要、事件合并与影响判断；未设置时自动翻译仍会运行。
 - `X_AUTH_TOKEN`：可选；放在 GitHub Actions repository secret。未设置时 X Playwright 会安全跳过登录限定搜索。
+- `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`：可选；Reddit 应用凭证（[reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) 创建 script 应用）。配置后 ETF 热门话题的服务器端采集走 Reddit 官方 OAuth API，最稳定；未配置时退回公开 JSON 列表。
 - `ENABLE_BROWSER_COLLECTORS=true`：只供本机测试直接启用 Playwright；Render 正式环境保持 `false`。
 
 ## 每日排程

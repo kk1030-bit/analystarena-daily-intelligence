@@ -16,12 +16,13 @@
 ## 数据流
 
 1. `.github/workflows/etf-topics.yml` 每小时执行 `scripts/run-etf-topics.ts`。
-2. 脚本先读取公开的 `/api/etf-topics` 得到追踪中的帖子清单，再用 `lib/collectors/etf-reddit.ts`（Playwright，old.reddit 优先、主站备援）采集热门列表并回访追踪帖，POST 到 `CRON_SECRET` 保护的 `/api/cron/etf-topics`。
-3. 服务器（`app/api/cron/etf-topics/route.ts`）：
+2. 脚本先读取公开的 `/api/etf-topics` 得到追踪中的帖子清单，再用 `lib/collectors/etf-reddit.ts`（Reddit JSON 优先、Playwright shreddit DOM 备援）采集热门列表并回访追踪帖，POST 到 `CRON_SECRET` 保护的 `/api/cron/etf-topics`。每条线路的成败与原因都会打印到 workflow 日志。
+3. Reddit 会封锁部分数据中心网段（GitHub Actions 的 IP 常拿到 403 或空壳页面）。因此当远端批次为空时，服务器（Render）会自行采集一次：配置 `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` 时走 Reddit 官方 OAuth API（`oauth.reddit.com`，最稳定的正规管道），未配置时退回公开 JSON 列表；追踪帖回访同样在服务器端补齐。
+4. 服务器（`app/api/cron/etf-topics/route.ts`）：
    - `lib/etf-topics.ts` 做 fail-open 的逐帖校验（坏帖跳过并计数）、ETF 相关性过滤（`r/ETFs` 全收，其余需命中 ETF 关键词或代码）、按热度（分数 + 2×评论）选出前五；
    - `lib/etf-summarize.ts` 生成简体中文标题与 2–4 条重点整理：配置 `OPENAI_API_KEY` 时用 Responses API（输入视为不受信任、不得补写事实），失败或未配置时退回内建翻译与句子抽取，永不阻塞评审；
    - `lib/etf-db.ts` 保存追踪帖、热度观察与整点前五快照（PostgreSQL 表见 `db/migrations/20260901_etf_topics.sql`；未配置数据库时用内存模式）。
-4. 日报／周报（`buildEtfDailyDigest` / `buildEtfWeeklyDigest`）从整点快照聚合：去重取峰值热度、统计 subreddit 分布与热门 KOL，总结文字同样是 AI 优先、规则兜底。
+5. 日报／周报（`buildEtfDailyDigest` / `buildEtfWeeklyDigest`）从整点快照聚合：去重取峰值热度、统计 subreddit 分布与热门 KOL，总结文字同样是 AI 优先、规则兜底。
 
 ## 接口
 

@@ -36,6 +36,46 @@ export interface EtfIncomingPost {
   publishedAtRaw: string | null;
 }
 
+/** One `data` node from Reddit's public listing/permalink JSON documents. */
+export interface RedditJsonPost {
+  id?: unknown;
+  author?: unknown;
+  title?: unknown;
+  selftext?: unknown;
+  permalink?: unknown;
+  score?: unknown;
+  num_comments?: unknown;
+  created_utc?: unknown;
+  stickied?: unknown;
+}
+
+function clampJsonCount(value: unknown): number {
+  const parsed = Math.trunc(Number(value));
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+/** Converts one Reddit JSON post into a collector row; sticky/broken posts are dropped. */
+export function rowFromRedditJsonPost(subreddit: string, post: RedditJsonPost): EtfIncomingPost | null {
+  const title = typeof post.title === "string" ? post.title.trim() : "";
+  const permalink = typeof post.permalink === "string" ? post.permalink : "";
+  const nativeId = typeof post.id === "string" ? post.id.trim() : "";
+  if (!title || !permalink.startsWith("/") || !nativeId || post.stickied === true) return null;
+  const createdUtc = Number(post.created_utc);
+  return {
+    nativeId,
+    subreddit,
+    author: typeof post.author === "string" ? post.author : "",
+    title,
+    body: typeof post.selftext === "string" ? post.selftext.slice(0, ETF_MAX_BODY_LENGTH) : "",
+    url: `https://www.reddit.com${permalink}`,
+    score: clampJsonCount(post.score),
+    comments: clampJsonCount(post.num_comments),
+    publishedAtRaw: Number.isFinite(createdUtc) && createdUtc > 0
+      ? new Date(createdUtc * 1_000).toISOString()
+      : null,
+  };
+}
+
 export interface EtfValidatedPost {
   /** Stable source-document ID derived from the canonical Reddit URL. */
   id: string;

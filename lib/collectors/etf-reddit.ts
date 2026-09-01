@@ -1,6 +1,12 @@
 import type { Browser, Page } from "playwright-core";
 import type { CollectorStatus } from "../types";
-import { ETF_MAX_BODY_LENGTH, ETF_SUBREDDITS } from "../etf-topics";
+import {
+  ETF_MAX_BODY_LENGTH,
+  ETF_SUBREDDITS,
+  rowFromRedditJsonPost,
+  type EtfIncomingPost,
+  type RedditJsonPost,
+} from "../etf-topics";
 import { launchBrowser } from "./browser";
 import { collectFirstAvailable, safeCollectorNote } from "./router";
 
@@ -8,17 +14,7 @@ const LISTING_ROWS_PER_SUBREDDIT = 12;
 const MAX_TRACKED_REVISITS = 25;
 
 /** Raw collected row; validation and identity derivation happen server-side. */
-export interface EtfCollectedRow {
-  nativeId: string;
-  subreddit: string;
-  author: string;
-  title: string;
-  body: string;
-  url: string;
-  score: number;
-  comments: number;
-  publishedAtRaw: string | null;
-}
+export type EtfCollectedRow = EtfIncomingPost;
 
 export interface EtfCollectResult {
   posts: EtfCollectedRow[];
@@ -30,44 +26,6 @@ function parseRedditCount(value: string): number {
   if (!match) return 0;
   const multiplier = { k: 1_000, m: 1_000_000 }[match[2].toLowerCase()] ?? 1;
   return Math.round(Number(match[1]) * multiplier);
-}
-
-function clampCount(value: unknown): number {
-  const parsed = Math.trunc(Number(value));
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
-}
-
-interface RedditJsonPost {
-  id?: unknown;
-  author?: unknown;
-  title?: unknown;
-  selftext?: unknown;
-  permalink?: unknown;
-  score?: unknown;
-  num_comments?: unknown;
-  created_utc?: unknown;
-  stickied?: unknown;
-}
-
-function rowFromJsonPost(subreddit: string, post: RedditJsonPost): EtfCollectedRow | null {
-  const title = typeof post.title === "string" ? post.title.trim() : "";
-  const permalink = typeof post.permalink === "string" ? post.permalink : "";
-  const nativeId = typeof post.id === "string" ? post.id.trim() : "";
-  if (!title || !permalink.startsWith("/") || !nativeId || post.stickied === true) return null;
-  const createdUtc = Number(post.created_utc);
-  return {
-    nativeId,
-    subreddit,
-    author: typeof post.author === "string" ? post.author : "",
-    title,
-    body: typeof post.selftext === "string" ? post.selftext.slice(0, ETF_MAX_BODY_LENGTH) : "",
-    url: `https://www.reddit.com${permalink}`,
-    score: clampCount(post.score),
-    comments: clampCount(post.num_comments),
-    publishedAtRaw: Number.isFinite(createdUtc) && createdUtc > 0
-      ? new Date(createdUtc * 1_000).toISOString()
-      : null,
-  };
 }
 
 async function ensureOrigin(page: Page, host: string): Promise<void> {
@@ -109,7 +67,7 @@ async function collectListingsJson(page: Page, host: "www.reddit.com" | "old.red
     try {
       const posts = await fetchListingJson(page, host, subreddit);
       for (const post of posts) {
-        const row = rowFromJsonPost(subreddit.toLowerCase(), post);
+        const row = rowFromRedditJsonPost(subreddit.toLowerCase(), post);
         if (row) rows.push(row);
       }
     } catch (error) {
@@ -210,7 +168,7 @@ async function revisitTrackedPost(page: Page, url: string): Promise<EtfCollected
   const payload = await response.json() as Array<{ data?: { children?: Array<{ data?: unknown }> } }>;
   const post = payload?.[0]?.data?.children?.[0]?.data ?? null;
   if (!post || typeof post !== "object") return null;
-  const row = rowFromJsonPost(subredditFromPath(pathname), post as RedditJsonPost);
+  const row = rowFromRedditJsonPost(subredditFromPath(pathname), post as RedditJsonPost);
   return row ? { ...row, url } : null;
 }
 
