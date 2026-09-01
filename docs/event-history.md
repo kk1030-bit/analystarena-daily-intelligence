@@ -37,6 +37,74 @@
 
 来源暂时采集失败时，既有事件证据会保留。需要撤销或标记失效的来源，必须在后续证据状态功能中明确处理，不能用“本轮没抓到”当作删除依据。
 
+## What Changed：不可变比较模型
+
+7/23 的差异不是在读取日报时临时拼接的摘要，而是和比较端点一起永久保存的审计记录：
+
+- `event_version_comparisons` 保存当前事件版本、前一事件版本、比较状态、算法版本、输入／结果 hash 与比较时间；`event_version_change_items` 保存每个可独立核查的 before、after、reason code、证据版本及 change hash。
+- `event_version_numeric_facts` 保存从原始 claim 提取的结构化数值；`event_version_numeric_fact_evidence` 以外键保证每个数值确实由同一事件版本、同一 claim 的精确 evidence version 支持。
+- `brief_snapshot_event_changes` 保存快照层的在榜状态与排名比较；`brief_snapshot_event_change_items` 保存排名上升、下降、进入或重新进入等差异。排名变化不会创建事件内容版本。
+- 上述比较表、算法表、数值事实及明确撤回请求全部由数据库 trigger 拒绝 `UPDATE`／`DELETE`。
+
+事件版本只与确定的比较端点比较。v1 没有前一版本时只能产生 `first_seen`；v2 必须指向同一事件的相邻 v1，不能跨过版本或在版本链缺口上生成差异。系统可辨识：
+
+- 证据新增、同一 evidence item 的内容修订，以及 claim 与证据支持关系的新增、移除或改变；
+- 有精确单位及证据绑定的数值变化；
+- 明确市场方向从未建立到建立，或由原方向改变；
+- 其他 claim 或结构化状态的实质改变。
+
+数值比较采用保守规则：只解析有精确证据支持的原始 claim，并保存主体系、指标、期间、规范数值、单位、币别、原始 token、文字偏移、parser version 与不可比较原因。日期、年份、产品型号及缺少明确单位或上下文的数字不会被猜成财务指标。
+
+### 双基线
+
+同一快照为每个事件保存两份不同用途的比较，不能互相替代：
+
+| 基线 | 精确定义 | 用途 |
+| --- | --- | --- |
+| `previous_observation` | 同一日报日期、序号相邻的上一份成功快照 | 说明本轮采集／审核相对上一轮发生了什么，供营运排错与十分钟更新监测 |
+| `previous_published` | 当前日报之前最近一份已发布日报所冻结的 `current_snapshot_id` | 说明投资人相对上一份正式报告真正新看到什么，不会因中间草稿或审核快照而被清零 |
+
+基线快照含有同一事件时，内容比较使用该基线实际引用的事件版本，而排名比较使用两份快照中的排名。基线没有该事件时：
+
+- 数据库从未观察过该事件：`first_seen`；
+- 基线未包含、历史也未出现：`entered`；
+- 基线未包含，但更早存在同一正式事件 ID 的观察：`reentered`。
+
+`entered`／`reentered` 只说明榜单存在性，不能自行推导“证据增加”“方向转多”或排名变化。没有可比较排名时，`previous_rank` 与 `rank_delta` 必须为空，`rank_movement` 为 `not_comparable`。排名差定义为 `previous_rank - current_rank`，正数表示排名上升，负数表示下降。
+
+### 证据撤回不是采集缺失
+
+来源暂时超时、限流或本轮未抓到时，旧证据仍保留，不会产生 `evidence_removed`。撤回必须建立不可变的 `evidence_retraction_requests`，并精确指定：
+
+- 事件、from／to 事件版本、evidence item 及 evidence version；
+- 若仅撤回某条判断的支持关系，还要指定同一版本中的 claim ID 与 claim key；
+- `source_retracted`、`invalid_locator`、`duplicate`、`review_rejected` 或 `superseded` 原因，以及非空说明；
+- 应用该操作的 collection run、时间、`actor_type` 与服务端 keyed-HMAC `actor_id_hash`；如有替代证据则记录 replacement evidence version。
+
+撤回会建立新的事件版本。若某条 claim 的最后一份支持证据被撤回，该 claim 必须降级为待确认，不能让旧的已确认状态继续通过发布。
+
+### 算法身份、旧数据与发布闸门
+
+比较算法由不可变的 `comparison_algorithms` 注册。当前版本为 `what-changed/v1`，实作 hash 为：
+
+```text
+f510adc0e7a9f8987d9ea5bba2e0a886e764745a0b7eed9ea2f20ad7bbe2c01c
+```
+
+该值是把 `lib/what-changed.ts` 中 hash 字面值替换成固定占位符、统一 LF 后计算的 SHA-256；测试会从源文件重新计算并核对。每笔比较同时保存 `algorithm_version`、`input_hash`、`result_hash`，每个 change item 另存 `change_hash`。应用启动与发布核验发现数据库注册 hash 和执行中实作不一致时会失败，不能用同一版本号静默替换算法。
+
+迁移前的事件版本与快照只回填 `legacy_unverified`／`no_baseline`；它们没有运行当时不存在的算法，所以不会伪造证据、数字、方向或排名差异。旧资料若要取得可验证差异，必须由新采集建立有完整证据链的新版本。
+
+发布时不信任请求 payload 内的 `whatChanged`。服务器会从 PostgreSQL 重新载入当前快照、两个基线快照、事件版本、比较项与算法注册，重算并核对端点及 hash。出现下列任一情况即 fail closed：
+
+- `WHAT_CHANGED_AUTHORITY_MISSING`：权威比较记录缺失；
+- `WHAT_CHANGED_AUTHORITY_MISMATCH`：payload 与数据库权威结果不一致；
+- `WHAT_CHANGED_INTERNAL_INTEGRITY_INVALID`：算法、端点、输入或结果的内部完整性不成立。
+
+人工审核或明确撤回若建立新事件版本，该版本同时记录 `actor_type`（`system`／`admin`／`legacy`）、不可逆 keyed-HMAC `actor_id_hash`、修改原因与服务端 request ID；即使审核没有改变事件内容，审核快照仍保存同一组操作者字段。明确撤回请求另存同一审计身份，并以不可变关联表逐项绑定实际产生的 `evidence_removed`／`claim_support_removed`。
+
+发布不再重跑持久化流程，而是在单一事务锁定 `daily_briefs`，核对提交内容、草稿 payload 与 `current_snapshot_id` 都指向同一份已审核快照，再原地提升。`brief_publication_audits` 永久保存该快照的 payload hash、PDF SHA-256、匿名操作者、原因、request ID 及发布时间；该表和撤回关联表都禁止更新或删除。管理员明文 token 与 `AUDIT_HMAC_KEY` 均不写入数据库、payload 或日志。
+
 ## 交易及不可变保证
 
 事件解析、版本新增、日报快照、快照事件关系、每日草稿更新及 collection run 成功状态会在同一个 PostgreSQL transaction 中提交。使用 advisory lock、事件行锁、唯一约束及幂等 batch key，避免多个 Render instance 同时写入时产生分叉。
@@ -47,6 +115,14 @@
 - `event_versions`
 - `brief_snapshots`
 - `brief_snapshot_events`
+- `comparison_algorithms`
+- `event_version_comparisons`
+- `event_version_change_items`
+- `event_version_numeric_facts`
+- `event_version_numeric_fact_evidence`
+- `evidence_retraction_requests`
+- `brief_snapshot_event_changes`
+- `brief_snapshot_event_change_items`
 
 正式日报只允许从 draft 发布一次。发布后的实时刷新会继续新增快照，但不会修改已发布 payload 或 PDF。
 
@@ -68,6 +144,7 @@ npm run build
 
 ```bash
 DATABASE_URL=postgresql://... npm run test:events:postgres
+DATABASE_URL=postgresql://... npm run test:what-changed:postgres
 ```
 
 目前的十分钟刷新仍由打开中的网页触发。现在可以保证“任何实际触发且成功的批次都会永久保存”，但不能声称“没有访客时也会每十分钟自动采集”；真正的全天候十分钟排程属于后续自动排程迭代。

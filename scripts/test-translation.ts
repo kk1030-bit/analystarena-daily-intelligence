@@ -13,6 +13,44 @@ function googleResponse(translated: string): Response {
   });
 }
 
+const protectedMarkerSource = String.raw`__ANALYSTARENA_KEEP_[0-9a-f]{32}_\d+__`;
+
+function requestUrl(input: string | URL | Request): string {
+  return input instanceof Request ? input.url : String(input);
+}
+
+function googleQuery(input: string | URL | Request): string {
+  return new URL(requestUrl(input)).searchParams.get("q") ?? "";
+}
+
+function protectedMarkers(value: string): string[] {
+  return value.match(new RegExp(protectedMarkerSource, "g")) ?? [];
+}
+
+function singleProtectedMarker(input: string | URL | Request): { marker: string; query: string } {
+  const query = googleQuery(input);
+  const markers = protectedMarkers(query);
+  assert.equal(markers.length, 1, "测试输入应生成且仅生成一个动态保护标记");
+  return { marker: markers[0], query };
+}
+
+function openAIResponse(outputText: string): Response {
+  return new Response(JSON.stringify({
+    id: "resp_translation_test",
+    object: "response",
+    output: [{
+      id: "msg_translation_test",
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: outputText, annotations: [] }],
+    }],
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 function briefWith(text: string): DailyBrief {
   return {
     date: "2026-07-17",
@@ -61,22 +99,237 @@ try {
   );
 
   const translatedSocialSource = "\u5728\u8d5b\u8f66\u8fd0\u52a8\u4e2d\uff0c\u5fae\u5c0f\u5dee\u8ddd\u5f88\u91cd\u8981\u3002OpenAI \u7684 Joyce Ruffell \u548c @RaceTekSystems \u8054\u5408\u521b\u59cb\u4eba @GarageGuyChase \u8ba8\u8bba\u5982\u4f55\u4f7f\u7528 AI \u6570\u636e\u505a\u51fa\u66f4\u5feb\u7684\u51b3\u7b56 - x.com";
-  globalThis.fetch = (async () => googleResponse(translatedSocialSource)) as typeof fetch;
+  globalThis.fetch = (async (input) => {
+    const { marker } = singleProtectedMarker(input);
+    return googleResponse(translatedSocialSource.replace("x.com", marker));
+  }) as typeof fetch;
   assert.equal(
     await localizeText("In racing, tiny margins matter and teams use AI for faster decisions from x.com"),
     translatedSocialSource,
     "\u5df2\u7ffb\u8bd1\u7684\u6b63\u6587\u4e0d\u5f97\u56e0\u793e\u4ea4\u8d26\u53f7\u6216\u6765\u6e90\u57df\u540d\u88ab\u8bef\u5224\u4e3a\u5931\u8d25",
   );
 
-  globalThis.fetch = (async () => googleResponse("\u7279\u65af\u62c9\u80a1\u7968\u5728 7 \u6708 22 \u65e5\u524d\u503c\u5f97\u4e70\u5165\u5417\uff1f - The Motley Fool")) as typeof fetch;
+  globalThis.fetch = (async (input) => {
+    const { marker } = singleProtectedMarker(input);
+    return googleResponse(`\u7279\u65af\u62c9\u80a1\u7968\u5728 7 \u6708 22 \u65e5\u524d\u503c\u5f97\u4e70\u5165\u5417\uff1f - ${marker}`);
+  }) as typeof fetch;
   assert.equal(
     await localizeText("Should you buy Tesla stock before July 22? - The Motley Fool"),
     "\u7279\u65af\u62c9\u80a1\u7968\u5728 7 \u6708 22 \u65e5\u524d\u503c\u5f97\u4e70\u5165\u5417\uff1f - The Motley Fool",
     "\u5a92\u4f53\u54c1\u724c\u540d\u4e0d\u5f97\u8ba9\u5df2\u5b8c\u6210\u7684\u4e2d\u6587\u8bd1\u6587\u5931\u8d25",
   );
 
-  const translatedFundBrand = "\u65bd\u74e6\u5e03\u65b0\u5174\u5e02\u573a ETF \u4e0e iShares MSCI \u65b0\u5174\u5e02\u573a ETF\uff1a\u54ea\u4e2a\u66f4\u597d\u4e70\uff1f\u6742\u4e03\u6742\u516b\u7684\u50bb\u74dc";
-  globalThis.fetch = (async () => googleResponse(translatedFundBrand)) as typeof fetch;
+  const translatedIndexHeadline = "AM \u5e02\u573a\u9700\u8981\u4e86\u89e3\uff1a\u7279\u6717\u666e\u516c\u5e03\u836f\u54c1\u5173\u7a0e\u3001OpenAI \u62a5\u544a\u4eba\u5de5\u667a\u80fd\u9ed1\u5ba2\u653b\u51fb\u7b49 (SP500:) - Seeking Alpha";
+  let protectedTranslationQuery = "";
+  globalThis.fetch = (async (input) => {
+    const protectedValue = singleProtectedMarker(input);
+    protectedTranslationQuery = protectedValue.query;
+    return googleResponse(`AM \u5e02\u573a\u9700\u8981\u4e86\u89e3\uff1a\u7279\u6717\u666e\u516c\u5e03\u836f\u54c1\u5173\u7a0e\u3001OpenAI \u62a5\u544a\u4eba\u5de5\u667a\u80fd\u9ed1\u5ba2\u653b\u51fb\u7b49 (SP500:) - ${protectedValue.marker}`);
+  }) as typeof fetch;
+  assert.equal(
+    await localizeText("AM Markets Need to Know: Trump unveils drug tariffs, OpenAI reports AI hack, and more (SP500:) - Seeking Alpha"),
+    translatedIndexHeadline,
+    "SP500 \u8fd9\u7c7b\u5e02\u573a\u6807\u8bc6\u7b26\u4e0d\u5f97\u8ba9\u5df2\u5b8c\u6210\u7684\u4e2d\u6587\u8bd1\u6587\u88ab\u8bef\u5224\u4e3a\u5931\u8d25",
+  );
+  assert.ok(!protectedTranslationQuery.includes("Seeking Alpha"), "\u53d1\u9001\u7ffb\u8bd1\u524d\u5fc5\u987b\u9690\u53bb\u5a92\u4f53\u54c1\u724c\u539f\u6587");
+  assert.match(protectedTranslationQuery, new RegExp(protectedMarkerSource), "\u5e94\u4f7f\u7528\u53ef\u9a8c\u8bc1\u7684\u4e13\u540d\u4fdd\u62a4\u6807\u8bb0");
+
+  const barronsInput = "Why Micron Stock Is Soaring Ahead of Google Earnings - Barron's";
+  const translatedBarrons = "\u4e3a\u4ec0\u4e48\u7f8e\u5149\u80a1\u4ef7\u5728 Google \u8d22\u62a5\u53d1\u5e03\u524d\u5927\u6da8 - Barron's";
+  let barronsTranslationQuery = "";
+  globalThis.fetch = (async (input) => {
+    const protectedValue = singleProtectedMarker(input);
+    barronsTranslationQuery = protectedValue.query;
+    return googleResponse(`\u4e3a\u4ec0\u4e48\u7f8e\u5149\u80a1\u4ef7\u5728 Google \u8d22\u62a5\u53d1\u5e03\u524d\u5927\u6da8 - ${protectedValue.marker}`);
+  }) as typeof fetch;
+  const localizedBarrons = await localizeBriefContent(briefWith(barronsInput), { strict: true });
+  assert.equal(localizedBarrons.translationEnabled, true, "Barron's \u4e0d\u5f97\u88ab\u8bef\u5224\u4e3a\u672a\u7ffb\u8bd1\u82f1\u6587");
+  assert.equal(localizedBarrons.headlines[0].title, translatedBarrons);
+  assert.equal(localizedBarrons.headlines[0].summary, translatedBarrons);
+  assert.deepEqual(localizedBarrons.headlines[0].keyPoints, [translatedBarrons]);
+  assert.equal(localizedBarrons.headlines[0].marketImpact, translatedBarrons);
+  assert.ok(!barronsTranslationQuery.includes("Barron's"), "\u53d1\u9001\u7ffb\u8bd1\u524d\u5fc5\u987b\u9690\u53bb Barron's \u54c1\u724c\u539f\u6587");
+  assert.match(barronsTranslationQuery, new RegExp(protectedMarkerSource), "Barron's \u5e94\u4f7f\u7528\u53ef\u9a8c\u8bc1\u7684\u4e13\u540d\u4fdd\u62a4\u6807\u8bb0");
+
+  const wallStreetInput = "Prediction: Betting Markets Price Palantir Between $102 and $144 as Earnings Catalysts Loom - 24/7 Wall St.";
+  const translatedWallStreet = "\u9884\u6d4b\uff1a\u968f\u7740\u8d22\u62a5\u50ac\u5316\u5242\u4e34\u8fd1\uff0c\u9884\u6d4b\u5e02\u573a\u8ba4\u4e3a Palantir \u80a1\u4ef7\u5c06\u5728 102 \u7f8e\u5143\u81f3 144 \u7f8e\u5143\u4e4b\u95f4 - 24/7 Wall St.";
+  let wallStreetTranslationQuery = "";
+  globalThis.fetch = (async (input) => {
+    const protectedValue = singleProtectedMarker(input);
+    wallStreetTranslationQuery = protectedValue.query;
+    return googleResponse(`\u9884\u6d4b\uff1a\u968f\u7740\u8d22\u62a5\u50ac\u5316\u5242\u4e34\u8fd1\uff0c\u9884\u6d4b\u5e02\u573a\u8ba4\u4e3a Palantir \u80a1\u4ef7\u5c06\u5728 102 \u7f8e\u5143\u81f3 144 \u7f8e\u5143\u4e4b\u95f4 - ${protectedValue.marker}.`);
+  }) as typeof fetch;
+  const localizedWallStreet = await localizeBriefContent(briefWith(wallStreetInput), { strict: true });
+  assert.equal(localizedWallStreet.translationEnabled, true);
+  assert.equal(localizedWallStreet.headlines[0].title, translatedWallStreet);
+  assert.ok(
+    !wallStreetTranslationQuery.includes("24/7 Wall St"),
+    "\u53d1\u9001\u7ffb\u8bd1\u524d\u5fc5\u987b\u9690\u53bb 24/7 Wall St \u54c1\u724c\u539f\u6587",
+  );
+  assert.match(wallStreetTranslationQuery, new RegExp(protectedMarkerSource));
+
+  const rewrittenBarronsInput = "Micron shares rise after earnings - Barron's";
+  globalThis.fetch = (async () => googleResponse("\u7f8e\u5149\u80a1\u4ef7\u5728\u8d22\u62a5\u540e\u4e0a\u6da8 - \u5df4\u4f26\u5468\u520a")) as typeof fetch;
+  const rewrittenBarrons = await localizeBriefContent(briefWith(rewrittenBarronsInput));
+  assert.equal(rewrittenBarrons.translationEnabled, false, "\u7ffb\u8bd1\u5668\u6539\u5199 Barron's \u65f6\u5fc5\u987b\u5931\u8d25\u5173\u95ed");
+  assert.equal(rewrittenBarrons.headlines[0].title, rewrittenBarronsInput, "\u5a92\u4f53\u540d\u672a\u539f\u6837\u6062\u590d\u65f6\u5fc5\u987b\u4fdd\u7559\u539f\u6587\u4f9b\u5ba1\u6838");
+  assert.match(rewrittenBarrons.warning ?? "", /\u5f85\u4eba\u5de5\u786e\u8ba4/);
+  await assert.rejects(
+    () => localizeBriefContent(briefWith(rewrittenBarronsInput), { strict: true }),
+    /headlines\.translation-test\.title/,
+    "\u4e25\u683c\u6a21\u5f0f\u4e0d\u5f97\u53d1\u5e03\u6539\u5199\u6216\u9057\u5931 Barron's \u7684\u8bd1\u6587",
+  );
+
+  const flowioInput = "Scottish AI Agency flowio Named an OpenAI Select Partner - markets.businessinsider.com";
+  const translatedFlowio = "\u82cf\u683c\u5170\u4eba\u5de5\u667a\u80fd\u673a\u6784 flowio \u88ab\u4efb\u547d\u4e3a OpenAI \u7cbe\u9009\u5408\u4f5c\u4f19\u4f34 - markets.businessinsider.com";
+  let flowioTranslationQuery = "";
+  globalThis.fetch = (async (input) => {
+    const protectedValue = singleProtectedMarker(input);
+    flowioTranslationQuery = protectedValue.query;
+    return googleResponse(`\u82cf\u683c\u5170\u4eba\u5de5\u667a\u80fd\u673a\u6784 flowio \u88ab\u4efb\u547d\u4e3a OpenAI \u7cbe\u9009\u5408\u4f5c\u4f19\u4f34 - ${protectedValue.marker}`);
+  }) as typeof fetch;
+  const localizedFlowio = await localizeBriefContent(briefWith(flowioInput), { strict: true });
+  assert.equal(localizedFlowio.translationEnabled, true, "\u660e\u786e\u6536\u5f55\u7684\u5c0f\u5199\u54c1\u724c flowio \u4e0d\u5f97\u88ab\u8bef\u5224\u4e3a\u82f1\u6587\u53d9\u8ff0");
+  assert.equal(localizedFlowio.headlines[0].title, translatedFlowio);
+  assert.equal(localizedFlowio.headlines[0].summary, translatedFlowio);
+  assert.deepEqual(localizedFlowio.headlines[0].keyPoints, [translatedFlowio]);
+  assert.equal(localizedFlowio.headlines[0].marketImpact, translatedFlowio);
+  assert.ok(flowioTranslationQuery.includes("flowio"), "\u4ec5\u663e\u5f0f\u767d\u540d\u5355\u54c1\u724c\u53ef\u4fdd\u7559\u539f\u6587");
+  assert.ok(!flowioTranslationQuery.includes("markets.businessinsider.com"), "\u57df\u540d\u53d1\u9001\u7ffb\u8bd1\u524d\u5fc5\u987b\u66ff\u6362\u4e3a\u4fdd\u62a4\u6807\u8bb0");
+  assert.match(flowioTranslationQuery, new RegExp(protectedMarkerSource), "\u57df\u540d\u5e94\u4f7f\u7528\u53ef\u9a8c\u8bc1\u7684\u4fdd\u62a4\u6807\u8bb0");
+
+  const rewrittenDomainInput = "Publisher domain integrity check - markets.businessinsider.com";
+  globalThis.fetch = (async () => googleResponse("\u53d1\u5e03\u8005\u57df\u540d\u5b8c\u6574\u6027\u68c0\u67e5 - market.businessinsider.com")) as typeof fetch;
+  const rewrittenDomain = await localizeBriefContent(briefWith(rewrittenDomainInput));
+  assert.equal(rewrittenDomain.translationEnabled, false, "\u7ffb\u8bd1\u5668\u6539\u5199\u57df\u540d\u65f6\u5fc5\u987b\u5931\u8d25\u5173\u95ed");
+  assert.equal(rewrittenDomain.headlines[0].title, rewrittenDomainInput, "\u57df\u540d\u672a\u539f\u6837\u6062\u590d\u65f6\u5fc5\u987b\u4fdd\u7559\u539f\u6587\u4f9b\u5ba1\u6838");
+  await assert.rejects(
+    () => localizeBriefContent(briefWith(rewrittenDomainInput), { strict: true }),
+    /headlines\.translation-test\.title/,
+    "\u4e25\u683c\u6a21\u5f0f\u4e0d\u5f97\u53d1\u5e03\u88ab\u6539\u5199\u7684\u6765\u6e90\u57df\u540d",
+  );
+
+  const addedDomainInput = "Domain addition guard - markets.businessinsider.com";
+  let addedDomainCalls = 0;
+  globalThis.fetch = (async (input) => {
+    addedDomainCalls += 1;
+    const { marker } = singleProtectedMarker(input);
+    return googleResponse(`\u57df\u540d\u65b0\u589e\u68c0\u67e5 - ${marker} - evil.example.com`);
+  }) as typeof fetch;
+  assert.equal(
+    await localizeText(addedDomainInput),
+    addedDomainInput,
+    "\u5373\u4f7f\u4fdd\u7559\u4e86\u539f\u57df\u540d\uff0c\u7ffb\u8bd1\u5668\u65b0\u589e\u4efb\u4f55\u57df\u540d\u4e5f\u5fc5\u987b\u5931\u8d25\u5173\u95ed",
+  );
+  assert.equal(addedDomainCalls, 2, "\u4e24\u6b21 Google \u5c1d\u8bd5\u90fd\u5fc5\u987b\u6267\u884c\u57df\u540d\u96c6\u5408\u6821\u9a8c");
+
+  const repeatedDomainInput = "Repeated domain guard markets.businessinsider.com then markets.businessinsider.com";
+  let repeatedDomainCalls = 0;
+  globalThis.fetch = (async (input) => {
+    repeatedDomainCalls += 1;
+    const query = googleQuery(input);
+    const markers = protectedMarkers(query);
+    assert.equal(markers.length, 2, "\u91cd\u590d\u57df\u540d\u7684\u6bcf\u6b21\u51fa\u73b0\u90fd\u5fc5\u987b\u72ec\u7acb\u4fdd\u62a4");
+    return googleResponse(`\u91cd\u590d\u57df\u540d\u68c0\u67e5 ${markers[0]}`);
+  }) as typeof fetch;
+  assert.equal(
+    await localizeText(repeatedDomainInput),
+    repeatedDomainInput,
+    "\u7ffb\u8bd1\u5668\u4e22\u5931\u91cd\u590d\u57df\u540d\u7684\u4efb\u4e00\u6b21\u51fa\u73b0\u65f6\u5fc5\u987b\u5931\u8d25\u5173\u95ed",
+  );
+  assert.equal(repeatedDomainCalls, 2);
+
+  const duplicatedMarkerInput = "Duplicated marker guard - markets.businessinsider.com";
+  globalThis.fetch = (async (input) => {
+    const { marker } = singleProtectedMarker(input);
+    return googleResponse(`\u91cd\u590d\u6807\u8bb0\u68c0\u67e5 - ${marker} - ${marker}`);
+  }) as typeof fetch;
+  assert.equal(
+    await localizeText(duplicatedMarkerInput),
+    duplicatedMarkerInput,
+    "\u6bcf\u4e2a\u52a8\u6001\u4fdd\u62a4\u6807\u8bb0\u5728\u8bd1\u6587\u4e2d\u5fc5\u987b\u6070\u597d\u51fa\u73b0\u4e00\u6b21",
+  );
+
+  const legacyMarker = "@__ANALYSTARENA_KEEP_0__";
+  const markerCollisionInput = `Marker collision guard ${legacyMarker} - markets.businessinsider.com`;
+  let markerCollisionQuery = "";
+  globalThis.fetch = (async (input) => {
+    const protectedValue = singleProtectedMarker(input);
+    markerCollisionQuery = protectedValue.query;
+    return googleResponse(`\u6807\u8bb0\u51b2\u7a81\u68c0\u67e5 ${legacyMarker} - ${protectedValue.marker}`);
+  }) as typeof fetch;
+  assert.equal(
+    await localizeText(markerCollisionInput),
+    markerCollisionInput,
+    "\u539f\u6587\u4e2d\u5b58\u5728\u6807\u8bb0\u5f62\u5f0f\u7684\u6587\u672c\u65f6\uff0c\u5373\u4f7f\u6b8b\u7559\u82f1\u6587\u6821\u9a8c\u5931\u8d25\u4e5f\u5fc5\u987b\u539f\u6837\u56de\u9000",
+  );
+  assert.ok(markerCollisionQuery.includes(legacyMarker), "\u539f\u6587\u5df2\u6709\u6807\u8bb0\u5f62\u5f0f\u7684\u8d26\u53f7\u5fc5\u987b\u539f\u6837\u4fdd\u7559");
+  assert.notEqual(
+    protectedMarkers(markerCollisionQuery)[0],
+    legacyMarker.slice(1),
+    "\u65b0\u751f\u6210\u7684\u4fdd\u62a4\u6807\u8bb0\u4e0d\u5f97\u4e0e\u539f\u6587\u4e2d\u5df2\u6709\u6807\u8bb0\u51b2\u7a81",
+  );
+
+  const openAIFallbackInput = "Fallback translator validates publisher domain - markets.businessinsider.com";
+  const translatedOpenAIFallback = "\u5907\u7528\u7ffb\u8bd1\u9a8c\u8bc1\u53d1\u5e03\u8005\u57df\u540d - markets.businessinsider.com";
+  let googleFallbackCalls = 0;
+  let openAIFallbackCalls = 0;
+  let openAIProtectedInput = "";
+  process.env.OPENAI_API_KEY = "translation-test-key";
+  globalThis.fetch = (async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("translate.googleapis.com")) {
+      googleFallbackCalls += 1;
+      return new Response("unavailable", { status: 503 });
+    }
+    assert.match(url, /api\.openai\.com\/v1\/responses$/);
+    openAIFallbackCalls += 1;
+    const bodyText = typeof init?.body === "string"
+      ? init.body
+      : input instanceof Request
+        ? await input.clone().text()
+        : "";
+    const body = JSON.parse(bodyText) as { input?: unknown };
+    if (typeof body.input !== "string") throw new Error("OpenAI 测试请求缺少字符串 input");
+    openAIProtectedInput = body.input;
+    const markers = protectedMarkers(openAIProtectedInput);
+    assert.equal(markers.length, 1, "OpenAI \u5907\u7528\u8bf7\u6c42\u5fc5\u987b\u6536\u5230\u4e0e Google \u76f8\u540c\u683c\u5f0f\u7684\u57df\u540d\u4fdd\u62a4\u6807\u8bb0");
+    return openAIResponse(`\u5907\u7528\u7ffb\u8bd1\u9a8c\u8bc1\u53d1\u5e03\u8005\u57df\u540d - ${markers[0]}`);
+  }) as typeof fetch;
+  assert.equal(await localizeText(openAIFallbackInput), translatedOpenAIFallback);
+  assert.equal(googleFallbackCalls, 2, "OpenAI \u5907\u7528\u8def\u5f84\u53ea\u80fd\u5728\u4e24\u6b21 Google \u5c1d\u8bd5\u90fd\u5931\u8d25\u540e\u542f\u7528");
+  assert.equal(openAIFallbackCalls, 1);
+  assert.ok(!openAIProtectedInput.includes("markets.businessinsider.com"), "OpenAI \u8bf7\u6c42\u4e5f\u4e0d\u5f97\u66b4\u9732\u672a\u4fdd\u62a4\u7684\u57df\u540d");
+
+  const openAIAddedDomainInput = "Fallback rejects added publisher domain - markets.businessinsider.com";
+  let openAIAddedDomainCalls = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("translate.googleapis.com")) return new Response("unavailable", { status: 503 });
+    openAIAddedDomainCalls += 1;
+    const bodyText = typeof init?.body === "string"
+      ? init.body
+      : input instanceof Request
+        ? await input.clone().text()
+        : "";
+    const body = JSON.parse(bodyText) as { input?: unknown };
+    const markers = protectedMarkers(String(body.input ?? ""));
+    assert.equal(markers.length, 1);
+    return openAIResponse(`\u5907\u7528\u7ffb\u8bd1\u65b0\u589e\u57df\u540d\u68c0\u67e5 - ${markers[0]} - evil.example.com`);
+  }) as typeof fetch;
+  assert.equal(
+    await localizeText(openAIAddedDomainInput),
+    openAIAddedDomainInput,
+    "OpenAI \u5907\u7528\u8bd1\u6587\u4e5f\u5fc5\u987b\u62d2\u7edd\u65b0\u589e\u57df\u540d",
+  );
+  assert.equal(openAIAddedDomainCalls, 1);
+  delete process.env.OPENAI_API_KEY;
+
+  const translatedFundBrand = "\u65bd\u74e6\u5e03\u65b0\u5174\u5e02\u573a ETF \u4e0e iShares MSCI \u65b0\u5174\u5e02\u573a ETF\uff1a\u54ea\u4e2a\u66f4\u597d\u4e70\uff1fThe Motley Fool";
+  globalThis.fetch = (async (input) => {
+    const { marker } = singleProtectedMarker(input);
+    return googleResponse(translatedFundBrand.replace("The Motley Fool", marker));
+  }) as typeof fetch;
   assert.equal(
     await localizeText("Schwab Emerging Markets ETF vs iShares MSCI Emerging Markets ETF: Which is the Better Buy? The Motley Fool"),
     translatedFundBrand,

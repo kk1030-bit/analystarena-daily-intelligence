@@ -1,10 +1,11 @@
+import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import OpenCC from "opencc-js";
 import type { DailyBrief, Headline, SocialTopic, TermNote } from "./types";
 import { extractTermNotes } from "./terms";
 
 const toSimplified = OpenCC.Converter({ from: "tw", to: "cn" });
-const TRANSLATION_CACHE_PREFIX = "zh-CN:v3:";
+const TRANSLATION_CACHE_PREFIX = "zh-CN:v4:";
 const TRANSLATION_CACHE_LIMIT = 2_000;
 const TRANSLATION_CONCURRENCY = 4;
 const translationCache = new Map<string, string>();
@@ -19,8 +20,33 @@ const preservedTerms = new Set([
   "eth", "fomc", "gdp", "gpu", "gpus", "ipo", "ir", "llm", "llms", "p/e", "ppi", "qoq", "rss",
   "sec", "usd", "us", "usa", "yoy",
   "amazon", "amd", "anthropic", "apple", "blackwell", "bloomberg", "broadcom", "coinbase", "deepseek",
-  "google", "intel", "meta", "microsoft", "nvidia", "openai", "reddit", "reuters", "tesla", "tsmc",
+  "flowio", "google", "intel", "meta", "microsoft", "nvidia", "openai", "reddit", "reuters", "tesla", "tsmc",
 ]);
+
+// Google Translate can occasionally rewrite publisher brands into descriptive
+// or promotional Chinese text. Protect known proper names before the request
+// and restore their exact source spelling afterwards.
+const preservedPhrases = [
+  "Seeking Alpha", "Business Insider", "The Wall Street Journal", "Wall Street Journal",
+  "The Motley Fool", "Financial Times", "Yahoo Finance", "Google News", "TradingPedia",
+  "Stocktwits", "Benzinga", "Investopedia", "MarketWatch", "Barron's", "Barron’s", "Bloomberg", "Reuters",
+  "24/7 Wall St",
+] as const;
+
+function preservedPhrasePattern(phrase: string): RegExp {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Every currently protected publisher name starts and ends with an ASCII
+  // letter. Word boundaries prevent a shorter brand from being accepted as a
+  // substring of unrelated English prose.
+  return new RegExp(`\\b${escaped}\\b`, "gi");
+}
+
+function removePreservedPhrases(value: string): string {
+  return preservedPhrases.reduce(
+    (text, phrase) => text.replace(preservedPhrasePattern(phrase), ""),
+    value,
+  );
+}
 
 const commonEnglishProse = new Set([
   "after", "amid", "and", "as", "at", "beat", "beats", "before", "boost", "booms", "boom", "by", "cut",
@@ -34,6 +60,7 @@ const commonEnglishProse = new Set([
 // remaining narrative in these scripts must be translated before publication
 // instead of silently turning into missing-glyph boxes in the report.
 const translatableForeignScript = /[\u0400-\u052F\u0590-\u06FF\u0900-\u097F\u0E00-\u0E7F\u1100-\u11FF\u3040-\u30FF\u3130-\u318F\u31F0-\u31FF\uA960-\uA97F\uAC00-\uD7FF]/u;
+const domainPatternSource = String.raw`\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+(?:[A-Za-z]{2,63}|xn--[A-Za-z0-9-]{2,59})\b`;
 
 function normalizeMainlandTerms(value: string): string {
   const replacements: Array<[RegExp, string]> = [
@@ -87,6 +114,10 @@ function isPreservedEnglishToken(token: string): boolean {
   if (preservedTerms.has(normalized)) return true;
   if (/^q[1-4]$/i.test(token)) return true;
   if (/^\$[a-z]{1,6}$/i.test(token)) return true;
+  // Market index / contract identifiers commonly mix uppercase letters with
+  // digits (for example SP500). They are searchable identifiers, not English
+  // prose, and must not make an otherwise complete Chinese translation fail.
+  if (/^[A-Z]{1,6}\d{1,4}$/.test(token)) return true;
   // Uppercase market identifiers remain searchable, except for common prose
   // that publishers occasionally capitalize in alert-style headlines.
   if (/^[A-Z]{1,6}$/.test(token) && !commonEnglishProse.has(normalized)) return true;
@@ -94,9 +125,13 @@ function isPreservedEnglishToken(token: string): boolean {
 }
 
 function hasTranslatableText(value: string): boolean {
-  if (translatableForeignScript.test(value)) return true;
-  const tokens = value.match(/[@$]?[A-Za-z][A-Za-z0-9_]*(?:[./'-][A-Za-z0-9_]+)*|Q[1-4]/g) ?? [];
-  const hasChineseContext = /[\u3400-\u9FFF]/.test(value);
+  // Known publisher brands are protected before translation and restored
+  // byte-for-byte afterwards. Exclude only those exact names from the
+  // residual-English check; surrounding prose remains subject to validation.
+  const textToValidate = removePreservedPhrases(value);
+  if (translatableForeignScript.test(textToValidate)) return true;
+  const tokens = textToValidate.match(/[@$]?[A-Za-z][A-Za-z0-9_]*(?:[./'-][A-Za-z0-9_]+)*|Q[1-4]/g) ?? [];
+  const hasChineseContext = /[\u3400-\u9FFF]/.test(textToValidate);
   return tokens.some((token, index) => {
     if (isPreservedEnglishToken(token)) return false;
     const previous = tokens[index - 1] ?? "";
@@ -123,6 +158,72 @@ function hasTranslatableText(value: string): boolean {
 
 function cacheKey(value: string): string {
   return `${TRANSLATION_CACHE_PREFIX}${value}`;
+}
+
+function translationMarkerNamespace(value: string): string {
+  let namespace = "";
+  do {
+    namespace = `__ANALYSTARENA_KEEP_${randomUUID().replaceAll("-", "")}_`;
+  } while (value.includes(namespace));
+  return namespace;
+}
+
+function occurrenceCount(value: string, needle: string): number {
+  let count = 0;
+  let cursor = 0;
+  while ((cursor = value.indexOf(needle, cursor)) !== -1) {
+    count += 1;
+    cursor += needle.length;
+  }
+  return count;
+}
+
+function domainsIn(value: string): string[] {
+  return value.match(new RegExp(domainPatternSource, "gi")) ?? [];
+}
+
+function assertDomainMultisetPreserved(original: string, translated: string): void {
+  const before = domainsIn(original).sort();
+  const after = domainsIn(translated).sort();
+  if (before.length !== after.length || before.some((domain, index) => domain !== after[index])) {
+    throw new Error("自动翻译改变了来源域名集合");
+  }
+}
+
+function protectTranslationPhrases(value: string): {
+  protectedText: string;
+  restore: (translated: string) => string;
+} {
+  const protectedValues: Array<{ marker: string; original: string }> = [];
+  const markerNamespace = translationMarkerNamespace(value);
+  let protectedText = value;
+  const protectMatches = (pattern: RegExp) => {
+    protectedText = protectedText.replace(pattern, (original) => {
+      const marker = `${markerNamespace}${protectedValues.length}__`;
+      protectedValues.push({ marker, original });
+      return marker;
+    });
+  };
+  for (const phrase of preservedPhrases) {
+    protectMatches(preservedPhrasePattern(phrase));
+  }
+  // Translation services sometimes singularize or otherwise rewrite source
+  // domains (for example markets.businessinsider.com ->
+  // market.businessinsider.com). Protect every complete domain dynamically so
+  // citations retain the exact publisher identity from the source record.
+  protectMatches(new RegExp(domainPatternSource, "gi"));
+  return {
+    protectedText,
+    restore(translated) {
+      return protectedValues.reduce((text, item) => {
+        const markerCount = occurrenceCount(text, item.marker);
+        if (markerCount !== 1) {
+          throw new Error(`自动翻译未精确保留受保护标记：${item.original}`);
+        }
+        return text.replace(item.marker, item.original);
+      }, translated);
+    },
+  };
 }
 
 function getCachedTranslation(key: string): string | undefined {
@@ -165,21 +266,39 @@ function translationFromGooglePayload(payload: unknown): string {
   return segments.map((segment) => Array.isArray(segment) && typeof segment[0] === "string" ? segment[0] : "").join("");
 }
 
+async function translateProtected(
+  value: string,
+  translate: (protectedText: string) => Promise<string>,
+): Promise<string> {
+  const protectedTranslation = protectTranslationPhrases(value);
+  const rawTranslation = await translate(protectedTranslation.protectedText);
+  const translated = simplify(clean(protectedTranslation.restore(rawTranslation)));
+  if (!translated) throw new Error("自动翻译服务未返回内容");
+  assertDomainMultisetPreserved(value, translated);
+  if (hasTranslatableText(translated)) throw new Error("自动翻译结果仍包含未翻译叙述");
+  return translated;
+}
+
 async function translateWithGoogle(value: string): Promise<string> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const params = new URLSearchParams({ client: "gtx", sl: "auto", tl: "zh-CN", dt: "t", q: value });
-      const response = await fetch(`https://translate.googleapis.com/translate_a/single?${params}`, {
-        headers: { "User-Agent": "Mozilla/5.0 AnalystArenaTranslation/2.0" },
-        signal: AbortSignal.timeout(12_000),
-        cache: "no-store",
+      return await translateProtected(value, async (protectedText) => {
+        const params = new URLSearchParams({
+          client: "gtx",
+          sl: "auto",
+          tl: "zh-CN",
+          dt: "t",
+          q: protectedText,
+        });
+        const response = await fetch(`https://translate.googleapis.com/translate_a/single?${params}`, {
+          headers: { "User-Agent": "Mozilla/5.0 AnalystArenaTranslation/2.0" },
+          signal: AbortSignal.timeout(12_000),
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error(`自动翻译服务返回 ${response.status}`);
+        return translationFromGooglePayload(await response.json() as unknown);
       });
-      if (!response.ok) throw new Error(`\u81ea\u52a8\u7ffb\u8bd1\u670d\u52a1\u8fd4\u56de ${response.status}`);
-      const translated = simplify(clean(translationFromGooglePayload(await response.json() as unknown)));
-      if (!translated) throw new Error("\u81ea\u52a8\u7ffb\u8bd1\u670d\u52a1\u672a\u8fd4\u56de\u5185\u5bb9");
-      if (hasTranslatableText(translated)) throw new Error("\u81ea\u52a8\u7ffb\u8bd1\u7ed3\u679c\u4ecd\u5305\u542b\u672a\u7ffb\u8bd1\u53d9\u8ff0");
-      return translated;
     } catch (error) {
       lastError = error;
     }
@@ -190,20 +309,20 @@ async function translateWithGoogle(value: string): Promise<string> {
 async function translateWithOpenAI(value: string): Promise<string> {
   if (!process.env.OPENAI_API_KEY) throw new Error("OpenAI \u7ffb\u8bd1\u5907\u7528\u670d\u52a1\u672a\u8bbe\u7f6e");
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const response = await client.responses.create({
-    model: process.env.OPENAI_MODEL || "gpt-5.2",
-    max_output_tokens: 1_200,
-    instructions: [
-      "\u5c06\u8f93\u5165\u51c6\u786e\u7ffb\u8bd1\u4e3a\u7b80\u4f53\u4e2d\u6587\uff0c\u53ea\u8f93\u51fa\u8bd1\u6587\u3002",
-      "\u4fdd\u7559\u516c\u53f8\u540d\u3001\u4ea7\u54c1\u540d\u3001\u80a1\u7968\u4ee3\u7801\u3001\u6570\u5b57\u548c\u5e38\u89c1\u91d1\u878d\u7f29\u5199\uff0c\u4e0d\u5f97\u589e\u52a0\u539f\u6587\u6ca1\u6709\u7684\u4fe1\u606f\u3002",
-      "\u97e9\u6587\u3001\u65e5\u6587\u5047\u540d\u3001\u897f\u91cc\u5c14\u5b57\u6bcd\u7b49\u975e\u62c9\u4e01\u6587\u5b57\u5fc5\u987b\u8bd1\u6210\u901a\u7528\u7b80\u4f53\u4e2d\u6587\u540d\uff1b\u65e0\u56fa\u5b9a\u8bd1\u540d\u65f6\u97f3\u8bd1\uff0c\u4e0d\u5f97\u4fdd\u7559\u539f\u6587\u5b57\u7b26\u3002",
-    ].join("\n"),
-    input: value,
+  return translateProtected(value, async (protectedText) => {
+    const response = await client.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-5.2",
+      max_output_tokens: 1_200,
+      instructions: [
+        "\u5c06\u8f93\u5165\u51c6\u786e\u7ffb\u8bd1\u4e3a\u7b80\u4f53\u4e2d\u6587\uff0c\u53ea\u8f93\u51fa\u8bd1\u6587\u3002",
+        "\u4fdd\u7559\u516c\u53f8\u540d\u3001\u4ea7\u54c1\u540d\u3001\u80a1\u7968\u4ee3\u7801\u3001\u6570\u5b57\u548c\u5e38\u89c1\u91d1\u878d\u7f29\u5199\uff0c\u4e0d\u5f97\u589e\u52a0\u539f\u6587\u6ca1\u6709\u7684\u4fe1\u606f\u3002",
+        "形如 __ANALYSTARENA_KEEP_...__ 的受保护标记必须逐字保留，每个标记只能出现一次，不得改写、删除或新增。",
+        "\u97e9\u6587\u3001\u65e5\u6587\u5047\u540d\u3001\u897f\u91cc\u5c14\u5b57\u6bcd\u7b49\u975e\u62c9\u4e01\u6587\u5b57\u5fc5\u987b\u8bd1\u6210\u901a\u7528\u7b80\u4f53\u4e2d\u6587\u540d\uff1b\u65e0\u56fa\u5b9a\u8bd1\u540d\u65f6\u97f3\u8bd1\uff0c\u4e0d\u5f97\u4fdd\u7559\u539f\u6587\u5b57\u7b26\u3002",
+      ].join("\n"),
+      input: protectedText,
+    });
+    return response.output_text;
   });
-  const translated = simplify(clean(response.output_text));
-  if (!translated) throw new Error("OpenAI \u7ffb\u8bd1\u5907\u7528\u670d\u52a1\u672a\u8fd4\u56de\u5185\u5bb9");
-  if (hasTranslatableText(translated)) throw new Error("OpenAI \u7ffb\u8bd1\u7ed3\u679c\u4ecd\u5305\u542b\u672a\u7ffb\u8bd1\u53d9\u8ff0");
-  return translated;
 }
 
 async function translateEnglish(value: string): Promise<string> {
@@ -266,7 +385,26 @@ async function localizeHeadline(headline: Headline): Promise<Headline> {
     headline.directionRationale ? localizeText(headline.directionRationale) : Promise.resolve(headline.directionRationale),
     mapLimited(headline.keyPoints ?? [], 3, localizeText),
   ]);
-  const localized = { ...headline, title, summary, marketImpact, directionRationale, keyPoints };
+  const claims = headline.claims?.map((claim) => {
+    let statement = claim.statement;
+    if (claim.claimKey === "title") statement = title;
+    else if (claim.claimKey === "summary") statement = summary;
+    else if (claim.claimKey === "market_impact") statement = marketImpact;
+    else if (claim.claimKey === "direction_rationale" && directionRationale) statement = directionRationale;
+    else {
+      const pointIndex = claim.claimKey.match(/^important_information:(\d+)$/)?.[1];
+      if (pointIndex !== undefined && keyPoints[Number(pointIndex)] !== undefined) statement = keyPoints[Number(pointIndex)];
+    }
+    return {
+      ...claim,
+      statement,
+      originalStatement: claim.originalStatement ?? claim.statement,
+      language: "zh-CN",
+      // statementHash remains the hash of originalStatement. Translation is
+      // presentation and must not change evidence identity.
+    };
+  });
+  const localized = { ...headline, title, summary, marketImpact, directionRationale, keyPoints, claims };
   const termNotes: TermNote[] = extractTermNotes(localized);
   return { ...localized, termNotes };
 }

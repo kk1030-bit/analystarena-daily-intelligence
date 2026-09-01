@@ -497,6 +497,7 @@ function BuzzPanel({ title, kind, topics, contextBatch }: { title: string; kind:
 
 export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   const [brief, setBrief] = useState(initialBrief);
+  const [isLivePreview, setIsLivePreview] = useState(false);
   const [contextBatch, setContextBatch] = useState<string>();
   const [activeCategory, setActiveCategory] = useState<Category | "All">("All");
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -508,6 +509,7 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
   const [refreshOrigin, setRefreshOrigin] = useState<RefreshOrigin | null>(null);
   const [refreshFallback, setRefreshFallback] = useState<RefreshFallback>("none");
   const requestInFlightRef = useRef(false);
+  const livePreviewRef = useRef(false);
   const nextRefreshAtRef = useRef(0);
   const activeRequestRef = useRef<AbortController | null>(null);
 
@@ -571,6 +573,8 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
       const nextBrief = payload;
       const fallback = refreshFallbackFromHeaders(response.headers);
       setBrief(nextBrief);
+      setIsLivePreview(true);
+      livePreviewRef.current = true;
       setContextBatch(response.headers.get("X-AnalystArena-Batch") ?? undefined);
       setLastSuccessfulAt(nextBrief.generatedAt);
       setRefreshFallback(fallback);
@@ -613,7 +617,10 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
     const tick = () => {
       const remainingMs = nextRefreshAtRef.current - Date.now();
       setSecondsUntilRefresh(Math.max(0, Math.ceil(remainingMs / 1_000)));
-      if (remainingMs <= 0 && document.visibilityState === "visible" && !requestInFlightRef.current) {
+      if (remainingMs <= 0
+        && livePreviewRef.current
+        && document.visibilityState === "visible"
+        && !requestInFlightRef.current) {
         void refreshBrief("auto");
       }
     };
@@ -623,18 +630,29 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
     };
 
     tick();
-    // Start with the shared server snapshot immediately; the zero-delay task is
-    // cancellable so React Strict Mode does not fire two mount refreshes.
-    const initialRefreshId = window.setTimeout(() => void refreshBrief("auto"), 0);
     const intervalId = window.setInterval(tick, 1_000);
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
-      window.clearTimeout(initialRefreshId);
       window.clearInterval(intervalId);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       activeRequestRef.current?.abort();
     };
   }, [refreshBrief]);
+
+  function returnToPublishedBrief() {
+    activeRequestRef.current?.abort();
+    livePreviewRef.current = false;
+    setIsLivePreview(false);
+    setBrief(initialBrief);
+    setContextBatch(undefined);
+    setActiveCategory("All");
+    setLastSuccessfulAt(initialBrief.generatedAt);
+    setRefreshFallback("none");
+    setRefreshError(null);
+    setNotice("已返回经人工审核的正式发布版本。");
+    nextRefreshAtRef.current = Date.now() + AUTO_REFRESH_INTERVAL_MS;
+    setSecondsUntilRefresh(AUTO_REFRESH_INTERVAL_MS / 1_000);
+  }
 
   async function exportPdf() {
     if (brief.status === "published" && brief.id) {
@@ -711,7 +729,11 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
               className={`refresh-status${isRefreshing ? " is-refreshing" : ""}${refreshError ? " has-error" : ""}${refreshFallback !== "none" ? " has-fallback" : ""}`}
               title={refreshError ?? (refreshFallback !== "none"
                 ? `实时采集暂不可用，当前显示${fallbackLabels[refreshFallback]}，内容时间为北京时间 ${lastSuccessfulLabel}`
-                : `每 10 分钟自动更新；上次成功更新于北京时间 ${lastSuccessfulLabel}`)}
+                : isLivePreview
+                  ? `实时预览每 10 分钟自动更新；上次成功更新于北京时间 ${lastSuccessfulLabel}`
+                  : brief.status === "published"
+                    ? `当前为经审核发布快照，不会被后台采集自动改写；发布时间为北京时间 ${lastSuccessfulLabel}`
+                    : `当前为示范快照；需要主动进入实时预览才会显示未发布采集结果`)}
             >
               <i aria-hidden="true" />
               <div>
@@ -722,9 +744,11 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
                       ? "更新失败"
                       : refreshFallback !== "none"
                         ? `已显示${fallbackLabels[refreshFallback]}`
-                      : <><span className="refresh-status-prefix">自动更新 </span>{countdownLabel}</>}
+                      : isLivePreview
+                        ? <><span className="refresh-status-prefix">预览自动更新 </span>{countdownLabel}</>
+                        : brief.status === "published" ? "正式发布快照" : "示范快照"}
                 </strong>
-                <small>{refreshFallback !== "none" ? "内容时间" : "上次更新"} {lastSuccessfulLabel}（北京时间）</small>
+                <small>{isLivePreview || refreshFallback !== "none" || brief.status !== "published" ? "内容时间" : "发布时间"} {lastSuccessfulLabel}（北京时间）</small>
               </div>
               {(isRefreshing || refreshError) && (
                 <span className="visually-hidden" role="status">
@@ -732,11 +756,12 @@ export function Dashboard({ initialBrief }: { initialBrief: DailyBrief }) {
                 </span>
               )}
             </div>
-            <span className={`mode-badge mode-${brief.mode}`}>{refreshFallback !== "none" ? fallbackLabels[refreshFallback] : brief.status === "published" ? "已发布" : brief.status === "draft" ? "今日草稿 · 待审核" : brief.mode === "live" ? "实时预览" : "示范模式"}</span>
+            <span className={`mode-badge mode-${brief.mode}`}>{isLivePreview ? "实时预览 · 未发布" : brief.status === "published" ? "已发布" : "示范模式"}</span>
             <button className="secondary-button pdf-action" type="button" onClick={() => void exportPdf()} disabled={isExporting} aria-label={isExporting ? "正在制作市场头条完整研究 PDF" : "下载市场头条完整研究 PDF"}><Download size={16} /><span>{isExporting ? "制作中…" : brief.status === "published" ? "完整研究 PDF" : "预览完整研究 PDF"}</span></button>
-            <button className="primary-button refresh-action" type="button" onClick={() => void refreshBrief("manual")} disabled={isRefreshing} aria-label={isRefreshing ? "正在更新今日简报" : "立即更新今日简报"}>
+            {isLivePreview && <button className="secondary-button" type="button" onClick={returnToPublishedBrief} disabled={isRefreshing}>返回已发布日报</button>}
+            <button className="primary-button refresh-action" type="button" onClick={() => void refreshBrief("manual")} disabled={isRefreshing} aria-label={isRefreshing ? "正在更新实时预览" : "查看实时预览"}>
               <RefreshCw size={16} className={isRefreshing ? "is-spinning" : ""} />
-              <span>{isRefreshing ? refreshOrigin === "manual" ? "手动更新中..." : "自动更新中..." : "立即更新"}</span>
+              <span>{isRefreshing ? refreshOrigin === "manual" ? "采集中..." : "预览更新中..." : isLivePreview ? "更新实时预览" : "查看实时预览"}</span>
             </button>
           </div>
         </header>

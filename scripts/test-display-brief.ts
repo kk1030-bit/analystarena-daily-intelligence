@@ -24,7 +24,11 @@ const draft = record("2026-07-17", "draft", "今日草稿");
 const todayPublished = record("2026-07-17", "published", "今日已发布");
 const yesterdayPublished = record("2026-07-16", "published", "昨日已发布");
 
-assert.deepEqual(selectDisplayBrief(draft, yesterdayPublished), { brief: draft.brief, origin: "draft" });
+assert.deepEqual(
+  selectDisplayBrief(draft, yesterdayPublished),
+  { brief: yesterdayPublished.brief, origin: "published" },
+  "public pages must never expose an unreviewed draft",
+);
 assert.deepEqual(selectDisplayBrief(todayPublished, yesterdayPublished), { brief: todayPublished.brief, origin: "published" });
 assert.deepEqual(selectDisplayBrief(null, yesterdayPublished), { brief: yesterdayPublished.brief, origin: "published" });
 assert.equal(selectDisplayBrief(null, null).origin, "demo");

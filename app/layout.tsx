@@ -14,6 +14,7 @@ export async function generateMetadata(): Promise<Metadata> {
     metadataBase: new URL(origin),
     title,
     description,
+    other: { google: "notranslate" },
     openGraph: {
       title,
       description,
@@ -33,8 +34,8 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="zh-CN">
-      <body>{children}</body>
+    <html lang="zh-CN" translate="no">
+      <body className="notranslate">{children}</body>
     </html>
   );
 }

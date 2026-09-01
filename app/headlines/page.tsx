@@ -1,7 +1,5 @@
 import { getDisplayBrief } from "@/lib/display-brief";
-import { attachEquityImpacts } from "@/lib/equity-impact";
 import { getLiveBriefContextBrief, normalizeLiveBriefContext } from "@/lib/live-brief";
-import { localizeBriefContent } from "@/lib/translation";
 import { HeadlineExplorer } from "./HeadlineExplorer";
 
 export const dynamic = "force-dynamic";
@@ -15,11 +13,10 @@ export default async function HeadlinesPage({ searchParams }: { searchParams: Pr
     try {
       brief = await getLiveBriefContextBrief(contextBatch);
     } catch {
-      brief = await localizeBriefContent((await getDisplayBrief()).brief);
+      brief = (await getDisplayBrief()).brief;
     }
   } else {
-    brief = await localizeBriefContent((await getDisplayBrief()).brief);
+    brief = (await getDisplayBrief()).brief;
   }
-  brief = { ...brief, headlines: await attachEquityImpacts(brief.headlines) };
   return <HeadlineExplorer brief={brief} initialEvent={event} context={isTrendingContext ? "trending" : undefined} contextBatch={contextBatch} />;
 }

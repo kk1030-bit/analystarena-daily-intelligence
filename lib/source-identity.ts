@@ -269,12 +269,21 @@ export function ensureRawStoryIdentity(story: RawStory): RawStory {
   const originalTitle = story.originalTitle ?? story.title;
   const originalDescription = story.originalDescription ?? story.description;
   const collectedBounds = collectedAtBounds(story);
-  const contentHash = hashSourceContent(JSON.stringify([
+  // A collector-provided capture hash represents the exact scope it claims to
+  // have captured (feed entry, social post, detail page, or PDF). Falling back
+  // to the legacy title/description material keeps old callers compatible, but
+  // must never be described as a full-page hash.
+  const contentHash = story.capture?.capturedContentHash ?? hashSourceContent(JSON.stringify([
     "source-content",
     1,
+    "legacy_title_description",
     originalTitle,
     originalDescription,
   ]));
+  const evidence = story.evidence?.map((item) => ({
+    ...item,
+    sourceDocumentId: identity.sourceDocumentId,
+  }));
 
   return {
     ...story,
@@ -284,6 +293,14 @@ export function ensureRawStoryIdentity(story: RawStory): RawStory {
     canonicalUrl: identity.canonicalUrl,
     originalTitle,
     originalDescription,
+    originalPublishedAt: story.originalPublishedAt !== undefined
+      ? story.originalPublishedAt
+      : story.timestampKind === "collected" ? null : story.publishedAt,
+    capture: story.capture ? {
+      ...story.capture,
+      canonicalUrl: identity.canonicalUrl,
+    } : undefined,
+    evidence,
     ...collectedBounds,
     contentHash,
   };
