@@ -11,6 +11,7 @@ import {
 } from "../source-time";
 
 const MAX_REMOTE_STORIES = 120;
+const MAX_DETAIL_STORIES = 48;
 const MAX_CAPTURE_BYTES = 512_000;
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -112,28 +113,94 @@ function remoteCapture(value: unknown, sourceType: "Reddit" | "X"): SourceCaptur
   };
 }
 
+/**
+ * Validates a byte-bound full-text article capture produced by the crawl4ai
+ * detail collector. The evidence quotes inside it are later re-verified as
+ * exact substrings of this artifact by assertEvidenceBoundToSourceCapture.
+ */
+function remoteDetailCapture(value: unknown): SourceCapture {
+  const input = record(value, "story.capture");
+  if (input.scope !== "detail_page") throw new TypeError("story.capture.scope must be detail_page");
+  if (input.backfillQuality !== "native") throw new TypeError("Remote detail captures must be native, not legacy metadata");
+  if (input.capturedArtifactEncoding !== "utf8") {
+    throw new TypeError("story.capture.capturedArtifactEncoding must be utf8");
+  }
+  const capturedArtifact = text(input.capturedArtifact, "story.capture.capturedArtifact", MAX_CAPTURE_BYTES, true);
+  const capturedArtifactSizeBytes = Buffer.byteLength(capturedArtifact, "utf8");
+  if (capturedArtifactSizeBytes > MAX_CAPTURE_BYTES) {
+    throw new TypeError(`story.capture.capturedArtifact must be at most ${MAX_CAPTURE_BYTES} UTF-8 bytes`);
+  }
+  if (input.capturedArtifactSizeBytes !== capturedArtifactSizeBytes) {
+    throw new TypeError("story.capture.capturedArtifactSizeBytes does not match the exact UTF-8 bytes");
+  }
+  const capturedContentHash = sha256(input.capturedContentHash, "story.capture.capturedContentHash");
+  if (capturedContentHash !== sha256ExactUtf8(capturedArtifact)) {
+    throw new TypeError("story.capture.capturedContentHash does not match the exact UTF-8 artifact");
+  }
+  const originalPublishedAt = originalTimestamp(input.originalPublishedAt, "story.capture.originalPublishedAt");
+  const rawUrl = exactHttpUrl(input.rawUrl, "story.capture.rawUrl");
+  return {
+    rawUrl,
+    ...(input.canonicalUrl === undefined ? {} : { canonicalUrl: exactHttpUrl(input.canonicalUrl, "story.capture.canonicalUrl") }),
+    ...(input.finalUrl === undefined ? {} : { finalUrl: exactHttpUrl(input.finalUrl, "story.capture.finalUrl") }),
+    ...(input.feedUrl === undefined ? {} : { feedUrl: exactHttpUrl(input.feedUrl, "story.capture.feedUrl") }),
+    ...(input.mimeType === undefined ? {} : { mimeType: text(input.mimeType, "story.capture.mimeType", 120) }),
+    ...(input.httpStatus === undefined ? {} : {
+      httpStatus: Number.isInteger(input.httpStatus) && Number(input.httpStatus) >= 100 && Number(input.httpStatus) <= 599
+        ? Number(input.httpStatus)
+        : (() => { throw new TypeError("story.capture.httpStatus must be an HTTP status code"); })(),
+    }),
+    originalPublishedAt,
+    ...(input.publishedAtRaw === undefined ? {} : { publishedAtRaw: text(input.publishedAtRaw, "story.capture.publishedAtRaw", 300, true) }),
+    ...(input.publishedAtField === undefined ? {} : { publishedAtField: text(input.publishedAtField, "story.capture.publishedAtField", 120) }),
+    ...(input.sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt: optionalTimestamp(input.sourceUpdatedAt, "story.capture.sourceUpdatedAt")! }),
+    collectedAt: requireStrictSourceTimestamp(text(input.collectedAt, "story.capture.collectedAt", 100), "story.capture.collectedAt"),
+    scope: "detail_page",
+    capturedContentHash,
+    capturedArtifact,
+    capturedArtifactEncoding: "utf8",
+    capturedArtifactSizeBytes,
+    ...(input.capturedTextHash === undefined ? {} : { capturedTextHash: sha256(input.capturedTextHash, "story.capture.capturedTextHash") }),
+    extractionMethod: text(input.extractionMethod, "story.capture.extractionMethod", 160),
+    extractorVersion: text(input.extractorVersion, "story.capture.extractorVersion", 160),
+    backfillQuality: "native",
+  };
+}
+
 function remoteEvidence(value: unknown): SourceEvidence[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 8) {
-    throw new TypeError("Remote social stories must include between one and eight evidence items");
+    throw new TypeError("Remote stories must include between one and eight evidence items");
   }
   return value.map((item) => normalizeSourceEvidence(record(item, "story.evidence[]") as unknown as SourceEvidence));
 }
 
 /**
- * Accepts only the native, byte-bound Reddit/X records produced by our trusted
- * GitHub Actions collector. Invalid records fail closed instead of being
- * silently downgraded to unverifiable legacy metadata.
+ * Accepts only the native, byte-bound records produced by our trusted GitHub
+ * Actions collectors: Reddit/X social posts and crawl4ai full-text article
+ * pages. Invalid records fail closed instead of being silently downgraded to
+ * unverifiable legacy metadata.
  */
 export function safeRemoteStories(value: unknown): RawStory[] {
   if (!Array.isArray(value)) return [];
+  let detailStories = 0;
   return value.slice(0, MAX_REMOTE_STORIES).map((unknownStory, index) => {
     const input = record(unknownStory, `stories[${index}]`);
-    if (input.sourceType !== "Reddit" && input.sourceType !== "X") {
-      throw new TypeError(`stories[${index}].sourceType must be Reddit or X`);
+    if (input.sourceType !== "Reddit" && input.sourceType !== "X"
+      && input.sourceType !== "News" && input.sourceType !== "Official") {
+      throw new TypeError(`stories[${index}].sourceType must be Reddit, X, News or Official`);
     }
     const sourceType = input.sourceType;
+    let capture: SourceCapture;
+    if (sourceType === "Reddit" || sourceType === "X") {
+      capture = remoteCapture(input.capture, sourceType);
+    } else {
+      detailStories += 1;
+      if (detailStories > MAX_DETAIL_STORIES) {
+        throw new TypeError(`stories[${index}] exceeds the limit of ${MAX_DETAIL_STORIES} detail-page stories per batch`);
+      }
+      capture = remoteDetailCapture(input.capture);
+    }
     const url = exactHttpUrl(input.url, `stories[${index}].url`);
-    const capture = remoteCapture(input.capture, sourceType);
     if (capture.rawUrl !== url) throw new TypeError(`stories[${index}] capture rawUrl must exactly match story.url`);
 
     const collectedAt = requireStrictSourceTimestamp(

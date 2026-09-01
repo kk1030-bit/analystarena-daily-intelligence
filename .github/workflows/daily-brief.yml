@@ -13,7 +13,7 @@ concurrency:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 25
     env:
       CRON_SECRET: ${{ secrets.CRON_SECRET }}
       X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
@@ -23,6 +23,25 @@ jobs:
         with:
           node-version: "24"
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements-crawl4ai.txt
       - run: npm ci
+      - name: Cache crawl4ai browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: crawl4ai-browser-${{ hashFiles('scripts/requirements-crawl4ai.txt') }}
+      - name: Install crawl4ai
+        run: |
+          pip install -r scripts/requirements-crawl4ai.txt
+          crawl4ai-setup
+      - name: Crawl article detail pages with crawl4ai
+        # The daily brief must still be generated from RSS and social sources
+        # when full-text crawling fails, so this step never blocks the run.
+        continue-on-error: true
+        run: python scripts/crawl4ai_collect.py --output crawl-results.json
       - name: Collect Reddit/X with Playwright and create draft
         run: npx tsx scripts/run-daily.ts

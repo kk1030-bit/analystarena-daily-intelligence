@@ -64,7 +64,7 @@ curl "https://analystarena-daily-intelligence.onrender.com/api/v1/reddit/search?
 
 ## 第四版流程
 
-1. RSS 与 Playwright 采集公开内容。
+1. RSS 与 Playwright 采集公开内容；GitHub Actions 另以 [crawl4ai](https://github.com/unclecode/crawl4ai) 打开 Official/News 条目的文章页面，保存全文的不可变捕获与逐句引用证据（见 [crawl4ai 全文采集器](docs/crawl4ai-collector.md)），同一篇文章的全文捕获在排序时优先于 RSS 摘要。
 2. 保存来源原始发布时间，并统一显示到“年、月、日、时、分”（北京时间）；来源没有精确时间时明确标为采集时间。
 3. 先过滤例行 SEC 公告，再以事件相似度合并素材。
 4. 从每个事件提取摘要、2–4 个重要信息与市场影响，再依时效性、跨来源层数、可信度及互动计分。
@@ -106,7 +106,7 @@ npm run dev
 
 ## 每日排程
 
-`.github/workflows/daily-brief.yml` 每天北京时间 07:00 在 GitHub Actions 执行 Playwright，再把 Reddit/X 素材传给 Render 生成草稿。请把与 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret；需要登录 X 搜索时，再加入 `X_AUTH_TOKEN`。
+`.github/workflows/daily-brief.yml` 每天北京时间 07:00 在 GitHub Actions 先用 crawl4ai 采集文章全文（失败不阻塞日报），再执行 Playwright，把全文与 Reddit/X 素材一起传给 Render 生成草稿。请把与 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret；需要登录 X 搜索时，再加入 `X_AUTH_TOKEN`。
 
 `.github/workflows/sync-stocks.yml` 每天北京时间 05:30 使用 yfinance 更新美股主档与近三个月日线，再分批写入 Render。它同样使用 `CRON_SECRET`，可用 GitHub repository variable `STOCK_SYNC_ENDPOINT` 覆盖目标网址。
 

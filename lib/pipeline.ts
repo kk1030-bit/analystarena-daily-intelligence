@@ -825,6 +825,18 @@ function isRelevantStory(story: RawStory): boolean {
   return marketRelevantTerms.test(text) || highImpactTerms.test(text);
 }
 
+/**
+ * A full-document capture (article detail page or PDF) always outranks a
+ * feed-entry snippet of the same source document, regardless of which
+ * observation happened to be collected later. Both observations remain in the
+ * immutable source history; this choice only selects the representative story
+ * whose text feeds ranking, clustering and AI analysis.
+ */
+function captureDepth(story: RawStory): number {
+  const scope = story.capture?.scope;
+  return scope === "detail_page" || scope === "pdf" ? 1 : 0;
+}
+
 function deduplicateStories(stories: RawStory[]): RawStory[] {
   const documents = new Map<string, RawStory>();
   for (const story of stories.filter(isRelevantStory)) {
@@ -834,6 +846,12 @@ function deduplicateStories(stories: RawStory[]): RawStory[] {
       documents.set(key, story);
       continue;
     }
+    const depthDifference = captureDepth(story) - captureDepth(current);
+    if (depthDifference > 0) {
+      documents.set(key, story);
+      continue;
+    }
+    if (depthDifference < 0) continue;
     const storyCollectedAt = Date.parse(story.lastCollectedAt ?? story.collectedAt ?? story.publishedAt);
     const currentCollectedAt = Date.parse(current.lastCollectedAt ?? current.collectedAt ?? current.publishedAt);
     if (storyCollectedAt > currentCollectedAt
