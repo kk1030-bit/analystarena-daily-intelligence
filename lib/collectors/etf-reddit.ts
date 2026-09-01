@@ -1,6 +1,6 @@
 import type { Browser, Page } from "playwright-core";
 import type { CollectorStatus } from "../types";
-import { ETF_SUBREDDITS } from "../etf-topics";
+import { ETF_MAX_BODY_LENGTH, ETF_SUBREDDITS } from "../etf-topics";
 import { launchBrowser } from "./browser";
 import { collectFirstAvailable, safeCollectorNote } from "./router";
 
@@ -32,7 +32,96 @@ function parseRedditCount(value: string): number {
   return Math.round(Number(match[1]) * multiplier);
 }
 
-interface ListingRow {
+function clampCount(value: unknown): number {
+  const parsed = Math.trunc(Number(value));
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+interface RedditJsonPost {
+  id?: unknown;
+  author?: unknown;
+  title?: unknown;
+  selftext?: unknown;
+  permalink?: unknown;
+  score?: unknown;
+  num_comments?: unknown;
+  created_utc?: unknown;
+  stickied?: unknown;
+}
+
+function rowFromJsonPost(subreddit: string, post: RedditJsonPost): EtfCollectedRow | null {
+  const title = typeof post.title === "string" ? post.title.trim() : "";
+  const permalink = typeof post.permalink === "string" ? post.permalink : "";
+  const nativeId = typeof post.id === "string" ? post.id.trim() : "";
+  if (!title || !permalink.startsWith("/") || !nativeId || post.stickied === true) return null;
+  const createdUtc = Number(post.created_utc);
+  return {
+    nativeId,
+    subreddit,
+    author: typeof post.author === "string" ? post.author : "",
+    title,
+    body: typeof post.selftext === "string" ? post.selftext.slice(0, ETF_MAX_BODY_LENGTH) : "",
+    url: `https://www.reddit.com${permalink}`,
+    score: clampCount(post.score),
+    comments: clampCount(post.num_comments),
+    publishedAtRaw: Number.isFinite(createdUtc) && createdUtc > 0
+      ? new Date(createdUtc * 1_000).toISOString()
+      : null,
+  };
+}
+
+async function ensureOrigin(page: Page, host: string): Promise<void> {
+  let currentHost = "";
+  try {
+    currentHost = new URL(page.url()).hostname;
+  } catch {
+    currentHost = "";
+  }
+  if (currentHost !== host) {
+    await page.goto(`https://${host}/r/${ETF_SUBREDDITS[0]}/hot/`, { waitUntil: "commit", timeout: 12_000 });
+    await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
+  }
+}
+
+/**
+ * Fetches one subreddit's hot listing through Reddit's JSON API using the
+ * browser context's request client, so the call carries the context cookies
+ * and user agent without depending on a volatile SPA execution context.
+ */
+async function fetchListingJson(page: Page, host: string, subreddit: string): Promise<RedditJsonPost[]> {
+  const response = await page.context().request.get(
+    `https://${host}/r/${subreddit}/hot.json?limit=${LISTING_ROWS_PER_SUBREDDIT}&raw_json=1`,
+    { headers: { accept: "application/json" }, timeout: 12_000 },
+  );
+  if (!response.ok()) throw new Error(`${subreddit} hot.json HTTP ${response.status()}`);
+  const payload = await response.json() as { data?: { children?: Array<{ data?: unknown }> } };
+  return (payload.data?.children ?? [])
+    .map((child) => child?.data ?? null)
+    .filter((child): child is RedditJsonPost => Boolean(child) && typeof child === "object");
+}
+
+async function collectListingsJson(page: Page, host: "www.reddit.com" | "old.reddit.com"): Promise<EtfCollectedRow[]> {
+  // Establish first-party cookies for the request client before the API calls.
+  await ensureOrigin(page, host).catch(() => undefined);
+  const rows: EtfCollectedRow[] = [];
+  let lastError: unknown;
+  for (const subreddit of ETF_SUBREDDITS) {
+    try {
+      const posts = await fetchListingJson(page, host, subreddit);
+      for (const post of posts) {
+        const row = rowFromJsonPost(subreddit.toLowerCase(), post);
+        if (row) rows.push(row);
+      }
+    } catch (error) {
+      // One unreachable subreddit must not drop the other listings.
+      lastError = error;
+    }
+  }
+  if (!rows.length && lastError) throw lastError;
+  return rows;
+}
+
+interface ListingDomRow {
   nativeId: string;
   author: string;
   title: string;
@@ -43,28 +132,12 @@ interface ListingRow {
   publishedAtRaw: string;
 }
 
-async function collectListing(page: Page, host: "old.reddit.com" | "www.reddit.com", subreddit: string): Promise<ListingRow[]> {
-  await page.goto(`https://${host}/r/${subreddit}/hot/`, { waitUntil: "commit", timeout: 12_000 });
+/** DOM fallback for when the JSON API is unavailable to this network path. */
+async function collectListingDom(page: Page, subreddit: string): Promise<ListingDomRow[]> {
+  await page.goto(`https://www.reddit.com/r/${subreddit}/hot/`, { waitUntil: "commit", timeout: 12_000 });
   await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
+  await page.locator("shreddit-post").first().waitFor({ state: "attached", timeout: 8_000 }).catch(() => undefined);
   return page.locator("body").evaluate((body, rowLimit) => {
-    const legacy = Array.from(body.querySelectorAll(".thing.link")).slice(0, rowLimit).map((node) => {
-      const title = node.querySelector<HTMLAnchorElement>("a.title");
-      const comments = node.querySelector<HTMLAnchorElement>("a.comments");
-      const score = node.querySelector<HTMLElement>(".score.unvoted");
-      const time = node.querySelector<HTMLTimeElement>("time");
-      const bodyElement = node.querySelector<HTMLElement>(".usertext-body .md");
-      return {
-        nativeId: (node.getAttribute("data-fullname") ?? "").replace(/^t3_/i, ""),
-        author: node.getAttribute("data-author") ?? "",
-        title: title?.textContent?.trim() ?? "",
-        body: bodyElement?.innerText?.trim() ?? "",
-        url: comments?.href ?? title?.href ?? "",
-        scoreText: score?.getAttribute("title") ?? score?.textContent ?? "",
-        commentsText: comments?.textContent ?? "",
-        publishedAtRaw: time?.dateTime ?? "",
-      };
-    }).filter((row) => row.title && row.url);
-    if (legacy.length) return legacy;
     return Array.from(body.querySelectorAll("shreddit-post")).slice(0, rowLimit).map((node) => {
       const element = node as HTMLElement;
       const href = element.getAttribute("permalink") ?? element.getAttribute("content-href") ?? "";
@@ -85,83 +158,68 @@ async function collectListing(page: Page, host: "old.reddit.com" | "www.reddit.c
   }, LISTING_ROWS_PER_SUBREDDIT);
 }
 
-function rowFromListing(subreddit: string, row: ListingRow): EtfCollectedRow {
-  return {
-    nativeId: row.nativeId,
-    subreddit,
-    author: row.author,
-    title: row.title,
-    body: row.body,
-    url: row.url,
-    score: parseRedditCount(row.scoreText),
-    comments: parseRedditCount(row.commentsText),
-    publishedAtRaw: row.publishedAtRaw.trim() || null,
-  };
-}
-
-async function collectListings(page: Page, host: "old.reddit.com" | "www.reddit.com"): Promise<EtfCollectedRow[]> {
+async function collectListingsDom(page: Page): Promise<EtfCollectedRow[]> {
   const rows: EtfCollectedRow[] = [];
+  let lastError: unknown;
   for (const subreddit of ETF_SUBREDDITS) {
     try {
-      const listing = await collectListing(page, host, subreddit);
-      rows.push(...listing.map((row) => rowFromListing(subreddit.toLowerCase(), row)));
-    } catch {
+      const listing = await collectListingDom(page, subreddit);
+      rows.push(...listing.map((row) => ({
+        nativeId: row.nativeId,
+        subreddit: subreddit.toLowerCase(),
+        author: row.author,
+        title: row.title,
+        body: row.body.slice(0, ETF_MAX_BODY_LENGTH),
+        url: row.url,
+        score: parseRedditCount(row.scoreText),
+        comments: parseRedditCount(row.commentsText),
+        publishedAtRaw: row.publishedAtRaw.trim() || null,
+      })));
+    } catch (error) {
       // One unreachable subreddit must not drop the other listings.
+      lastError = error;
     }
   }
+  if (!rows.length && lastError) throw lastError;
   return rows;
 }
 
-function toOldRedditUrl(url: string): string | null {
+function redditPathname(url: string): string | null {
   try {
     const parsed = new URL(url);
-    if (!/(^|\.)reddit\.com$/i.test(parsed.hostname) && parsed.hostname.toLowerCase() !== "redd.it") return null;
-    parsed.hostname = "old.reddit.com";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString();
+    if (!/(^|\.)reddit\.com$/i.test(parsed.hostname)) return null;
+    return parsed.pathname.endsWith("/") ? parsed.pathname : `${parsed.pathname}/`;
   } catch {
     return null;
   }
 }
 
-function subredditFromUrl(url: string): string {
-  return url.match(/\/r\/([^/]+)\//i)?.[1]?.toLowerCase() ?? "etfs";
+function subredditFromPath(pathname: string): string {
+  return pathname.match(/\/r\/([^/]+)\//i)?.[1]?.toLowerCase() ?? "etfs";
 }
 
-/** Re-observes one tracked post on its old.reddit permalink page. */
+/** Re-observes one tracked post through its permalink JSON document. */
 async function revisitTrackedPost(page: Page, url: string): Promise<EtfCollectedRow | null> {
-  const oldUrl = toOldRedditUrl(url);
-  if (!oldUrl) return null;
-  await page.goto(oldUrl, { waitUntil: "commit", timeout: 12_000 });
-  await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
-  const row = await page.locator("body").evaluate((body) => {
-    const node = body.querySelector("#siteTable .thing.link") ?? body.querySelector(".thing.link");
-    if (!node) return null;
-    const title = node.querySelector<HTMLAnchorElement>("a.title");
-    const comments = node.querySelector<HTMLAnchorElement>("a.comments");
-    const score = node.querySelector<HTMLElement>(".score.unvoted");
-    const time = node.querySelector<HTMLTimeElement>("time");
-    const bodyElement = node.querySelector<HTMLElement>(".usertext-body .md");
-    return {
-      nativeId: (node.getAttribute("data-fullname") ?? "").replace(/^t3_/i, ""),
-      author: node.getAttribute("data-author") ?? "",
-      title: title?.textContent?.trim() ?? "",
-      body: bodyElement?.innerText?.trim() ?? "",
-      url: comments?.href ?? title?.href ?? "",
-      scoreText: score?.getAttribute("title") ?? score?.textContent ?? "",
-      commentsText: comments?.textContent ?? "",
-      publishedAtRaw: time?.dateTime ?? "",
-    };
-  });
-  if (!row || !row.title) return null;
-  return rowFromListing(subredditFromUrl(oldUrl), { ...row, url });
+  const pathname = redditPathname(url);
+  if (!pathname) return null;
+  const response = await page.context().request.get(
+    `https://www.reddit.com${pathname.replace(/\/$/, "")}.json?raw_json=1`,
+    { headers: { accept: "application/json" }, timeout: 12_000 },
+  );
+  if (!response.ok()) throw new Error(`permalink JSON HTTP ${response.status()}`);
+  const payload = await response.json() as Array<{ data?: { children?: Array<{ data?: unknown }> } }>;
+  const post = payload?.[0]?.data?.children?.[0]?.data ?? null;
+  if (!post || typeof post !== "object") return null;
+  const row = rowFromJsonPost(subredditFromPath(pathname), post as RedditJsonPost);
+  return row ? { ...row, url } : null;
 }
 
 /**
  * Collects the hourly ETF review batch: hot listings from the ETF subreddits
  * plus fresh observations for already-tracked posts that fell out of the hot
- * pages, so their 24-hour engagement history keeps updating.
+ * pages, so their 24-hour engagement history keeps updating. The JSON API is
+ * preferred (exact counts, full self-text, ISO timestamps); shreddit DOM
+ * scraping remains as the fallback when JSON is blocked on a network path.
  */
 export async function collectEtfRedditPosts(trackedUrls: string[] = []): Promise<EtfCollectResult> {
   let browser: Browser | undefined;
@@ -178,15 +236,19 @@ export async function collectEtfRedditPosts(trackedUrls: string[] = []): Promise
     page.setDefaultTimeout(10_000);
 
     const listings = await collectFirstAvailable("ETF Reddit", [
-      { name: "Playwright · Reddit 旧版", collect: () => collectListings(page, "old.reddit.com") },
-      { name: "Playwright · Reddit 主站", collect: () => collectListings(page, "www.reddit.com") },
+      { name: "Reddit JSON · 主站", collect: () => collectListingsJson(page, "www.reddit.com") },
+      { name: "Reddit JSON · 旧版", collect: () => collectListingsJson(page, "old.reddit.com") },
+      { name: "Playwright · Reddit 主站 DOM", collect: () => collectListingsDom(page) },
     ]);
     posts.push(...listings.items);
     statuses.push(listings.status);
 
-    const listedUrls = new Set(posts.map((post) => post.url.replace(/^https?:\/\/[^/]+/i, "")));
+    const listedPaths = new Set(posts.map((post) => redditPathname(post.url)).filter(Boolean));
     const revisitTargets = trackedUrls
-      .filter((url) => !listedUrls.has(url.replace(/^https?:\/\/[^/]+/i, "")))
+      .filter((url) => {
+        const pathname = redditPathname(url);
+        return pathname !== null && !listedPaths.has(pathname);
+      })
       .slice(0, MAX_TRACKED_REVISITS);
     let revisited = 0;
     for (const url of revisitTargets) {
@@ -204,7 +266,7 @@ export async function collectEtfRedditPosts(trackedUrls: string[] = []): Promise
       statuses.push({
         name: "ETF 追踪回访",
         channel: "ETF Reddit",
-        backend: "Playwright · 帖子回访",
+        backend: "Reddit JSON · 帖子回访",
         ok: revisited > 0,
         count: revisited,
         note: revisited < revisitTargets.length ? `${revisitTargets.length - revisited} 篇追踪帖本轮未取得更新` : undefined,

@@ -25,6 +25,7 @@ try {
 
 const collected = await collectEtfRedditPosts(trackedUrls);
 console.log(`collected ${collected.posts.length} ETF candidate posts (${trackedUrls.length} tracked revisit targets)`);
+for (const status of collected.statuses) console.log(`collector status: ${JSON.stringify(status)}`);
 
 const response = await fetch(endpoint, {
   method: "POST",
