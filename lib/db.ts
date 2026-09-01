@@ -6302,3 +6302,15 @@ export async function databaseHealth(): Promise<{
     };
   }
 }
+
+/**
+ * Shared query hook for auxiliary storage modules (ETF hot topics). Ensures
+ * the schema and migrations are applied before touching their tables.
+ */
+export async function runEtfQuery<R extends import("pg").QueryResultRow = Record<string, unknown>>(
+  text: string,
+  params?: unknown[],
+): Promise<import("pg").QueryResult<R>> {
+  await ensureSchema();
+  return pool().query<R>(text, params);
+}

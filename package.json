@@ -15,6 +15,7 @@
     "test:evidence:postgres": "tsx scripts/test-source-evidence-postgres.ts",
     "test:what-changed:postgres": "tsx scripts/test-what-changed-postgres.ts",
     "test:stocks": "tsx scripts/test-request-json.ts && tsx scripts/test-stock-payload.ts && tsx scripts/test-stock-db.ts && tsx scripts/test-equity-impact.ts && tsx scripts/test-stock-routes.ts",
+    "test:etf": "tsx scripts/test-etf-topics.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
