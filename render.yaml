@@ -31,7 +31,3 @@ services:
         sync: false
       - key: ENABLE_BROWSER_COLLECTORS
         value: "false"
-      - key: REDDIT_CLIENT_ID
-        sync: false
-      - key: REDDIT_CLIENT_SECRET
-        sync: false

@@ -305,7 +305,7 @@ async function executablePath(): Promise<string> {
   return serverlessChromium.executablePath();
 }
 
-export async function launchBrowser(): Promise<Browser> {
+async function launchBrowser(): Promise<Browser> {
   return playwrightChromium.launch({
     executablePath: await executablePath(),
     headless: true,

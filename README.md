@@ -10,7 +10,6 @@
 | --- | --- |
 | 网站首页 | [analystarena-daily-intelligence.onrender.com](https://analystarena-daily-intelligence.onrender.com/) |
 | 今日热搜榜 | [/trending](https://analystarena-daily-intelligence.onrender.com/trending) |
-| ETFs 热门话题 | [/etf-topics](https://analystarena-daily-intelligence.onrender.com/etf-topics) |
 | 历史日报与 PDF | [/archive](https://analystarena-daily-intelligence.onrender.com/archive) |
 | 人工审核台（需要管理员凭证） | [/review](https://analystarena-daily-intelligence.onrender.com/review) |
 | Reddit 数据服务说明 | [/api/v1/reddit](https://analystarena-daily-intelligence.onrender.com/api/v1/reddit) |
@@ -103,7 +102,6 @@ npm run dev
 - `STOCK_SEARCH_API_TOKEN`：保护美股搜索与新闻关联美股接口；调用方使用 Bearer Token 或 `X-API-Key`。
 - `OPENAI_API_KEY`：启用 AI 摘要、事件合并与影响判断；未设置时自动翻译仍会运行。
 - `X_AUTH_TOKEN`：可选；放在 GitHub Actions repository secret。未设置时 X Playwright 会安全跳过登录限定搜索。
-- `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`：可选；Reddit 应用凭证（[reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) 创建 script 应用）。配置后 ETF 热门话题的服务器端采集走 Reddit 官方 OAuth API，最稳定；未配置时退回公开 JSON 列表。
 - `ENABLE_BROWSER_COLLECTORS=true`：只供本机测试直接启用 Playwright；Render 正式环境保持 `false`。
 
 ## 每日排程
@@ -111,8 +109,6 @@ npm run dev
 `.github/workflows/daily-brief.yml` 每天北京时间 07:00 在 GitHub Actions 先用 crawl4ai 采集文章全文（失败不阻塞日报），再执行 Playwright，把全文与 Reddit/X 素材一起传给 Render 生成草稿。请把与 Render 相同的 `CRON_SECRET` 加入 GitHub Actions repository secret；需要登录 X 搜索时，再加入 `X_AUTH_TOKEN`。
 
 `.github/workflows/sync-stocks.yml` 每天北京时间 05:30 使用 yfinance 更新美股主档与近三个月日线，再分批写入 Render。它同样使用 `CRON_SECRET`，可用 GitHub repository variable `STOCK_SYNC_ENDPOINT` 覆盖目标网址。
-
-`.github/workflows/etf-topics.yml` 每小时采集 Reddit ETF 社区的热门讨论并提交整点评审：选出流量最高的前五篇、翻译成简体中文并整理重点，入选帖持续追踪 24 小时（同时最多 120 篇）；每天北京时间 00:00 统整前一天为历史日报，每周一再统整 7 天为周报。完整设计见 [ETFs 热门话题](docs/etf-hot-topics.md)。
 
 Playwright 不直接运行在 Render，避免免费方案的内存被 Chromium 耗尽而重启服务。
 
